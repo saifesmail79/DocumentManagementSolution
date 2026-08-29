@@ -1,0 +1,45 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/**
+ * Design tokens, verbatim from docs/UI_UX_AGENT_STANDARDS.md section 1.
+ * Stored as space-separated RGB channels so Tailwind's <alpha-value> modifier
+ * works (bg-primary/10, divide-border/50).
+ */
+:root {
+  --color-primary: 28 100 242;
+  --color-primary-dark: 26 86 219;
+  --color-accent: 249 115 22;
+  --color-surface: 255 255 255;
+  --color-surface-muted: 241 245 249;
+  --color-control: 255 255 255;
+  --color-text: 15 23 42;
+  --color-text-muted: 100 116 139;
+  --color-border: 203 213 225;
+  --color-border-strong: 148 163 184;
+  --color-sidebar: 15 23 42;
+  --color-sidebar-foreground: 226 232 240;
+  --color-sidebar-muted: 148 163 184;
+  --color-on-primary: 255 255 255;
+  --color-success: 16 185 129;
+  --color-warning: 245 158 11;
+  --color-danger: 239 68 68;
+}
+
+@layer base {
+  body {
+    @apply bg-surface-muted text-text antialiased;
+    /* Segoe UI carries a complete Arabic face on Windows, which is the whole
+       deployment target. Tahoma is the fallback that every older Windows has. */
+    font-family: 'Segoe UI', Tahoma, 'Noto Naskh Arabic', system-ui, sans-serif;
+  }
+
+  /* Numbers stay LTR even inside RTL text — an amount or a date reversed by the
+     bidi algorithm is unreadable. */
+  .num {
+    direction: ltr;
+    unicode-bidi: embed;
+    font-variant-numeric: tabular-nums;
+  }
+}

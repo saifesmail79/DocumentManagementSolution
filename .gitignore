@@ -16,6 +16,7 @@ server/logs/*.log
 dist/
 build/
 client/dist/
+client/node_modules/
 
 # Editor / OS
 # Ignore personal editor settings but share the build task, so Ctrl+Shift+B works

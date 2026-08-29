@@ -1,0 +1,18 @@
+<!doctype html>
+<!--
+  lang="ar" dir="rtl" is set on <html>, not on a wrapper div: it makes RTL the
+  document default, so every logical property, scrollbar and text input inherits
+  it. The guide's rtl:/ltr: variants then only need to appear where a component
+  must differ.
+-->
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>نظام إدارة الوثائق</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

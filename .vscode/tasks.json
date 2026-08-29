@@ -19,9 +19,26 @@
       "problemMatcher": []
     },
     {
+      "label": "Start Frontend",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": {
+        "cwd": "${workspaceFolder}/client"
+      },
+      "presentation": {
+        "label": "DMS Web",
+        "group": "dms",
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": true
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
       "label": "Start Backend + Frontend",
-      "detail": "Ctrl+Shift+B — runs the DMS API. The frontend task is added when the React app is scaffolded.",
-      "dependsOn": ["Start Backend"],
+      "detail": "Ctrl+Shift+B - API on :3040, Vite dev server on :5173",
+      "dependsOn": ["Start Backend", "Start Frontend"],
       "dependsOrder": "parallel",
       "group": {
         "kind": "build",

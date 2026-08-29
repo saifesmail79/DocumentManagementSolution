@@ -13,6 +13,11 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import cookie from '@fastify/cookie';
 import multipart from '@fastify/multipart';
+import fastifyStatic from '@fastify/static';
+
+import path from 'node:path';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 import { config } from './config/index.js';
 import { logger, moduleLogger } from './lib/logger.js';
@@ -62,6 +67,8 @@ export async function buildApp({ logger: withLogger = true } = {}) {
   await app.register(documentRoutes, { prefix: '/api' });
   await app.register(searchRoutes, { prefix: '/api/search' });
 
+  await registerClient(app);
+
   /**
    * Liveness and readiness in one. Returns 503 when the database is unreachable
    * so an orchestrator restarts the process instead of routing traffic to it.
@@ -78,4 +85,39 @@ export async function buildApp({ logger: withLogger = true } = {}) {
 
   await app.ready();
   return app;
+}
+
+/**
+ * Serves the built React client, when it has been built.
+ *
+ * One process serving both the API and the UI is the right shape for an on-prem
+ * Windows install: one service to register, one port to open in the firewall,
+ * and the session cookie is first-party because there is only one origin.
+ *
+ * In development the client runs under Vite on :5173 and proxies /api here, so
+ * dist/ is usually absent — hence the check rather than a hard failure.
+ */
+async function registerClient(app) {
+  const clientDist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../client/dist');
+
+  if (!existsSync(path.join(clientDist, 'index.html'))) {
+    log.warn(
+      { clientDist },
+      'client not built - API only. Run "npm run build:client" to serve the UI from this process.',
+    );
+    return;
+  }
+
+  await app.register(fastifyStatic, { root: clientDist, prefix: '/' });
+
+  // SPA fallback: the router owns /folders/123, which is not a file on disk.
+  // Anything under /api is left alone so a bad API path still 404s as JSON
+  // rather than returning index.html, which would surface as a JSON parse error
+  // in the client and hide the real problem.
+  app.setNotFoundHandler((request, reply) => {
+    if (request.raw.url?.startsWith('/api')) {
+      return reply.code(404).send({ error: 'not_found' });
+    }
+    return reply.sendFile('index.html');
+  });
 }
