@@ -5,6 +5,7 @@ import { Folder, FileText, Upload, FolderPlus, Trash2, Download, ChevronLeft } f
 import { api, ApiError } from '../api.js';
 import { formatDate } from '../format.js';
 import { Button, IconButton, Card, Spinner, EmptyState, Alert, ReadOnlyBadge } from '../components/ui.jsx';
+import ScanPanel from '../components/ScanPanel.jsx';
 
 /**
  * Folder browser: subfolders and documents for one folder.
@@ -138,6 +139,13 @@ export default function Browse() {
       </div>
 
       {error ? <Alert tone="error">{error}</Alert> : null}
+
+      {/* Scanning sits beside the ordinary upload, never replacing it: without
+          the bridge installed this renders a short note and the file picker
+          above keeps working unchanged. */}
+      {folderId && permissions.upload ? (
+        <ScanPanel folderId={folderId} onUploaded={load} />
+      ) : null}
 
       {folderCount > 0 ? (
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
