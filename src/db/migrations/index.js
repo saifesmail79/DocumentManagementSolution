@@ -26,6 +26,7 @@
 
 import { m0001IdentityAndAcl } from './0001-identity-and-acl.js';
 import { m0002DocumentsAndMetadata } from './0002-documents-and-metadata.js';
+import { m0003Sessions } from './0003-sessions.js';
 
 /**
  * @typedef {object} Migration
@@ -39,4 +40,5 @@ import { m0002DocumentsAndMetadata } from './0002-documents-and-metadata.js';
 export const MIGRATIONS = [
   m0001IdentityAndAcl,
   m0002DocumentsAndMetadata,
+  m0003Sessions,
 ];

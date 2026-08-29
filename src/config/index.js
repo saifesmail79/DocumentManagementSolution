@@ -133,6 +133,33 @@ export const config = Object.freeze({
     purgeGraceDays: integer('STORAGE_PURGE_GRACE_DAYS', 30, { min: 1 }),
   }),
 
+  auth: Object.freeze({
+    /** How long a session stays valid without re-authenticating. */
+    sessionTtlHours: integer('AUTH_SESSION_TTL_HOURS', 12, { min: 1, max: 24 * 30 }),
+    /**
+     * Sliding window: a session in active use has its expiry pushed out, but no
+     * further than absoluteTtlHours from creation. Without an absolute ceiling a
+     * session that is polled forever never expires at all.
+     */
+    absoluteTtlHours: integer('AUTH_SESSION_ABSOLUTE_TTL_HOURS', 24 * 7, { min: 1 }),
+    /** Failed attempts before the account locks. */
+    maxFailedLogins: integer('AUTH_MAX_FAILED_LOGINS', 5, { min: 3, max: 50 }),
+    /** How long the lock lasts. Temporary by design: a permanent lock is a denial-of-service against a real user. */
+    lockoutMinutes: integer('AUTH_LOCKOUT_MINUTES', 15, { min: 1, max: 24 * 60 }),
+    /**
+     * Minimum password length. NIST 800-63B: length beats composition rules, and
+     * forced rotation makes passwords worse, so neither is imposed here.
+     */
+    minPasswordLength: integer('AUTH_MIN_PASSWORD_LENGTH', 12, { min: 8, max: 128 }),
+    /** Cookie name for the session token. */
+    cookieName: optional('AUTH_COOKIE_NAME', 'dms_session'),
+    /**
+     * Secure cookies require HTTPS. On by default in production; a developer on
+     * plain http://localhost would otherwise never receive the cookie at all.
+     */
+    cookieSecure: boolean('AUTH_COOKIE_SECURE', optional('NODE_ENV', 'development') === 'production'),
+  }),
+
   logging: Object.freeze({
     level: optional('LOG_LEVEL', 'info'),
     pretty: boolean('LOG_PRETTY', optional('NODE_ENV', 'development') !== 'production'),

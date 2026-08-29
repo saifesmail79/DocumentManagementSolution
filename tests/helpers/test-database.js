@@ -71,6 +71,7 @@ export function resolveTestDatabase() {
  * deep, so a single DELETE cannot satisfy FK_folders_parent.
  */
 const TRUNCATION_ORDER = [
+  'user_sessions',
   'document_tags',
   'tags',
   'document_field_values',
