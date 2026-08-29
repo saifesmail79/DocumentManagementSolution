@@ -37,6 +37,8 @@ import {
   explainPermission,
 } from './acl.js';
 import { queueStats } from '../extraction/worker.js';
+import { listAudit, auditActions, record, ACTION } from '../audit/service.js';
+import { purgeDeletedDocuments, purgeOrphanedUploads, findMissingBlobs } from '../storage-maintenance/purge.js';
 
 const STATUS = {
   invalid_username: 400,
@@ -155,6 +157,51 @@ export async function adminRoutes(app) {
 
     /** Extraction health, so "why can search not find this" has an answer. */
     identity.get('/extraction/stats', async () => queueStats());
+
+    /** The audit trail. */
+    identity.get('/audit', async (request) => {
+      const { actor, action, targetType, targetId, folderId, from, to, limit, cursor } =
+        request.query ?? {};
+
+      const page = await listAudit({
+        actorUserId: parseId(actor),
+        action: action || null,
+        targetType: targetType || null,
+        targetId: targetId || null,
+        folderId: parseId(folderId),
+        from: from ? new Date(from).toISOString() : null,
+        to: to ? new Date(to).toISOString() : null,
+        limit: Number(limit) || 50,
+        cursor: decodeCursor(cursor),
+      });
+
+      return { ...page, nextCursor: encodeCursor(page.nextCursor) };
+    });
+
+    identity.get('/audit/actions', async () => ({ actions: await auditActions() }));
+
+    /** Integrity check: rows whose file is not on disk. */
+    identity.get('/storage/missing', async (request) =>
+      findMissingBlobs({ max: Number(request.query?.max) || 1000 }),
+    );
+
+    /** Runs the purge sweep now. dryRun reports without deleting. */
+    identity.post('/storage/purge', async (request) => {
+      const dryRun = request.body?.dryRun === true;
+      const documents = await purgeDeletedDocuments({ dryRun });
+      const uploads = dryRun ? { temp: 0, staging: 0 } : await purgeOrphanedUploads();
+
+      if (!dryRun) {
+        await record({
+          actor: request.user,
+          action: ACTION.BLOB_PURGED,
+          detail: `manual sweep: ${documents.purged} blob(s)`,
+          request,
+        });
+      }
+
+      return { documents, uploads };
+    });
   });
 
   // ── Folder permissions: MANAGE_PERMS, checked per folder ───────────────
@@ -216,6 +263,21 @@ export async function adminRoutes(app) {
       }),
     ),
   );
+}
+
+/** Audit cursors travel opaque, so a client cannot craft one that reorders a page. */
+function encodeCursor(cursor) {
+  return cursor ? Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url') : null;
+}
+
+function decodeCursor(raw) {
+  if (!raw) return undefined;
+  try {
+    const decoded = JSON.parse(Buffer.from(String(raw), 'base64url').toString('utf8'));
+    return decoded?.occurredAt && decoded?.auditId ? decoded : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** bigint ids stay strings — Number() loses precision past 2^53. */

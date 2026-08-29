@@ -12,6 +12,8 @@ import { config } from '../../config/index.js';
 import { moduleLogger } from '../../lib/logger.js';
 import { login, changePassword } from './service.js';
 import { resolveSession, touchSession, revokeSession, revokeAllSessions } from './sessions.js';
+import { requestReset, checkResetToken, completeReset } from './reset.js';
+import { record, ACTION } from '../audit/service.js';
 
 const log = moduleLogger('auth');
 
@@ -92,6 +94,16 @@ async function authRoutes(app) {
     if (!result.ok) {
       // 423 Locked is distinguishable on purpose; every other failure is one
       // indistinguishable 401. See service.js.
+      // Recorded without an actor id: the account may not exist, and inventing a
+      // link to one would be a lie in the trail.
+      await record({
+        action: ACTION.LOGIN_FAILED,
+        targetType: 'username',
+        targetId: typeof username === 'string' ? username.slice(0, 64) : null,
+        detail: result.reason,
+        request,
+      });
+
       const status = result.reason === 'account_locked' ? 423 : 401;
       return reply.code(status).send({
         error: result.reason,
@@ -104,11 +116,18 @@ async function authRoutes(app) {
       expires: result.expiresAt,
     });
 
+    await record({
+      actor: { userId: result.user.userId, username: result.user.username },
+      action: ACTION.LOGIN_SUCCEEDED,
+      request,
+    });
+
     return { user: result.user, expiresAt: result.expiresAt };
   });
 
   app.post('/logout', async (request, reply) => {
     if (request.sessionId) await revokeSession(request.sessionId);
+    if (request.user) await record({ actor: request.user, action: ACTION.LOGOUT, request });
     reply.clearCookie(config.auth.cookieName, cookieOptions());
     return { ok: true };
   });
@@ -146,9 +165,45 @@ async function authRoutes(app) {
         return reply.code(status).send({ error: result.reason, problems: result.problems });
       }
 
+      await record({ actor: request.user, action: ACTION.PASSWORD_CHANGED, request });
       return { ok: true, revokedSessions: result.revokedSessions };
     },
   );
+
+  /**
+   * Self-service reset. These three are the only unauthenticated routes besides
+   * login -- the whole point is that the user cannot sign in.
+   */
+  app.post('/reset/request', async (request) => {
+    const { username } = request.body ?? {};
+    await requestReset({ username, ipAddress: request.ip });
+    await record({
+      action: ACTION.PASSWORD_RESET_REQUESTED,
+      targetType: 'username',
+      targetId: typeof username === 'string' ? username.slice(0, 64) : null,
+      request,
+    });
+    // Always the same answer, whether or not the account exists.
+    return { ok: true };
+  });
+
+  app.get('/reset/check', async (request, reply) => {
+    const result = await checkResetToken(request.query?.token);
+    return result.ok ? { ok: true, username: result.username } : reply.code(400).send({ error: result.reason });
+  });
+
+  app.post('/reset/complete', async (request, reply) => {
+    const { token, newPassword } = request.body ?? {};
+    const result = await completeReset({ token, newPassword });
+
+    if (!result.ok) {
+      const status = result.reason === 'weak_password' ? 400 : 400;
+      return reply.code(status).send({ error: result.reason, problems: result.problems });
+    }
+
+    await record({ action: ACTION.PASSWORD_RESET_COMPLETED, request });
+    return { ok: true };
+  });
 
   /** Signs the user out everywhere, including the current session. */
   app.post('/logout-all', { preHandler: app.requireAuth }, async (request, reply) => {

@@ -259,7 +259,12 @@ export default function Browse() {
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center gap-2">
                           <FileText size={15} className="shrink-0 text-text-muted" />
-                          <span className="font-medium text-text">{doc.title}</span>
+                          <button
+                            onClick={() => navigate(`/documents/${doc.documentId}`)}
+                            className="font-medium text-text hover:text-primary hover:underline"
+                          >
+                            {doc.title}
+                          </button>
                           {!doc.canRead ? <ReadOnlyBadge /> : null}
                         </div>
                       </td>

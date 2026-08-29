@@ -17,6 +17,7 @@ import ChangePassword from './pages/ChangePassword.jsx';
 import Browse from './pages/Browse.jsx';
 import Search from './pages/Search.jsx';
 import Admin from './pages/Admin.jsx';
+import DocumentDetail from './pages/DocumentDetail.jsx';
 
 /**
  * Application shell, per docs/UI_UX_AGENT_STANDARDS.md section 2:
@@ -146,6 +147,7 @@ function Shell() {
               <Route path="/" element={<Navigate to="/folders" replace />} />
               <Route path="/folders" element={<Browse />} />
               <Route path="/folders/:folderId" element={<Browse />} />
+              <Route path="/documents/:documentId" element={<DocumentDetail />} />
               <Route path="/search" element={<Search />} />
               <Route path="/admin" element={<Admin />} />
               <Route path="/password" element={<ChangePassword />} />

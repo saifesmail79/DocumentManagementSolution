@@ -18,6 +18,7 @@ import {
   getDocument,
   deleteDocument,
 } from './service.js';
+import { record, ACTION } from '../audit/service.js';
 
 /** Maps a service failure to a status code. not_found covers "exists but invisible". */
 const STATUS = {
@@ -63,6 +64,17 @@ export async function documentRoutes(app) {
     });
 
     if (!result.ok) return reply.code(STATUS[result.reason] ?? 400).send({ error: result.reason });
+
+    await record({
+      actor: request.user,
+      action: ACTION.DOCUMENT_CREATED,
+      targetType: 'document',
+      targetId: result.documentId,
+      folderId,
+      detail: title,
+      request,
+    });
+
     return reply.code(201).send(result);
   });
 
@@ -84,6 +96,16 @@ export async function documentRoutes(app) {
     });
 
     if (!result.ok) return reply.code(STATUS[result.reason] ?? 400).send({ error: result.reason });
+
+    await record({
+      actor: request.user,
+      action: ACTION.DOCUMENT_VERSION_ADDED,
+      targetType: 'document',
+      targetId: documentId,
+      detail: `v${result.version}`,
+      request,
+    });
+
     return reply.code(201).send(result);
   });
 
@@ -111,6 +133,17 @@ export async function documentRoutes(app) {
     const version = toNullableInt(request.query.version);
     const found = await getVersionForRead({ userId: request.user.userId, documentId, version });
     if (!found) return reply.code(404).send({ error: 'not_found' });
+
+    // Recorded before streaming: who read what is the question an audit of a
+    // document system is actually asked.
+    await record({
+      actor: request.user,
+      action: ACTION.DOCUMENT_DOWNLOADED,
+      targetType: 'document',
+      targetId: documentId,
+      detail: `v${found.versionNumber}`,
+      request,
+    });
 
     const filename = found.originalFilename || `${found.title}`;
 
@@ -155,6 +188,15 @@ export async function documentRoutes(app) {
 
     const result = await deleteDocument({ userId: request.user.userId, documentId });
     if (!result.ok) return reply.code(STATUS[result.reason] ?? 400).send({ error: result.reason });
+
+    await record({
+      actor: request.user,
+      action: ACTION.DOCUMENT_DELETED,
+      targetType: 'document',
+      targetId: documentId,
+      request,
+    });
+
     return { ok: true };
   });
 }

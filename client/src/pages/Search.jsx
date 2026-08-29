@@ -118,7 +118,12 @@ export default function Search() {
                     <FileText size={16} className="shrink-0 text-text-muted" />
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
-                        <span className="truncate text-sm font-medium text-text">{item.title}</span>
+                        <button
+                          onClick={() => navigate(`/documents/${item.documentId}`)}
+                          className="truncate text-sm font-medium text-text hover:text-primary hover:underline"
+                        >
+                          {item.title}
+                        </button>
                         {!item.canRead ? <ReadOnlyBadge /> : null}
                       </div>
                       <button

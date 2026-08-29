@@ -57,6 +57,17 @@ export const api = {
   createFolder: (parentId, name) => request('/api/folders', { method: 'POST', body: { parentId, name } }),
 
   document: (documentId) => request(`/api/documents/${documentId}`),
+  updateMetadata: (documentId, body) =>
+    request(`/api/documents/${documentId}/metadata`, { method: 'PATCH', body }),
+
+  metadata: {
+    types: () => request('/api/metadata/types'),
+    fields: (typeId) => request(`/api/metadata/fields${typeId ? `?typeId=${typeId}` : ''}`),
+    labels: () => request('/api/metadata/labels'),
+    createType: (body) => request('/api/metadata/types', { method: 'POST', body }),
+    createField: (body) => request('/api/metadata/fields', { method: 'POST', body }),
+    createLabel: (body) => request('/api/metadata/labels', { method: 'POST', body }),
+  },
   deleteDocument: (documentId) => request(`/api/documents/${documentId}`, { method: 'DELETE' }),
   contentUrl: (documentId, version) =>
     `/api/documents/${documentId}/content${version ? `?version=${version}` : ''}`,

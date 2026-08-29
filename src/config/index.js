@@ -131,6 +131,10 @@ export const config = Object.freeze({
     verifyOnReadMaxBytes: integer('STORAGE_VERIFY_ON_READ_MAX_BYTES', 4 * 1024 * 1024, { min: 0 }),
     /** Days a soft-deleted file survives before the sweep removes it from disk. */
     purgeGraceDays: integer('STORAGE_PURGE_GRACE_DAYS', 30, { min: 1 }),
+    /** The sweep that reclaims purged blobs and abandoned uploads. */
+    purgeEnabled: boolean('STORAGE_PURGE_ENABLED', true),
+    /** Nothing here is time-sensitive; hourly keeps it off the disk's back. */
+    purgeIntervalMs: integer('STORAGE_PURGE_INTERVAL_MS', 3_600_000, { min: 60_000 }),
   }),
 
   auth: Object.freeze({
@@ -158,6 +162,18 @@ export const config = Object.freeze({
      * plain http://localhost would otherwise never receive the cookie at all.
      */
     cookieSecure: boolean('AUTH_COOKIE_SECURE', optional('NODE_ENV', 'development') === 'production'),
+    /** How long a self-service reset link stays valid. Short by design. */
+    resetTokenMinutes: integer('AUTH_RESET_TOKEN_MINUTES', 30, { min: 5, max: 24 * 60 }),
+    /**
+     * How a reset link reaches the user. Only 'log' is implemented -- it writes
+     * the link to the application log, which suits a small on-prem install where
+     * an administrator can read it. A reset flow that silently drops its email
+     * is worse than none, so nothing pretends to send until a real transport
+     * exists here.
+     */
+    resetDelivery: optional('AUTH_RESET_DELIVERY', 'log'),
+    /** Base URL the reset link points at, i.e. where the browser reaches this app. */
+    resetLinkBase: optional('AUTH_RESET_LINK_BASE', 'http://localhost:5173'),
   }),
 
   extraction: Object.freeze({

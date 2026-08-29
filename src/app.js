@@ -27,6 +27,7 @@ import { treeRoutes } from './modules/tree/routes.js';
 import { documentRoutes } from './modules/documents/routes.js';
 import { searchRoutes } from './modules/search/routes.js';
 import { adminRoutes } from './modules/admin/routes.js';
+import { metadataRoutes, documentMetadataRoutes } from './modules/metadata/routes.js';
 
 const log = moduleLogger('server');
 
@@ -68,6 +69,8 @@ export async function buildApp({ logger: withLogger = true } = {}) {
   await app.register(documentRoutes, { prefix: '/api' });
   await app.register(searchRoutes, { prefix: '/api/search' });
   await app.register(adminRoutes, { prefix: '/api/admin' });
+  await app.register(metadataRoutes, { prefix: '/api/metadata' });
+  await app.register(documentMetadataRoutes, { prefix: '/api/documents' });
 
   await registerClient(app);
 

@@ -354,12 +354,16 @@ export async function getDocument({ userId, documentId }) {
       }))
     : [];
 
+  const { getDocumentFields } = await import('../metadata/service.js');
+
   return {
     documentId: String(row.document_id),
     folderId: String(row.folder_id),
     title: row.title,
+    fields: await getDocumentFields(documentId),
     typeId: row.type_id,
     typeName: row.type_name,
+    sensitivityLabelId: row.sensitivity_label_id === null ? null : Number(row.sensitivity_label_id),
     sensitivity: row.sensitivity_name,
     currentVersion: Number(row.current_version),
     createdAt: row.created_at,

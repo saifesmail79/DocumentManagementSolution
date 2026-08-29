@@ -14,6 +14,7 @@ import {
   listTree,
   getAncestors,
 } from './service.js';
+import { record, ACTION } from '../audit/service.js';
 
 export async function treeRoutes(app) {
   // Nothing in this module is reachable without a session.
@@ -77,6 +78,16 @@ export async function treeRoutes(app) {
       const status = { invalid_name: 400, too_deep: 400, forbidden: 403, not_found: 404 }[result.reason] ?? 400;
       return reply.code(status).send({ error: result.reason });
     }
+
+    await record({
+      actor: request.user,
+      action: ACTION.FOLDER_CREATED,
+      targetType: 'folder',
+      targetId: result.folderId,
+      folderId: result.folderId,
+      detail: name,
+      request,
+    });
 
     return reply.code(201).send({ folderId: String(result.folderId) });
   });
