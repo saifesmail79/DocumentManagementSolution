@@ -250,6 +250,39 @@ export class FilesystemDriver {
    * Removes a file. Callers must only reach here via the purge sweep, after the
    * grace period — never inline with a user's delete, which is a soft delete.
    */
+  /**
+   * Moves an already-durable file to its final path.
+   *
+   * This exists to keep the database transaction short. A document's final path
+   * contains its id, which only exists once the row is inserted — so the naive
+   * order is "open transaction, insert, stream the upload, commit", which holds a
+   * transaction open for as long as it takes to push 200MB over SMB.
+   *
+   * Instead the upload is written durably to a staging path first (put() has
+   * already fsynced it), and the transaction does: insert the row, promote the
+   * file, commit. The promote is a rename on the same volume — a metadata
+   * operation, microseconds — so the transaction stays short while the invariant
+   * holds: no committed row ever points at a file that is not on disk.
+   *
+   * A crash between the promote and the commit leaves an unreferenced file, which
+   * the sweep removes. That is the safe direction to fail.
+   */
+  async promote(fromRelativePath, toRelativePath) {
+    const from = this.absolute(fromRelativePath);
+    const to = this.absolute(toRelativePath);
+
+    try {
+      await mkdir(path.dirname(to), { recursive: true });
+      await rename(from, to);
+      return { relativePath: assertSafeRelativePath(toRelativePath) };
+    } catch (cause) {
+      throw new StorageError(
+        `Failed to move ${fromRelativePath} into place at ${toRelativePath}: ${cause.message}`,
+        { code: 'storage_promote_failed', cause },
+      );
+    }
+  }
+
   async remove(relativePath) {
     const absolute = this.absolute(relativePath);
     await rm(absolute, { force: true });

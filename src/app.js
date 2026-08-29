@@ -12,12 +12,14 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import cookie from '@fastify/cookie';
+import multipart from '@fastify/multipart';
 
 import { config } from './config/index.js';
 import { logger, moduleLogger } from './lib/logger.js';
 import { verifyConnection } from './db/index.js';
 import { registerAuth } from './modules/auth/routes.js';
 import { treeRoutes } from './modules/tree/routes.js';
+import { documentRoutes } from './modules/documents/routes.js';
 
 const log = moduleLogger('server');
 
@@ -46,10 +48,17 @@ export async function buildApp({ logger: withLogger = true } = {}) {
   // request.cookies, and Fastify runs hooks in registration order.
   await app.register(cookie);
 
+  // Uploads stream to storage rather than buffering: a 200MB scan batch held in
+  // memory is 200MB of heap per concurrent upload.
+  await app.register(multipart, {
+    limits: { fileSize: config.storage.maxUploadBytes, files: 1 },
+  });
+
   // Called with the root instance on purpose — see the note in modules/auth/routes.js.
   registerAuth(app);
 
   await app.register(treeRoutes, { prefix: '/api/folders' });
+  await app.register(documentRoutes, { prefix: '/api' });
 
   /**
    * Liveness and readiness in one. Returns 503 when the database is unreachable

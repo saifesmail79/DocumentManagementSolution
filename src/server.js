@@ -16,6 +16,7 @@ import { config } from './config/index.js';
 import { moduleLogger } from './lib/logger.js';
 import { verifyConnection, checkFullTextSearch, closeDatabase } from './db/index.js';
 import { buildApp } from './app.js';
+import { storage } from './storage/index.js';
 
 const log = moduleLogger('server');
 
@@ -25,6 +26,11 @@ async function start() {
   // Fail loudly here rather than on the first user request.
   await verifyConnection();
   await checkFullTextSearch();
+
+  // Probes that the storage root is reachable, writable, and honours flushes.
+  // On-prem this is where a misconfigured STORAGE_ROOT surfaces -- at startup
+  // with a clear message, rather than on the first user's upload.
+  await storage.init();
 
   app = await buildApp();
 
