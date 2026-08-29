@@ -7,7 +7,7 @@
  * implying the search was exhaustive when extraction has not run yet.
  */
 
-import { search, searchByField, contentSearchAvailable } from './service.js';
+import { search, advancedSearch, searchByField, contentSearchAvailable } from './service.js';
 
 export async function searchRoutes(app) {
   app.addHook('preHandler', app.requireAuth);
@@ -29,6 +29,32 @@ export async function searchRoutes(app) {
       includeContent: content !== 'false' && content !== '0',
       limit: toNullableInt(limit) ?? 25,
       offset: toNullableInt(offset) ?? 0,
+    });
+  });
+
+  /**
+   * Multi-criteria search — the blueprint's mandatory attribute search.
+   *
+   * POST rather than GET because the criteria are a structured object, not a
+   * handful of query-string values, and a saved search is something a client
+   * will want to round-trip as JSON.
+   */
+  app.post('/advanced', async (request) => {
+    const body = request.body ?? {};
+
+    return advancedSearch({
+      userId: request.user.userId,
+      query: body.q ?? null,
+      folderId: parseId(body.folderId),
+      typeId: toNullableInt(body.typeId),
+      labelId: toNullableInt(body.labelId),
+      createdFrom: body.createdFrom ? new Date(body.createdFrom).toISOString() : null,
+      createdTo: body.createdTo ? new Date(body.createdTo).toISOString() : null,
+      tags: Array.isArray(body.tags) ? body.tags : null,
+      fields: Array.isArray(body.fields) ? body.fields : [],
+      includeContent: body.content !== false,
+      limit: toNullableInt(body.limit) ?? 25,
+      offset: toNullableInt(body.offset) ?? 0,
     });
   });
 

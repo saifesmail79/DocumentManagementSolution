@@ -52,9 +52,12 @@ export const ACTION = Object.freeze({
   DOCUMENT_VERSION_ADDED: 'document.version_added',
   DOCUMENT_DOWNLOADED: 'document.downloaded',
   DOCUMENT_DELETED: 'document.deleted',
+  DOCUMENT_RESTORED: 'document.restored',
+  DOCUMENT_PURGE_REQUESTED: 'document.purge_requested',
   DOCUMENT_METADATA_CHANGED: 'document.metadata_changed',
 
   BLOB_PURGED: 'storage.blob_purged',
+  SETTING_CHANGED: 'settings.changed',
 });
 
 /**

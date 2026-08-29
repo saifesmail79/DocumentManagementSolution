@@ -15,8 +15,8 @@
     "install:client": "npm --prefix client install",
     "dev:client": "npm --prefix client run dev",
     "build:client": "npm --prefix client run build",
-    "test": "node --test --test-concurrency=1 tests/arabic.test.js tests/storage.test.js tests/acl.integration.test.js tests/documents.integration.test.js tests/auth.integration.test.js tests/tree.integration.test.js tests/documents.upload.test.js tests/search.integration.test.js tests/extraction.integration.test.js tests/admin.integration.test.js tests/audit.integration.test.js tests/metadata.integration.test.js tests/ocr.integration.test.js tests/manifest.integration.test.js",
-    "test:db": "node --test --test-concurrency=1 tests/acl.integration.test.js tests/documents.integration.test.js tests/auth.integration.test.js tests/tree.integration.test.js tests/documents.upload.test.js tests/search.integration.test.js tests/extraction.integration.test.js tests/admin.integration.test.js tests/audit.integration.test.js tests/metadata.integration.test.js tests/ocr.integration.test.js tests/manifest.integration.test.js"
+    "test": "node --test --test-concurrency=1 tests/arabic.test.js tests/storage.test.js tests/acl.integration.test.js tests/documents.integration.test.js tests/auth.integration.test.js tests/tree.integration.test.js tests/documents.upload.test.js tests/search.integration.test.js tests/extraction.integration.test.js tests/admin.integration.test.js tests/audit.integration.test.js tests/metadata.integration.test.js tests/ocr.integration.test.js tests/manifest.integration.test.js tests/tier1-gaps.integration.test.js",
+    "test:db": "node --test --test-concurrency=1 tests/acl.integration.test.js tests/documents.integration.test.js tests/auth.integration.test.js tests/tree.integration.test.js tests/documents.upload.test.js tests/search.integration.test.js tests/extraction.integration.test.js tests/admin.integration.test.js tests/audit.integration.test.js tests/metadata.integration.test.js tests/ocr.integration.test.js tests/manifest.integration.test.js tests/tier1-gaps.integration.test.js"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",

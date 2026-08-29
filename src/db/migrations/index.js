@@ -29,6 +29,8 @@ import { m0002DocumentsAndMetadata } from './0002-documents-and-metadata.js';
 import { m0003Sessions } from './0003-sessions.js';
 import { m0004Search } from './0004-search.js';
 import { m0005AuditAndReset } from './0005-audit-and-reset.js';
+import { m0006SettingsAndFieldTypes } from './0006-settings-and-field-types.js';
+import { m0007WidenDataType } from './0007-widen-data-type.js';
 
 /**
  * @typedef {object} Migration
@@ -45,4 +47,6 @@ export const MIGRATIONS = [
   m0003Sessions,
   m0004Search,
   m0005AuditAndReset,
+  m0006SettingsAndFieldTypes,
+  m0007WidenDataType,
 ];

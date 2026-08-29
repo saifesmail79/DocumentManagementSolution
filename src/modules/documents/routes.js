@@ -19,10 +19,15 @@ import {
   deleteDocument,
 } from './service.js';
 import { record, ACTION } from '../audit/service.js';
+import { listRecycleBin, restoreDocument, purgeNow, findDuplicates } from './lifecycle.js';
 
 /** Maps a service failure to a status code. not_found covers "exists but invisible". */
 const STATUS = {
   invalid_title: 400,
+  required_field: 400,
+  duplicate: 409,
+  not_deleted: 409,
+  content_purged: 410,
   empty_file: 400,
   no_file: 400,
   too_large: 413,
@@ -52,6 +57,10 @@ export async function documentRoutes(app) {
 
     const title = firstValue(part.fields?.title) ?? stripExtension(part.filename);
     const typeId = toNullableInt(firstValue(part.fields?.typeId));
+    // Metadata travels as one JSON form part rather than a field per value:
+    // multipart fields must precede the file to be readable, and one part is
+    // far easier for a client to order correctly than a dozen.
+    const fields = parseJsonField(firstValue(part.fields?.fields));
 
     const result = await createDocument({
       userId: request.user.userId,
@@ -61,9 +70,16 @@ export async function documentRoutes(app) {
       filename: part.filename,
       mimeType: part.mimetype,
       typeId,
+      fields,
     });
 
-    if (!result.ok) return reply.code(STATUS[result.reason] ?? 400).send({ error: result.reason });
+    if (!result.ok) {
+      return reply.code(STATUS[result.reason] ?? 400).send({
+        error: result.reason,
+        detail: result.detail,
+        duplicates: result.duplicates,
+      });
+    }
 
     await record({
       actor: request.user,
@@ -182,6 +198,67 @@ export async function documentRoutes(app) {
     return reply.send(storage.createReadStream(found.storagePath));
   });
 
+  /**
+   * Whether this content is already filed, asked before uploading.
+   *
+   * Lets a client hash locally and check first, so a 200MB duplicate is never
+   * transferred at all.
+   */
+  app.get('/documents/duplicates/:sha256', async (request, reply) => {
+    const sha256 = String(request.params.sha256 ?? '').toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(sha256)) return reply.code(400).send({ error: 'invalid_hash' });
+
+    return { duplicates: await findDuplicates({ userId: request.user.userId, sha256 }) };
+  });
+
+  /** The recycle bin: what has been deleted and can still be brought back. */
+  app.get('/recycle-bin', async (request) => ({
+    documents: await listRecycleBin({
+      userId: request.user.userId,
+      folderId: parseId(request.query?.folderId),
+      limit: request.query?.limit,
+    }),
+  }));
+
+  app.post('/documents/:documentId/restore', async (request, reply) => {
+    const documentId = parseId(request.params.documentId);
+    if (documentId === null) return reply.code(400).send({ error: 'invalid_document_id' });
+
+    const result = await restoreDocument({ userId: request.user.userId, documentId });
+    if (!result.ok) return reply.code(STATUS[result.reason] ?? 400).send({ error: result.reason });
+
+    await record({
+      actor: request.user,
+      action: ACTION.DOCUMENT_RESTORED,
+      targetType: 'document',
+      targetId: documentId,
+      folderId: result.folderId,
+      detail: result.title,
+      request,
+    });
+
+    return { ok: true };
+  });
+
+  /** Destroys the content now rather than waiting out the grace period. */
+  app.post('/documents/:documentId/purge', async (request, reply) => {
+    const documentId = parseId(request.params.documentId);
+    if (documentId === null) return reply.code(400).send({ error: 'invalid_document_id' });
+
+    const result = await purgeNow({ userId: request.user.userId, documentId });
+    if (!result.ok) return reply.code(STATUS[result.reason] ?? 400).send({ error: result.reason });
+
+    await record({
+      actor: request.user,
+      action: ACTION.DOCUMENT_PURGE_REQUESTED,
+      targetType: 'document',
+      targetId: documentId,
+      request,
+    });
+
+    return { ok: true };
+  });
+
   app.delete('/documents/:documentId', async (request, reply) => {
     const documentId = parseId(request.params.documentId);
     if (documentId === null) return reply.code(400).send({ error: 'invalid_document_id' });
@@ -220,6 +297,17 @@ function toNullableInt(value) {
   if (value == null || value === '') return null;
   const parsed = Number(value);
   return Number.isInteger(parsed) ? parsed : null;
+}
+
+/** The metadata part, when the client sent one. A malformed value is ignored. */
+function parseJsonField(raw) {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function stripExtension(filename) {

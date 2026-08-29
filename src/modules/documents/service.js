@@ -29,6 +29,7 @@ import { config } from '../../config/index.js';
 import { normalizeArabic } from '../../lib/arabic.js';
 import { moduleLogger } from '../../lib/logger.js';
 import { PERM, permissionBits, has } from '../tree/service.js';
+import { findDuplicates, duplicatePolicy } from './lifecycle.js';
 
 const log = moduleLogger('documents');
 
@@ -58,6 +59,33 @@ async function stageUpload(stream) {
 /** Removes a staged file after a failure. Best effort — an orphan is swept later. */
 async function discardStaged(staged) {
   if (staged) await storage.remove(staged.relativePath).catch(() => {});
+}
+
+/**
+ * Names the required fields a new document of this type is missing.
+ *
+ * Only fields that apply to the chosen type, plus the global ones. A document
+ * with no type has no required fields, which is deliberate — the type is what
+ * carries the obligation.
+ */
+async function missingRequiredFields(typeId, provided) {
+  if (typeId === null || typeId === undefined) return [];
+
+  const required = await sql`
+    SELECT field_id, name FROM dbo.custom_field_defs
+     WHERE is_active = 1 AND is_required = 1
+       AND (type_id IS NULL OR type_id = ${typeId})
+  `.execute(db);
+
+  if (required.rows.length === 0) return [];
+
+  const supplied = new Map(
+    (Array.isArray(provided) ? provided : [])
+      .filter((entry) => entry && entry.value !== null && entry.value !== undefined && entry.value !== '')
+      .map((entry) => [Number(entry.fieldId), entry.value]),
+  );
+
+  return required.rows.filter((row) => !supplied.has(Number(row.field_id))).map((row) => row.name);
 }
 
 /**
@@ -107,6 +135,7 @@ export async function createDocument({
   filename,
   mimeType,
   typeId = null,
+  fields = null,
 }) {
   const cleanTitle = String(title ?? '').trim();
   if (!cleanTitle) return { ok: false, reason: 'invalid_title' };
@@ -122,8 +151,36 @@ export async function createDocument({
     return { ok: false, reason: has(bits, PERM.BROWSE) ? 'forbidden' : 'not_found' };
   }
 
+  // Required fields are checked before a byte is stored: a document filed
+  // without the metadata its type demands is the thing picklists and required
+  // flags exist to prevent, and rejecting after the upload wastes the transfer.
+  const missing = await missingRequiredFields(typeId, fields);
+  if (missing.length > 0) {
+    stream.resume();
+    return { ok: false, reason: 'required_field', detail: missing.join('، ') };
+  }
+
+  // The values themselves are validated here too, so a malformed one is refused
+  // before the upload rather than silently dropped after it.
+  const { prepareFieldValues } = await import('../metadata/service.js');
+  const validated = await prepareFieldValues(fields);
+  if (!validated.ok) {
+    stream.resume();
+    return validated;
+  }
+
   const staging = await stageUpload(stream);
   if (!staging.ok) return staging;
+
+  // The hash is already computed from the bytes on their way to disk, so this
+  // costs one indexed lookup rather than reading anything again.
+  const duplicates = await findDuplicates({ userId, sha256: staging.staged.sha256 });
+  const policy = await duplicatePolicy();
+
+  if (duplicates.length > 0 && policy === 'block') {
+    await discardStaged(staging.staged);
+    return { ok: false, reason: 'duplicate', duplicates };
+  }
 
   try {
     const result = await db.transaction().execute(async (trx) => {
@@ -155,6 +212,13 @@ export async function createDocument({
                 ${mimeType || 'application/octet-stream'}, ${userId})
       `.execute(trx);
 
+      // Written in the same transaction as the document, so a document and the
+      // metadata its type requires commit together or not at all.
+      if (validated.prepared.length > 0) {
+        const { writeFieldValues } = await import('../metadata/service.js');
+        await writeFieldValues(trx, documentId, validated.prepared);
+      }
+
       // Enqueued in the same transaction as the version. A queue row written
       // outside it could reference a document whose insert then rolled back.
       await enqueueExtraction(trx, documentId, 1);
@@ -177,6 +241,10 @@ export async function createDocument({
       version: 1,
       sha256: staging.staged.sha256,
       bytes: staging.staged.bytes,
+      // Reported, not blocking, under the default policy: the same circular
+      // genuinely is filed by three departments, and refusing that is wrong —
+      // but saying nothing means nobody notices the archive filling with it.
+      ...(duplicates.length > 0 ? { duplicateOf: duplicates } : {}),
     };
   } catch (error) {
     await discardStaged(staging.staged);

@@ -17,7 +17,7 @@ import { PERM, permissionBits, has } from '../tree/service.js';
 
 const log = moduleLogger('metadata');
 
-const DATA_TYPES = new Set(['text', 'number', 'date', 'bool', 'choice']);
+const DATA_TYPES = new Set(['text', 'number', 'date', 'bool', 'choice', 'multiselect', 'user']);
 
 /**
  * Which column holds each data type's value.
@@ -32,6 +32,7 @@ const VALUE_COLUMNS = Object.freeze({
   date: 'value_date',
   bool: 'value_bool',
   choice: 'value_choice_id',
+  user: 'value_principal_id',
 });
 
 const ALL_VALUE_COLUMNS = Object.freeze(Object.values(VALUE_COLUMNS));
@@ -120,7 +121,7 @@ export async function listFields({ typeId = null, includeInactive = false } = {}
     choices: [],
   }));
 
-  const choiceFields = fields.filter((field) => field.dataType === 'choice');
+  const choiceFields = fields.filter((field) => ['choice', 'multiselect'].includes(field.dataType));
   if (choiceFields.length > 0) {
     const choices = await sql`
       SELECT choice_id, field_id, label, sort_order
@@ -154,7 +155,7 @@ export async function createField({
   const clean = String(name ?? '').trim();
   if (!clean || clean.length > 200) return { ok: false, reason: 'invalid_name' };
   if (!DATA_TYPES.has(dataType)) return { ok: false, reason: 'invalid_data_type' };
-  if (dataType === 'choice' && choices.filter((c) => String(c).trim()).length === 0) {
+  if (['choice', 'multiselect'].includes(dataType) && choices.filter((c) => String(c).trim()).length === 0) {
     return { ok: false, reason: 'choices_required' };
   }
 
@@ -247,21 +248,53 @@ export async function createLabel({ name, severityRank, colour }) {
 export async function getDocumentFields(documentId) {
   const result = await sql`
     SELECT v.field_id, v.value_text, v.value_number, v.value_date, v.value_bool,
-           v.value_choice_id, f.name, f.data_type, c.label AS choice_label
+           v.value_choice_id, v.value_principal_id, f.name, f.data_type,
+           c.label AS choice_label, pr.display_name AS principal_name
       FROM dbo.document_field_values v
       JOIN dbo.custom_field_defs f ON f.field_id = v.field_id
       LEFT JOIN dbo.custom_field_choices c ON c.choice_id = v.value_choice_id
+      LEFT JOIN dbo.principals pr ON pr.principal_id = v.value_principal_id
      WHERE v.document_id = ${documentId}
      ORDER BY f.sort_order, f.name
   `.execute(db);
 
-  return result.rows.map((row) => ({
+  const single = result.rows.map((row) => ({
     fieldId: Number(row.field_id),
     name: row.name,
     dataType: row.data_type,
     value: readValue(row),
-    choiceLabel: row.choice_label,
+    // Resolved for display: an id means nothing on screen, and a client should
+    // not have to look up every choice and principal itself.
+    choiceLabel: row.choice_label ?? row.principal_name ?? null,
   }));
+
+  // Multi-select values live in their own table, so they are collected
+  // separately and folded in as arrays.
+  const selections = await sql`
+    SELECT s.field_id, s.choice_id, f.name, c.label
+      FROM dbo.document_field_selections s
+      JOIN dbo.custom_field_defs f ON f.field_id = s.field_id
+      JOIN dbo.custom_field_choices c ON c.choice_id = s.choice_id
+     WHERE s.document_id = ${documentId}
+     ORDER BY f.sort_order, c.sort_order
+  `.execute(db);
+
+  const grouped = new Map();
+  for (const row of selections.rows) {
+    const key = Number(row.field_id);
+    const entry = grouped.get(key) ?? {
+      fieldId: key,
+      name: row.name,
+      dataType: 'multiselect',
+      value: [],
+      choiceLabel: [],
+    };
+    entry.value.push(Number(row.choice_id));
+    entry.choiceLabel.push(row.label);
+    grouped.set(key, entry);
+  }
+
+  return [...single, ...grouped.values()];
 }
 
 function readValue(row) {
@@ -274,6 +307,8 @@ function readValue(row) {
       return row.value_bool === null ? null : Number(row.value_bool) === 1;
     case 'choice':
       return row.value_choice_id === null ? null : Number(row.value_choice_id);
+    case 'user':
+      return row.value_principal_id === null ? null : String(row.value_principal_id);
     default:
       return row.value_text;
   }
@@ -308,25 +343,11 @@ export async function updateDocumentMetadata({ userId, documentId, title, typeId
     return { ok: false, reason: 'invalid_title' };
   }
 
-  // Validate every value before writing any of them.
-  const prepared = [];
-  if (Array.isArray(fields)) {
-    const definitions = new Map((await listFields({ includeInactive: true })).map((f) => [f.fieldId, f]));
-
-    for (const entry of fields) {
-      const definition = definitions.get(Number(entry.fieldId));
-      if (!definition) return { ok: false, reason: 'unknown_field', detail: entry.fieldId };
-
-      const value = coerce(definition.dataType, entry.value);
-      if (value === undefined) return { ok: false, reason: 'invalid_value', detail: definition.name };
-
-      if (definition.isRequired && value === null) {
-        return { ok: false, reason: 'required_field', detail: definition.name };
-      }
-
-      prepared.push({ fieldId: definition.fieldId, dataType: definition.dataType, value });
-    }
-  }
+  // Validated before the transaction opens: a half-applied metadata change is
+  // worse than none, because nobody can tell which half landed.
+  const validation = await prepareFieldValues(fields);
+  if (!validation.ok) return validation;
+  const prepared = validation.prepared;
 
   await db.transaction().execute(async (trx) => {
     if (newTitle !== null || typeId !== undefined || labelId !== undefined) {
@@ -342,7 +363,72 @@ export async function updateDocumentMetadata({ userId, documentId, title, typeId
       `.execute(trx);
     }
 
+    await writeFieldValues(trx, documentId, prepared);
+  });
+
+  log.info({ documentId: String(documentId), fields: prepared.length }, 'document metadata updated');
+  return { ok: true };
+}
+
+
+/**
+ * Validates a set of field values without writing anything.
+ *
+ * Separated from the write so both the upload path and the metadata editor can
+ * check first: upload has to reject a missing required field before it streams
+ * the file, and the editor has to reject before it opens a transaction.
+ *
+ * @returns {{ok: true, prepared: Array} | {ok: false, reason: string, detail?: string}}
+ */
+export async function prepareFieldValues(fields) {
+  if (!Array.isArray(fields) || fields.length === 0) return { ok: true, prepared: [] };
+
+  const definitions = new Map((await listFields({ includeInactive: true })).map((f) => [f.fieldId, f]));
+  const prepared = [];
+
+  for (const entry of fields) {
+    const definition = definitions.get(Number(entry.fieldId));
+    if (!definition) return { ok: false, reason: 'unknown_field', detail: String(entry.fieldId) };
+
+    const value = coerce(definition.dataType, entry.value);
+    if (value === undefined) return { ok: false, reason: 'invalid_value', detail: definition.name };
+
+    if (definition.isRequired && (value === null || (Array.isArray(value) && value.length === 0))) {
+      return { ok: false, reason: 'required_field', detail: definition.name };
+    }
+
+    prepared.push({ fieldId: definition.fieldId, dataType: definition.dataType, value });
+  }
+
+  return { ok: true, prepared };
+}
+
+/**
+ * Writes prepared values inside the caller's transaction.
+ *
+ * Takes the transaction rather than opening one so a document and its metadata
+ * commit together — a document that exists without the metadata its type
+ * requires is exactly what the required-field rule is meant to prevent.
+ */
+export async function writeFieldValues(trx, documentId, prepared) {
     for (const entry of prepared) {
+      if (entry.dataType === 'multiselect') {
+        // Replaced wholesale rather than diffed: the set is small, and a
+        // delete-then-insert inside this transaction is atomic anyway.
+        await sql`
+          DELETE FROM dbo.document_field_selections
+           WHERE document_id = ${documentId} AND field_id = ${entry.fieldId}
+        `.execute(trx);
+
+        for (const choiceId of entry.value ?? []) {
+          await sql`
+            INSERT INTO dbo.document_field_selections (document_id, field_id, choice_id)
+            VALUES (${documentId}, ${entry.fieldId}, ${choiceId})
+          `.execute(trx);
+        }
+        continue;
+      }
+
       if (entry.value === null) {
         await sql`
           DELETE FROM dbo.document_field_values
@@ -386,10 +472,6 @@ export async function updateDocumentMetadata({ userId, documentId, title, typeId
           VALUES (source.document_id, source.field_id, ${value});
       `.execute(trx);
     }
-  });
-
-  log.info({ documentId: String(documentId), fields: prepared.length }, 'document metadata updated');
-  return { ok: true };
 }
 
 /**
@@ -397,7 +479,7 @@ export async function updateDocumentMetadata({ userId, documentId, title, typeId
  * Returns null for "clear it", undefined for "this is not valid".
  */
 function coerce(dataType, raw) {
-  if (raw === null || raw === undefined || raw === '') return null;
+  if (raw === null || raw === undefined || raw === '') return dataType === 'multiselect' ? [] : null;
 
   switch (dataType) {
     case 'number': {
@@ -418,6 +500,16 @@ function coerce(dataType, raw) {
     case 'choice': {
       const value = Number(raw);
       return Number.isInteger(value) ? value : undefined;
+    }
+    case 'user': {
+      // A bigint principal id stays a string: Number() loses precision past 2^53.
+      const value = String(raw).trim();
+      return /^[0-9]{1,19}$/.test(value) ? value : undefined;
+    }
+    case 'multiselect': {
+      const list = Array.isArray(raw) ? raw : [raw];
+      const ids = list.map((item) => Number(item));
+      return ids.every((value) => Number.isInteger(value)) ? ids : undefined;
     }
     default: {
       const value = String(raw);

@@ -72,6 +72,7 @@ export function resolveTestDatabase() {
  */
 const TRUNCATION_ORDER = [
   'audit_log',
+  'document_field_selections',
   'password_reset_tokens',
   'purged_blobs',
   'user_sessions',
@@ -121,6 +122,14 @@ export async function resetDatabase(db, sql) {
         DELETE FROM dbo.folders
         WHERE folder_id NOT IN (SELECT parent_id FROM dbo.folders WHERE parent_id IS NOT NULL);
     `.execute(db);
+  }
+
+  // Rows that merely REFERENCE a user rather than belonging to one. Production
+  // never deletes a user — deactivation is the operation — so these foreign keys
+  // are only an obstacle here, and clearing the reference is closer to the
+  // intent than deleting the row, which would take the seeded settings with it.
+  if (present.has('app_settings')) {
+    await sql`UPDATE dbo.app_settings SET updated_by = NULL`.execute(db);
   }
 
   for (const table of ['users', 'groups', 'principals']) {
