@@ -1,17 +1,16 @@
 /**
  * Self-service password reset.
  *
- * ─── Delivery is deliberately not implemented here ──────────────────────────
+ * ─── Delivery ───────────────────────────────────────────────────────────────
  *
- * There is no SMTP configuration on this deployment yet, and a reset flow that
- * silently drops its emails is worse than none: users would believe a link is
- * coming and administrators would believe the feature works.
+ * Two transports. `smtp` sends the link by email and needs MAIL_HOST plus an
+ * address on the account. `log` writes the link to the application log, which
+ * suits a small on-prem install where an administrator can read it and is honest
+ * about being that.
  *
- * So the token mechanism is complete and tested, and delivery is a pluggable
- * transport. Out of the box the transport is `log`, which writes the link to the
- * application log — usable for a small on-prem install where an administrator
- * can read it, and honest about what it is. Configure a real transport before
- * telling users the feature exists; `resetLinkDelivery` in config is the seam.
+ * The default is `log`, because a reset flow that silently drops its emails is
+ * worse than none: users would believe a link is coming and administrators would
+ * believe the feature works. Switching to `smtp` is a deliberate act.
  *
  * ─── Enumeration ────────────────────────────────────────────────────────────
  *
@@ -41,7 +40,7 @@ const hashToken = (token) => createHash('sha256').update(token, 'utf8').digest('
  */
 export async function requestReset({ username, ipAddress }) {
   const found = await sql`
-    SELECT u.user_id, u.username, p.is_active
+    SELECT u.user_id, u.username, u.email, p.is_active, p.display_name
       FROM dbo.users u
       JOIN dbo.principals p ON p.principal_id = u.user_id
      WHERE u.username = ${String(username ?? '').trim()}
@@ -73,7 +72,7 @@ export async function requestReset({ username, ipAddress }) {
     `.execute(trx);
   });
 
-  await deliver({ username: user.username, token, expiresAt });
+  await deliver({ user, token, expiresAt });
 
   return { ok: true };
 }
@@ -81,25 +80,53 @@ export async function requestReset({ username, ipAddress }) {
 /**
  * Hands the reset link to the configured transport.
  *
- * The token appears in the log under the `log` transport — which is the point of
- * that mode, and the reason it must not be used once real email exists.
+ * Never throws. A delivery failure must not change the response, because the
+ * response is identical for every request by design — surfacing "we could not
+ * email you" would reveal that the account exists.
  */
-async function deliver({ username, token, expiresAt }) {
+async function deliver({ user, token, expiresAt }) {
   const link = `${config.auth.resetLinkBase}/reset?token=${encodeURIComponent(token)}`;
 
-  if (config.auth.resetDelivery === 'log') {
-    log.warn(
-      { username, link, expiresAt },
-      'password reset link generated - delivery transport is "log", so this link is only ' +
-        'visible here. Configure a real transport before offering reset to users.',
-    );
+  if (config.auth.resetDelivery === 'smtp') {
+    // An account with no address cannot be emailed. Logged as a warning because
+    // it is an administrative gap, not a user error.
+    if (!user.email) {
+      log.warn({ username: user.username }, 'reset requested but the account has no email address');
+      return;
+    }
+
+    try {
+      const { sendMail } = await import('../../lib/mailer.js');
+      await sendMail({
+        to: user.email,
+        subject: 'إعادة تعيين كلمة المرور',
+        // Assembled as lines and joined, so the message body is readable here
+        // and the line breaks are explicit rather than accidents of indentation.
+        text: [
+          `مرحباً ${user.display_name || user.username}،`,
+          '',
+          'وردنا طلب لإعادة تعيين كلمة المرور الخاصة بك. افتح الرابط التالي:',
+          '',
+          link,
+          '',
+          `ينتهي هذا الرابط خلال ${config.auth.resetTokenMinutes} دقيقة ويصلح لمرة واحدة.`,
+          'إذا لم تطلب ذلك، تجاهل هذه الرسالة ولن يتغير شيء.',
+          '',
+        ].join('\n'),
+      });
+      log.info({ username: user.username }, 'reset link emailed');
+    } catch (error) {
+      log.error({ err: error, username: user.username }, 'could not send the reset email');
+    }
     return;
   }
 
-  // No other transport is wired yet. Failing loudly beats pretending to send.
-  log.error(
-    { transport: config.auth.resetDelivery, username },
-    'no delivery transport is implemented for this setting; the reset link was not sent',
+  // The token appears in the log under this transport. That is the point of the
+  // mode, and the reason it must not be used once real email exists.
+  log.warn(
+    { username: user.username, link, expiresAt },
+    'password reset link generated - delivery transport is "log", so this link is only ' +
+      'visible here. Set AUTH_RESET_DELIVERY=smtp and MAIL_HOST to email it instead.',
   );
 }
 

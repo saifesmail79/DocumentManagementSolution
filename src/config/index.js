@@ -135,6 +135,12 @@ export const config = Object.freeze({
     purgeEnabled: boolean('STORAGE_PURGE_ENABLED', true),
     /** Nothing here is time-sensitive; hourly keeps it off the disk's back. */
     purgeIntervalMs: integer('STORAGE_PURGE_INTERVAL_MS', 3_600_000, { min: 60_000 }),
+    /**
+     * Per-month JSON manifests describing what each storage directory holds.
+     * The disk layout is keyed on date, not the filing tree, so without these
+     * losing the database means losing the structure and metadata.
+     */
+    manifestsEnabled: boolean('STORAGE_MANIFESTS_ENABLED', true),
   }),
 
   auth: Object.freeze({
@@ -188,6 +194,46 @@ export const config = Object.freeze({
     maxBytes: integer('EXTRACTION_MAX_BYTES', 64 * 1024 * 1024, { min: 1024 }),
     /** Characters kept per document. Beyond this, more text adds nothing findable. */
     maxChars: integer('EXTRACTION_MAX_CHARS', 2_000_000, { min: 1000 }),
+  }),
+
+  ocr: Object.freeze({
+    /**
+     * OFF by default, deliberately. OCR needs Tesseract (and OCRmyPDF for PDFs)
+     * installed on the server, and a system that silently does nothing is worse
+     * than one that says it is switched off.
+     */
+    enabled: boolean('OCR_ENABLED', false),
+    /**
+     * Tesseract language packs, '+'-joined. 'ara' must be installed separately
+     * from the engine -- present engine, absent Arabic data is the specific
+     * failure that produces silently empty results.
+     */
+    languages: optional('OCR_LANGUAGES', 'ara+eng'),
+    tesseractPath: optional('OCR_TESSERACT_PATH', 'tesseract'),
+    ocrmypdfPath: optional('OCR_OCRMYPDF_PATH', 'ocrmypdf'),
+    /** Hard kill after this. A wedged OCR run would otherwise hold a worker slot forever. */
+    timeoutMs: integer('OCR_TIMEOUT_MS', 300_000, { min: 10_000 }),
+    /** Below this many characters, OCR is treated as having found nothing. */
+    minCharacters: integer('OCR_MIN_CHARACTERS', 24, { min: 1 }),
+    maxChars: integer('OCR_MAX_CHARS', 2_000_000, { min: 1000 }),
+  }),
+
+  mail: Object.freeze({
+    /** Empty means no SMTP. The reset flow then falls back to the log transport. */
+    host: optional('MAIL_HOST', ''),
+    port: integer('MAIL_PORT', 587, { min: 1, max: 65535 }),
+    /** Implicit TLS. True for port 465; false elsewhere, where STARTTLS is used. */
+    secure: boolean('MAIL_SECURE', false),
+    /**
+     * Makes the STARTTLS upgrade mandatory. An on-prem relay that quietly
+     * declines it would otherwise receive credentials in the clear.
+     */
+    requireTls: boolean('MAIL_REQUIRE_TLS', true),
+    /** Set false only for a relay with a self-signed certificate you control. */
+    rejectUnauthorized: boolean('MAIL_REJECT_UNAUTHORIZED', true),
+    user: optional('MAIL_USER', ''),
+    password: optional('MAIL_PASSWORD', ''),
+    from: optional('MAIL_FROM', 'DMS <no-reply@localhost>'),
   }),
 
   logging: Object.freeze({

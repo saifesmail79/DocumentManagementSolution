@@ -116,6 +116,11 @@ export const api = {
         body: { inherits, copyInherited },
       }),
     extractionStats: () => request('/api/admin/extraction/stats'),
+    mailStatus: () => request('/api/admin/mail/status'),
+    missingBlobs: () => request('/api/admin/storage/missing'),
+    purge: (dryRun) => request('/api/admin/storage/purge', { method: 'POST', body: { dryRun } }),
+    manifests: () => request('/api/admin/storage/manifests', { method: 'POST' }),
+    audit: (params = '') => request(`/api/admin/audit${params ? `?${params}` : ''}`),
   },
 
   search: (query, { folderId, limit = 25, offset = 0, content = true } = {}) => {

@@ -31,6 +31,7 @@ import { storage } from '../../storage/index.js';
 import { config } from '../../config/index.js';
 import { moduleLogger } from '../../lib/logger.js';
 import { record, ACTION } from '../audit/service.js';
+import { writeAllManifests } from './manifest.js';
 
 const log = moduleLogger('purge');
 
@@ -233,6 +234,10 @@ export function startMaintenance() {
     try {
       await purgeDeletedDocuments();
       await purgeOrphanedUploads();
+
+      // Regenerated after the purge so a manifest never lists a file the sweep
+      // has just removed.
+      if (config.storage.manifestsEnabled) await writeAllManifests();
     } catch (error) {
       log.error({ err: error }, 'maintenance sweep failed');
     } finally {

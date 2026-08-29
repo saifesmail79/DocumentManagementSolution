@@ -17,6 +17,8 @@ const redactPaths = [
   '*.password',
   'body.password',
   'DB_PASSWORD',
+  'MAIL_PASSWORD',
+  'auth.pass',
 ];
 
 export const logger = pino({

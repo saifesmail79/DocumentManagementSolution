@@ -485,6 +485,12 @@ describe('administration', { skip: CONFIGURED ? false : target.reason }, () => {
   test('extraction stats are visible to an administrator', async () => {
     const response = await call('GET', '/api/admin/extraction/stats', bossCookie);
     assert.equal(response.statusCode, 200);
-    assert.equal(typeof response.json().pending, 'number');
+
+    const body = response.json();
+    assert.equal(typeof body.queue.pending, 'number');
+    // The OCR work list: documents stored and browsable whose contents nothing
+    // can search.
+    assert.equal(typeof body.documents.unindexed, 'number');
+    assert.equal(typeof body.ocr.enabled, 'boolean');
   });
 });

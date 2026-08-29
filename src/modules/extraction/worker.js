@@ -30,6 +30,7 @@ import { config } from '../../config/index.js';
 import { normalizeArabic } from '../../lib/arabic.js';
 import { moduleLogger } from '../../lib/logger.js';
 import { extractText, OUTCOME } from './extractors.js';
+import { attemptOcr, ocrAvailable } from './ocr.js';
 
 const log = moduleLogger('extraction');
 
@@ -43,12 +44,22 @@ export const QUEUE = Object.freeze({
   SKIPPED: 5,
 });
 
-/** documents.extraction_status */
+/**
+ * documents.extraction_status
+ *
+ * OCR_EXTRACTED is kept distinct from EXTRACTED on purpose: text lifted from a
+ * document's own text layer is exact, and text recognised from a photograph of a
+ * page is roughly 85-93% right on clean Arabic print. Both are fine for finding
+ * a document; only one would be honest to show as its contents. Nothing returns
+ * either column to a client, and this flag is how an operator can tell which
+ * documents are searchable only approximately.
+ */
 export const DOC_EXTRACTION = Object.freeze({
   PENDING: 0,
   EXTRACTED: 1,
   UNSUPPORTED: 2,
   FAILED: 3,
+  OCR_EXTRACTED: 4,
 });
 
 /**
@@ -145,6 +156,39 @@ export async function processOne({ maxAttempts = config.extraction.maxAttempts }
       return { claimed: true, outcome: OUTCOME.EXTRACTED, documentId: String(documentId) };
     }
 
+    // No text layer. This is the scan case, and the point at which OCR is the
+    // only way the document becomes searchable.
+    if (await ocrAvailable()) {
+      const recognised = await attemptOcr(absolutePath, {
+        filename: version.original_filename ?? path.basename(version.storage_path),
+        mimeType: version.mime_type,
+      }).catch((error) => ({ ok: false, reason: 'ocr_failed', detail: error.message }));
+
+      if (recognised.ok) {
+        await sql`
+          UPDATE dbo.documents
+             SET content_normalized = ${normalizeArabic(recognised.text)},
+                 extraction_status = ${DOC_EXTRACTION.OCR_EXTRACTED},
+                 extracted_at = SYSUTCDATETIME()
+           WHERE document_id = ${documentId}
+        `.execute(db);
+
+        await finishJob(queueId, QUEUE.DONE, `ocr:${recognised.engine}`);
+        log.info(
+          { documentId: String(documentId), engine: recognised.engine, characters: recognised.text.length },
+          'text recovered by OCR',
+        );
+        return { claimed: true, outcome: 'ocr', documentId: String(documentId) };
+      }
+
+      // OCR was available and did not help. Recorded with its reason so the
+      // difference between "no OCR installed" and "OCR found nothing" is
+      // visible, rather than both looking like an unreadable document.
+      await markDocument(documentId, DOC_EXTRACTION.UNSUPPORTED);
+      await finishJob(queueId, QUEUE.SKIPPED, `${result.outcome}; ${recognised.reason}`);
+      return { claimed: true, outcome: recognised.reason, documentId: String(documentId) };
+    }
+
     // no_text_layer and unsupported are both "there is nothing to index", not
     // failures. Recording which is which is what makes the OCR work list.
     await markDocument(documentId, DOC_EXTRACTION.UNSUPPORTED);
@@ -231,6 +275,28 @@ export function startExtractionWorker() {
       if (timer) clearTimeout(timer);
     },
   };
+}
+
+/**
+ * How many documents are searchable, and how.
+ *
+ * "unindexed" is the OCR work list: documents stored and browsable whose
+ * contents nothing can search.
+ */
+export async function extractionStats() {
+  const result = await sql`
+    SELECT extraction_status, COUNT(*) AS total
+      FROM dbo.documents WHERE is_deleted = 0 GROUP BY extraction_status
+  `.execute(db);
+
+  const stats = { pending: 0, extracted: 0, unindexed: 0, failed: 0, ocr: 0 };
+  const names = { 0: 'pending', 1: 'extracted', 2: 'unindexed', 3: 'failed', 4: 'ocr' };
+
+  for (const row of result.rows) {
+    const name = names[Number(row.extraction_status)];
+    if (name) stats[name] = Number(row.total);
+  }
+  return stats;
 }
 
 /** Counts by queue status, for a diagnostics screen. */

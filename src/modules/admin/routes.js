@@ -36,9 +36,12 @@ import {
   setInheritance,
   explainPermission,
 } from './acl.js';
-import { queueStats } from '../extraction/worker.js';
+import { queueStats, extractionStats } from '../extraction/worker.js';
+import { ocrStatus } from '../extraction/ocr.js';
+import { verifyMail } from '../../lib/mailer.js';
 import { listAudit, auditActions, record, ACTION } from '../audit/service.js';
 import { purgeDeletedDocuments, purgeOrphanedUploads, findMissingBlobs } from '../storage-maintenance/purge.js';
+import { writeAllManifests } from '../storage-maintenance/manifest.js';
 
 const STATUS = {
   invalid_username: 400,
@@ -156,7 +159,12 @@ export async function adminRoutes(app) {
     );
 
     /** Extraction health, so "why can search not find this" has an answer. */
-    identity.get('/extraction/stats', async () => queueStats());
+    identity.get('/extraction/stats', async () => ({
+      queue: await queueStats(),
+      documents: await extractionStats(),
+      // "Why can search not find my scans" almost always has this answer.
+      ocr: await ocrStatus(),
+    }));
 
     /** The audit trail. */
     identity.get('/audit', async (request) => {
@@ -202,6 +210,12 @@ export async function adminRoutes(app) {
 
       return { documents, uploads };
     });
+
+    /** Regenerates the per-month manifests that make the disk self-describing. */
+    identity.post('/storage/manifests', async () => writeAllManifests());
+
+    /** Checks SMTP without sending, so a broken relay is found before a user needs it. */
+    identity.get('/mail/status', async () => verifyMail());
   });
 
   // ── Folder permissions: MANAGE_PERMS, checked per folder ───────────────
