@@ -2,12 +2,15 @@
  * Integration tests for the permission model.
  *
  * These run against a real SQL Server and are skipped when DB_SERVER is not set,
- * so `npm test` stays fast and offline. To run them:
+ * so the offline suite stays fast. With .env configured, run them with:
  *
- *   docker run -d --name dms-mssql -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD='DmsTest!2026x' \
- *     -e MSSQL_PID=Developer -p 14333:1433 mcr.microsoft.com/mssql/server:2022-latest
- *   DB_SERVER=127.0.0.1 DB_PORT=14333 DB_NAME=dms_test DB_USER=sa \
- *     DB_PASSWORD='DmsTest!2026x' STORAGE_ROOT='D:\dms\storage' node --test tests/acl.integration.test.js
+ *   npm run test:db
+ *
+ * seed() below DELETES every row in principals, users, groups, folders and
+ * access_control_entries, so the suite never touches the application database:
+ * resolveTestDatabase() redirects it to DB_NAME + "_test" (override with
+ * TEST_DB_NAME) and throws if that resolves back to DB_NAME. The database is
+ * created and migrated on first run.
  *
  * Each case below corresponds to a bypass or correctness bug reported by the
  * adversarial review of the schema design. They are regression tests for attacks,
@@ -17,13 +20,17 @@
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { config as loadEnv } from 'dotenv';
+import { resolveTestDatabase, ensureTestDatabase } from './helpers/test-database.js';
 
 // Load .env here as well as in src/config. The skip decision below is made at
 // module-evaluation time, before anything imports the app's config, so without
 // this the suite silently skips even when a database is configured.
 loadEnv();
 
-const CONFIGURED = Boolean(process.env.DB_SERVER);
+// Must happen before any dynamic import of src/config, src/db or src/lib/logger:
+// config reads process.env once at import time and freezes it.
+const target = resolveTestDatabase();
+const CONFIGURED = target.configured;
 
 let db;
 let sql;
@@ -139,10 +146,18 @@ async function withDeleted(folderName, fn) {
   }
 }
 
-describe('permission model', { skip: CONFIGURED ? false : 'DB_SERVER not set' }, () => {
+describe('permission model', { skip: CONFIGURED ? false : target.reason }, () => {
   before(async () => {
+    // Create the test database before the pool tries to connect to it, then
+    // migrate it — a fresh clone has no schema to seed into.
+    await ensureTestDatabase(target.database);
+
     ({ db, sql } = await import('../src/db/index.js'));
     ({ PERM, ALL_PERMS } = await import('../src/db/migrations/0001-identity-and-acl.js'));
+
+    const { runMigrations } = await import('../src/db/migrate.js');
+    await runMigrations();
+
     await seed();
   });
 
