@@ -1,5 +1,17 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Users, UsersRound, KeyRound, Plus, Lock, Unlock, ShieldCheck, RotateCcw, Trash2 } from 'lucide-react';
+import {
+  Users,
+  UsersRound,
+  KeyRound,
+  Plus,
+  Lock,
+  Unlock,
+  ShieldCheck,
+  RotateCcw,
+  Trash2,
+  SlidersHorizontal,
+  Activity,
+} from 'lucide-react';
 
 import { api, ApiError } from '../api.js';
 import { useAuth } from '../auth.jsx';
@@ -17,6 +29,8 @@ const TABS = [
   { key: 'users', label: 'المستخدمون', icon: Users },
   { key: 'groups', label: 'المجموعات', icon: UsersRound },
   { key: 'roles', label: 'الأدوار', icon: KeyRound },
+  { key: 'settings', label: 'الإعدادات', icon: SlidersHorizontal },
+  { key: 'diagnostics', label: 'التشخيص', icon: Activity },
 ];
 
 export default function Admin() {
@@ -57,6 +71,8 @@ export default function Admin() {
       {tab === 'users' ? <UsersTab /> : null}
       {tab === 'groups' ? <GroupsTab /> : null}
       {tab === 'roles' ? <RolesTab /> : null}
+      {tab === 'settings' ? <SettingsTab /> : null}
+      {tab === 'diagnostics' ? <DiagnosticsTab /> : null}
     </div>
   );
 }
@@ -551,6 +567,330 @@ function RolesTab() {
         {roles.length === 0 ? <EmptyState icon={KeyRound} title="لا توجد أدوار بعد" /> : null}
       </Card>
     </div>
+  );
+}
+
+
+// ── Settings ─────────────────────────────────────────────────────────────
+
+/** Labels for the setting keys, so the panel is not a list of dotted paths. */
+const SETTING_LABELS = {
+  'organisation.name': 'اسم الجهة',
+  'ui.default_language': 'لغة الواجهة الافتراضية',
+  'upload.max_bytes': 'أقصى حجم للرفع (بايت)',
+  'upload.allowed_extensions': 'الامتدادات المسموحة (فارغ = الكل)',
+  'upload.duplicate_policy': 'سياسة الملفات المكررة',
+  'storage.purge_grace_days': 'مهلة الاسترجاع قبل الحذف النهائي (أيام)',
+  'auth.session_ttl_hours': 'مدة الجلسة (ساعات)',
+  'auth.max_failed_logins': 'محاولات الدخول الفاشلة قبل القفل',
+  'auth.lockout_minutes': 'مدة القفل (دقائق)',
+  'auth.min_password_length': 'أقل طول لكلمة المرور',
+  'ocr.enabled': 'المسح الضوئي للنصوص (OCR)',
+  'extraction.enabled': 'استخراج نص الوثائق',
+};
+
+const POLICY_LABELS = { allow: 'السماح', warn: 'تنبيه', block: 'منع' };
+
+function SettingsTab() {
+  const [settings, setSettings] = useState(null);
+  const [error, setError] = useState(null);
+  const [notice, setNotice] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      setSettings((await api.settings.list()).settings);
+    } catch {
+      setError('تعذر تحميل الإعدادات.');
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function save(key, value) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await api.settings.set(key, value);
+      setNotice('تم الحفظ.');
+      await load();
+    } catch (caught) {
+      setError(
+        caught?.code === 'out_of_range' ? 'القيمة خارج النطاق المسموح.' : 'تعذر حفظ الإعداد.',
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revert(key) {
+    setBusy(true);
+    try {
+      await api.settings.clear(key);
+      await load();
+    } catch {
+      setError('تعذرت الاستعادة.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!settings) return <Spinner />;
+
+  return (
+    <div className="space-y-3">
+      {error ? <Alert tone="error">{error}</Alert> : null}
+      {notice ? <Alert tone="success">{notice}</Alert> : null}
+
+      <Alert tone="info">
+        تُطبَّق هذه الإعدادات فوراً دون إعادة تشغيل. الإعدادات الحساسة (الاتصال بقاعدة
+        البيانات، مسار التخزين، بيانات البريد) تبقى في ملف البيئة عمداً.
+      </Alert>
+
+      <Card className="overflow-hidden">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-surface-muted text-xs uppercase tracking-wider text-text-muted">
+              <th className="px-4 py-3 text-right font-semibold">الإعداد</th>
+              <th className="px-4 py-3 text-right font-semibold">القيمة</th>
+              <th className="px-4 py-3 text-center font-semibold">المصدر</th>
+              <th className="px-4 py-3 text-center font-semibold">إجراءات</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-border/50">
+            {settings.map((setting) => (
+              <SettingRow
+                key={setting.key}
+                setting={setting}
+                busy={busy}
+                onSave={save}
+                onRevert={revert}
+              />
+            ))}
+          </tbody>
+        </table>
+      </Card>
+    </div>
+  );
+}
+
+function SettingRow({ setting, busy, onSave, onRevert }) {
+  const [draft, setDraft] = useState(
+    Array.isArray(setting.value) ? setting.value.join(', ') : String(setting.value),
+  );
+
+  const changed = draft !== (Array.isArray(setting.value) ? setting.value.join(', ') : String(setting.value));
+
+  return (
+    <tr className="hover:bg-surface-muted/30">
+      <td className="px-4 py-3 text-right">
+        <span className="font-medium text-text">{SETTING_LABELS[setting.key] ?? setting.key}</span>
+        <span className="block text-[11px] text-text-muted" dir="ltr">
+          {setting.key}
+        </span>
+      </td>
+      <td className="px-4 py-3 text-right">
+        {setting.type === 'bool' ? (
+          <select
+            value={String(setting.value)}
+            onChange={(event) => onSave(setting.key, event.target.value)}
+            disabled={busy}
+            className="rounded-lg border border-border bg-control px-2 py-1 text-sm"
+          >
+            <option value="true">مفعّل</option>
+            <option value="false">معطّل</option>
+          </select>
+        ) : setting.options ? (
+          <select
+            value={String(setting.value)}
+            onChange={(event) => onSave(setting.key, event.target.value)}
+            disabled={busy}
+            className="rounded-lg border border-border bg-control px-2 py-1 text-sm"
+          >
+            {setting.options.map((option) => (
+              <option key={option} value={option}>
+                {POLICY_LABELS[option] ?? option}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            dir={setting.type === 'int' ? 'ltr' : 'rtl'}
+            className="w-full max-w-xs rounded-lg border border-border bg-control px-2 py-1 text-sm"
+          />
+        )}
+      </td>
+      <td className="px-4 py-3 text-center">
+        {/* Which values are stored and which come from the environment is what
+            makes "I changed it and nothing happened" diagnosable. */}
+        <span className={`text-xs ${setting.source === 'database' ? 'text-primary' : 'text-text-muted'}`}>
+          {setting.source === 'database' ? 'محفوظ' : 'من البيئة'}
+        </span>
+      </td>
+      <td className="px-4 py-3">
+        <div className="flex items-center justify-center gap-1">
+          {changed ? (
+            <Button onClick={() => onSave(setting.key, draft)} disabled={busy} className="!px-2 !py-1 text-xs">
+              حفظ
+            </Button>
+          ) : null}
+          {setting.source === 'database' ? (
+            <button
+              onClick={() => onRevert(setting.key)}
+              disabled={busy}
+              title="العودة إلى قيمة البيئة"
+              aria-label="العودة إلى قيمة البيئة"
+              className="rounded border border-border p-1.5 text-text-muted hover:bg-primary/10 hover:text-primary"
+            >
+              <RotateCcw size={14} />
+            </button>
+          ) : null}
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+// ── Diagnostics ──────────────────────────────────────────────────────────
+
+/**
+ * Why search cannot find things, in one place.
+ *
+ * "unindexed" is the OCR work list: documents stored and browsable whose
+ * contents nothing can search.
+ */
+function DiagnosticsTab() {
+  const [stats, setStats] = useState(null);
+  const [mail, setMail] = useState(null);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      const [s, m] = await Promise.all([api.admin.extractionStats(), api.admin.mailStatus()]);
+      setStats(s);
+      setMail(m);
+    } catch {
+      setError('تعذر تحميل بيانات التشخيص.');
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  if (!stats) return <Spinner />;
+
+  return (
+    <div className="space-y-3">
+      {error ? <Alert tone="error">{error}</Alert> : null}
+
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <Stat label="مفهرسة" value={stats.documents.extracted} />
+        <Stat label="عبر OCR" value={stats.documents.ocr} />
+        <Stat label="غير مفهرسة" value={stats.documents.unindexed} tone="warn" />
+        <Stat label="فشل الاستخراج" value={stats.documents.failed} tone="bad" />
+      </div>
+
+      <Card className="p-4">
+        <h3 className="mb-2 text-sm font-semibold text-text">المسح الضوئي للنصوص (OCR)</h3>
+        {!stats.ocr.enabled ? (
+          <Alert tone="warning">
+            OCR معطّل. الوثائق الممسوحة ضوئياً تُخزَّن وتُستعرض لكن لا يمكن البحث في محتواها.
+          </Alert>
+        ) : !stats.ocr.tesseract.available ? (
+          <Alert tone="error">OCR مفعّل لكن محرّك Tesseract غير مثبّت على الخادم.</Alert>
+        ) : !stats.ocr.arabicAvailable ? (
+          <Alert tone="error">
+            Tesseract مثبّت لكن بيانات اللغة العربية غير مثبّتة — ستكون النتائج فارغة.
+          </Alert>
+        ) : (
+          <Alert tone="success">OCR جاهز، وبيانات اللغة العربية مثبّتة.</Alert>
+        )}
+      </Card>
+
+      <Card className="p-4">
+        <h3 className="mb-2 text-sm font-semibold text-text">البريد</h3>
+        {!mail?.configured ? (
+          <Alert tone="warning">
+            لم يُضبط خادم بريد. روابط إعادة تعيين كلمة المرور تُكتب في سجل النظام بدل إرسالها.
+          </Alert>
+        ) : mail.ok ? (
+          <Alert tone="success">الاتصال بخادم البريد ناجح ({mail.host}).</Alert>
+        ) : (
+          <Alert tone="error">تعذر الاتصال بخادم البريد: {mail.error}</Alert>
+        )}
+      </Card>
+
+      <Card className="p-4">
+        <h3 className="mb-2 text-sm font-semibold text-text">التخزين</h3>
+        <div className="flex flex-row flex-wrap gap-2">
+          <Button
+            variant="secondary"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              try {
+                setResult(await api.admin.purge(true));
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            فحص التنظيف (بدون حذف)
+          </Button>
+          <Button
+            variant="secondary"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              try {
+                setResult(await api.admin.manifests());
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            إعادة توليد الفهارس
+          </Button>
+          <Button
+            variant="secondary"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              try {
+                setResult(await api.admin.missingBlobs());
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            فحص سلامة الملفات
+          </Button>
+        </div>
+        {result ? (
+          <pre dir="ltr" className="mt-3 max-h-60 overflow-auto rounded bg-surface-muted p-2 text-xs">
+            {JSON.stringify(result, null, 2)}
+          </pre>
+        ) : null}
+      </Card>
+    </div>
+  );
+}
+
+function Stat({ label, value, tone }) {
+  const tones = { warn: 'text-amber-600', bad: 'text-red-600' };
+  return (
+    <Card className="p-4 text-center">
+      <p className={`num text-2xl font-semibold ${tones[tone] ?? 'text-text'}`}>{value}</p>
+      <p className="text-xs text-text-muted">{label}</p>
+    </Card>
   );
 }
 

@@ -6,6 +6,7 @@ import {
   FolderTree as FolderTreeIcon,
   KeyRound,
   Settings,
+  Trash2,
 } from 'lucide-react';
 
 import { useAuth } from './auth.jsx';
@@ -18,6 +19,7 @@ import Browse from './pages/Browse.jsx';
 import Search from './pages/Search.jsx';
 import Admin from './pages/Admin.jsx';
 import DocumentDetail from './pages/DocumentDetail.jsx';
+import RecycleBin from './pages/RecycleBin.jsx';
 
 /**
  * Application shell, per docs/UI_UX_AGENT_STANDARDS.md section 2:
@@ -57,6 +59,7 @@ function Shell() {
   const navigation = [
     { to: '/folders', label: 'المجلدات', icon: FolderTreeIcon },
     { to: '/search', label: 'البحث', icon: SearchIcon },
+    { to: '/recycle-bin', label: 'المحذوفات', icon: Trash2 },
     // Rendered only for super admins. The API gates every /api/admin route
     // independently, so hiding the link is convenience, not the control.
     ...(user.isSuperAdmin ? [{ to: '/admin', label: 'الإدارة', icon: Settings }] : []),
@@ -149,6 +152,7 @@ function Shell() {
               <Route path="/folders/:folderId" element={<Browse />} />
               <Route path="/documents/:documentId" element={<DocumentDetail />} />
               <Route path="/search" element={<Search />} />
+              <Route path="/recycle-bin" element={<RecycleBin />} />
               <Route path="/admin" element={<Admin />} />
               <Route path="/password" element={<ChangePassword />} />
               <Route path="*" element={<Navigate to="/folders" replace />} />

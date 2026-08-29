@@ -18,6 +18,7 @@ import { Button, IconButton, Card, Spinner, EmptyState, Alert, ReadOnlyBadge } f
 import ScanPanel from '../components/ScanPanel.jsx';
 import { useTree } from '../TreeContext.jsx';
 import PermissionsPanel from '../components/PermissionsPanel.jsx';
+import DropZone from '../components/DropZone.jsx';
 
 /**
  * Folder browser: subfolders and documents for one folder.
@@ -38,6 +39,7 @@ export default function Browse() {
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const [showPermissions, setShowPermissions] = useState(false);
+  const [notice, setNotice] = useState(null);
   const fileInput = useRef(null);
 
   const load = useCallback(async () => {
@@ -67,26 +69,48 @@ export default function Browse() {
 
   const permissions = data?.folder?.permissions ?? {};
 
-  async function upload(event) {
-    const file = event.target.files?.[0];
-    // Cleared immediately so choosing the same file twice still fires onChange.
-    event.target.value = '';
-    if (!file || !folderId) return;
+  /** Uploads a list of files one at a time, reporting what happened to each. */
+  async function uploadFiles(files) {
+    if (!files?.length || !folderId) return;
 
     setBusy(true);
     setError(null);
-    try {
-      await api.upload(folderId, file);
-      await Promise.all([load(), reloadTree()]);
-    } catch (caught) {
-      setError(
-        caught instanceof ApiError && caught.code === 'too_large'
-          ? 'حجم الملف يتجاوز الحد المسموح.'
-          : 'تعذر رفع الملف.',
-      );
-    } finally {
-      setBusy(false);
+    setNotice(null);
+
+    const failed = [];
+    const duplicates = [];
+
+    for (const file of files) {
+      try {
+        const result = await api.upload(folderId, file);
+        if (result.duplicateOf?.length) duplicates.push(file.name);
+      } catch (caught) {
+        failed.push(
+          caught instanceof ApiError && caught.code === 'too_large'
+            ? `${file.name}: يتجاوز الحد المسموح`
+            : caught instanceof ApiError && caught.code === 'duplicate'
+              ? `${file.name}: مكرر`
+              : caught instanceof ApiError && caught.code === 'required_field'
+                ? `${file.name}: حقول مطلوبة (${caught.body?.detail ?? ''})`
+                : file.name,
+        );
+      }
     }
+
+    // Reported per file rather than as one pass/fail: dropping ten files and
+    // being told only that "something failed" is not actionable.
+    if (failed.length) setError(`تعذر رفع: ${failed.join('، ')}`);
+    if (duplicates.length) setNotice(`نسخة مطابقة موجودة مسبقاً من: ${duplicates.join('، ')}`);
+
+    await Promise.all([load(), reloadTree()]);
+    setBusy(false);
+  }
+
+  async function upload(event) {
+    const files = [...(event.target.files ?? [])];
+    // Cleared immediately so choosing the same file twice still fires onChange.
+    event.target.value = '';
+    await uploadFiles(files);
   }
 
   async function createFolder() {
@@ -187,13 +211,14 @@ export default function Browse() {
               <Button icon={Upload} onClick={() => fileInput.current?.click()} disabled={busy}>
                 {busy ? 'جارٍ الرفع…' : 'رفع وثيقة'}
               </Button>
-              <input ref={fileInput} type="file" className="hidden" onChange={upload} />
+              <input ref={fileInput} type="file" multiple className="hidden" onChange={upload} />
             </>
           ) : null}
         </div>
       </div>
 
       {error ? <Alert tone="error">{error}</Alert> : null}
+      {notice ? <Alert tone="warning">{notice}</Alert> : null}
 
       {showPermissions && folderId ? (
         <PermissionsPanel
@@ -238,6 +263,7 @@ export default function Browse() {
       ) : null}
 
       {folderId ? (
+        <DropZone onFiles={uploadFiles} disabled={busy || !permissions.upload}>
         <Card className="overflow-hidden">
           {documentCount > 0 ? (
             <div className="overflow-x-auto">
@@ -308,6 +334,7 @@ export default function Browse() {
             />
           )}
         </Card>
+        </DropZone>
       ) : null}
 
       {!folderId && folderCount === 0 ? (

@@ -72,14 +72,34 @@ export const api = {
   contentUrl: (documentId, version) =>
     `/api/documents/${documentId}/content${version ? `?version=${version}` : ''}`,
 
-  upload: (folderId, file, { title } = {}) => {
+  upload: (folderId, file, { title, typeId, fields } = {}) => {
     const form = new FormData();
     // Fields must precede the file part: the server reads them from the same
     // multipart stream, and anything after the file is not visible while the
     // upload is being consumed.
     if (title) form.append('title', title);
+    if (typeId) form.append('typeId', String(typeId));
+    // One JSON part rather than a part per value — far easier for a client to
+    // order correctly than a dozen separate fields.
+    if (fields?.length) form.append('fields', JSON.stringify(fields));
     form.append('file', file, file.name);
     return request(`/api/folders/${folderId}/documents`, { method: 'POST', body: form, raw: true });
+  },
+
+  recycleBin: (folderId) =>
+    request(`/api/recycle-bin${folderId ? `?folderId=${folderId}` : ''}`),
+  restoreDocument: (documentId) =>
+    request(`/api/documents/${documentId}/restore`, { method: 'POST' }),
+  purgeDocument: (documentId) =>
+    request(`/api/documents/${documentId}/purge`, { method: 'POST' }),
+
+  advancedSearch: (criteria) =>
+    request('/api/search/advanced', { method: 'POST', body: criteria }),
+
+  settings: {
+    list: () => request('/api/settings'),
+    set: (key, value) => request(`/api/settings/${key}`, { method: 'PUT', body: { value } }),
+    clear: (key) => request(`/api/settings/${key}`, { method: 'DELETE' }),
   },
 
   admin: {

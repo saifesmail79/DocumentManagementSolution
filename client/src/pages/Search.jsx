@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Search as SearchIcon, FileText, Folder, X } from 'lucide-react';
+import { Search as SearchIcon, FileText, Folder, X, SlidersHorizontal } from 'lucide-react';
 
 import { api } from '../api.js';
 import { formatDate } from '../format.js';
 import { Card, Spinner, EmptyState, Alert, ReadOnlyBadge } from '../components/ui.jsx';
+import SearchCriteria from '../components/SearchCriteria.jsx';
 
 /**
  * Search results.
@@ -24,6 +25,8 @@ export default function Search() {
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [advanced, setAdvanced] = useState(false);
+  const [criteria, setCriteria] = useState({ fields: [] });
 
   useEffect(() => {
     setDraft(query);
@@ -59,6 +62,36 @@ export default function Search() {
     setParams(draft.trim() ? { q: draft.trim() } : {});
   }
 
+  /**
+   * Runs a multi-criteria search.
+   *
+   * Kept out of the URL, unlike the simple query: the criteria object is
+   * structured and a client will want to save it, which is a different feature
+   * from a linkable result set.
+   */
+  async function runAdvanced() {
+    setLoading(true);
+    setError(null);
+    try {
+      setResults(
+        await api.advancedSearch({
+          q: draft.trim() || null,
+          typeId: criteria.typeId || null,
+          labelId: criteria.labelId || null,
+          createdFrom: criteria.createdFrom || null,
+          createdTo: criteria.createdTo || null,
+          // Rows with no field chosen are dropped rather than sent as empty
+          // criteria that would narrow nothing and confuse the result count.
+          fields: (criteria.fields ?? []).filter((c) => c.fieldId),
+        }),
+      );
+    } catch {
+      setError('تعذر تنفيذ البحث.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <div className="space-y-4">
       <form onSubmit={submit} className="relative max-w-xl">
@@ -86,6 +119,26 @@ export default function Search() {
           </button>
         ) : null}
       </form>
+
+      <button
+        onClick={() => setAdvanced((v) => !v)}
+        className="flex items-center gap-1.5 text-xs text-text-muted hover:text-primary"
+      >
+        <SlidersHorizontal size={13} />
+        {advanced ? 'إخفاء البحث المتقدّم' : 'بحث متقدّم'}
+      </button>
+
+      {advanced ? (
+        <SearchCriteria
+          value={criteria}
+          onChange={setCriteria}
+          onSearch={runAdvanced}
+          onClear={() => {
+            setCriteria({ fields: [] });
+            setResults(null);
+          }}
+        />
+      ) : null}
 
       {error ? <Alert tone="error">{error}</Alert> : null}
       {loading ? <Spinner label="جارٍ البحث…" /> : null}

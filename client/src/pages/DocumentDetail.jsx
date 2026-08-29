@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { FileText, Download, Save, History, Folder, Upload, ArrowRight } from 'lucide-react';
+import { FileText, Download, Save, History, Folder, ArrowRight, Eye, EyeOff } from 'lucide-react';
 
 import { api, ApiError } from '../api.js';
 import { formatDate, formatBytes } from '../format.js';
@@ -26,6 +26,7 @@ export default function DocumentDetail() {
   const [error, setError] = useState(null);
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState(true);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -153,6 +154,34 @@ export default function DocumentDetail() {
 
       {error ? <Alert tone="error">{error}</Alert> : null}
       {saved ? <Alert tone="success">تم حفظ التعديلات.</Alert> : null}
+
+      {/*
+        Rendered in an iframe rather than by shipping a PDF viewer: every target
+        browser has one built in, it honours the Range requests the content route
+        already serves, and it keeps ~400KB of viewer out of the bundle for a
+        page most visits never open.
+      */}
+      {document.canRead && isPreviewable(document) ? (
+        <Card className="overflow-hidden">
+          <div className="flex items-center justify-between border-b border-border px-4 py-2">
+            <span className="text-sm font-medium text-text">معاينة</span>
+            <button
+              onClick={() => setPreview((v) => !v)}
+              className="flex items-center gap-1 text-xs text-text-muted hover:text-primary"
+            >
+              {preview ? <EyeOff size={13} /> : <Eye size={13} />}
+              {preview ? 'إخفاء' : 'عرض'}
+            </button>
+          </div>
+          {preview ? (
+            <iframe
+              title={document.title}
+              src={api.contentUrl(documentId)}
+              className="h-[70vh] w-full border-0 bg-surface-muted"
+            />
+          ) : null}
+        </Card>
+      ) : null}
 
       <div className="grid gap-4 lg:grid-cols-3">
         <Card className="p-4 lg:col-span-2">
@@ -362,4 +391,17 @@ function FieldInput({ field, value, disabled, onChange }) {
       />
     </label>
   );
+}
+
+/**
+ * Whether the browser can render this inline.
+ *
+ * Deliberately narrow: a type the browser cannot display would either download
+ * on open or render as a wall of bytes, and both read as the page being broken.
+ * Office preview is a separate Tier 2 feature needing a converter.
+ */
+function isPreviewable(document) {
+  const version = document.versions?.[0];
+  const mime = String(version?.mimeType ?? '').toLowerCase();
+  return mime === 'application/pdf' || mime.startsWith('image/') || mime.startsWith('text/');
 }
