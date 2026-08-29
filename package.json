@@ -11,8 +11,8 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "migrate": "node src/db/migrate.js",
-    "test": "node --test tests/arabic.test.js tests/storage.test.js tests/acl.integration.test.js",
-    "test:db": "node --test tests/acl.integration.test.js"
+    "test": "node --test --test-concurrency=1 tests/arabic.test.js tests/storage.test.js tests/acl.integration.test.js tests/documents.integration.test.js",
+    "test:db": "node --test --test-concurrency=1 tests/acl.integration.test.js tests/documents.integration.test.js"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",

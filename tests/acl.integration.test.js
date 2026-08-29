@@ -20,7 +20,7 @@
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { config as loadEnv } from 'dotenv';
-import { resolveTestDatabase, ensureTestDatabase } from './helpers/test-database.js';
+import { resolveTestDatabase, ensureTestDatabase, resetDatabase } from './helpers/test-database.js';
 
 // Load .env here as well as in src/config. The skip decision below is made at
 // module-evaluation time, before anything imports the app's config, so without
@@ -41,15 +41,9 @@ let ALL_PERMS;
 const id = {};
 
 async function seed() {
-  // Clean slate, children before parents.
-  await sql`DELETE FROM dbo.effective_permissions`.execute(db);
-  await sql`DELETE FROM dbo.access_control_entries`.execute(db);
-  await sql`DELETE FROM dbo.group_members`.execute(db);
-  await sql`DELETE FROM dbo.folders WHERE parent_id IS NOT NULL`.execute(db);
-  await sql`DELETE FROM dbo.folders`.execute(db);
-  await sql`DELETE FROM dbo.users`.execute(db);
-  await sql`DELETE FROM dbo.groups`.execute(db);
-  await sql`DELETE FROM dbo.principals`.execute(db);
+  // Shared with the other integration files so that a new migration's tables are
+  // cleared here too — see TRUNCATION_ORDER in helpers/test-database.js.
+  await resetDatabase(db, sql);
 
   const newUser = async (username, { superAdmin = false, active = true } = {}) => {
     const p = await sql`

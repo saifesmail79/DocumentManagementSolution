@@ -13,6 +13,12 @@
  *
  * tedious is used directly rather than the app's pool: the target database may
  * not exist yet, and the pool cannot connect to a database that is missing.
+ *
+ * Every integration file shares this one database and truncates it in its own
+ * before() hook, so they must not run at the same time. `node --test` runs files
+ * concurrently by default; the npm scripts pass --test-concurrency=1 for exactly
+ * this reason. Removing that flag produces foreign-key violations during seeding
+ * that look like schema bugs and are not.
  */
 
 import { Connection, Request } from 'tedious';
@@ -51,6 +57,70 @@ export function resolveTestDatabase() {
 
   process.env.DB_NAME = database;
   return { configured: true, database, appDatabase };
+}
+
+/**
+ * Table truncation order, children before parents.
+ *
+ * This lives here rather than in each test file so that adding a migration means
+ * updating one list. When it was per-file, migration 0002 broke the permission
+ * suite: its seed deleted folders that documents still referenced, and the
+ * foreign-key error read like a schema bug rather than stale test setup.
+ *
+ * Folders are handled separately — the tree is self-referencing and arbitrarily
+ * deep, so a single DELETE cannot satisfy FK_folders_parent.
+ */
+const TRUNCATION_ORDER = [
+  'document_tags',
+  'tags',
+  'document_field_values',
+  'document_versions',
+  'documents',
+  'custom_field_choices',
+  'custom_field_defs',
+  'document_types',
+  'sensitivity_labels',
+  'effective_permissions',
+  'access_control_entries',
+  'group_members',
+  'user_roles',
+  'roles',
+];
+
+/**
+ * Empties every application table. Skips tables a migration has not created yet,
+ * so an older test file still runs against a partially migrated database.
+ *
+ * @param {unknown} db   the Kysely instance
+ * @param {(strings: TemplateStringsArray, ...values: unknown[]) => any} sql
+ */
+export async function resetDatabase(db, sql) {
+  const present = new Set(
+    (
+      await sql`SELECT TABLE_NAME AS name FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'`.execute(
+        db,
+      )
+    ).rows.map((r) => r.name),
+  );
+
+  for (const table of TRUNCATION_ORDER) {
+    if (present.has(table)) await sql.raw(`DELETE FROM dbo.${table}`).execute(db);
+  }
+
+  // Peel the tree from the leaves inward. A depth-ordered delete would also work,
+  // but this does not assume `depth` is maintained correctly — which is one of the
+  // things the tests are checking.
+  if (present.has('folders')) {
+    await sql`
+      WHILE EXISTS (SELECT 1 FROM dbo.folders)
+        DELETE FROM dbo.folders
+        WHERE folder_id NOT IN (SELECT parent_id FROM dbo.folders WHERE parent_id IS NOT NULL);
+    `.execute(db);
+  }
+
+  for (const table of ['users', 'groups', 'principals']) {
+    if (present.has(table)) await sql.raw(`DELETE FROM dbo.${table}`).execute(db);
+  }
 }
 
 /** Runs one statement on `master` over a short-lived tedious connection. */
