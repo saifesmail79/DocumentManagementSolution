@@ -1,5 +1,12 @@
 import { Routes, Route, Navigate, Link, useLocation, useNavigate } from 'react-router-dom';
-import { FileText, LogOut, Search as SearchIcon, FolderTree as FolderTreeIcon, KeyRound } from 'lucide-react';
+import {
+  FileText,
+  LogOut,
+  Search as SearchIcon,
+  FolderTree as FolderTreeIcon,
+  KeyRound,
+  Settings,
+} from 'lucide-react';
 
 import { useAuth } from './auth.jsx';
 import { TreeProvider } from './TreeContext.jsx';
@@ -9,6 +16,7 @@ import Login from './pages/Login.jsx';
 import ChangePassword from './pages/ChangePassword.jsx';
 import Browse from './pages/Browse.jsx';
 import Search from './pages/Search.jsx';
+import Admin from './pages/Admin.jsx';
 
 /**
  * Application shell, per docs/UI_UX_AGENT_STANDARDS.md section 2:
@@ -48,6 +56,9 @@ function Shell() {
   const navigation = [
     { to: '/folders', label: 'المجلدات', icon: FolderTreeIcon },
     { to: '/search', label: 'البحث', icon: SearchIcon },
+    // Rendered only for super admins. The API gates every /api/admin route
+    // independently, so hiding the link is convenience, not the control.
+    ...(user.isSuperAdmin ? [{ to: '/admin', label: 'الإدارة', icon: Settings }] : []),
   ];
 
   const active = navigation.find((item) => location.pathname.startsWith(item.to));
@@ -136,6 +147,7 @@ function Shell() {
               <Route path="/folders" element={<Browse />} />
               <Route path="/folders/:folderId" element={<Browse />} />
               <Route path="/search" element={<Search />} />
+              <Route path="/admin" element={<Admin />} />
               <Route path="/password" element={<ChangePassword />} />
               <Route path="*" element={<Navigate to="/folders" replace />} />
             </Routes>

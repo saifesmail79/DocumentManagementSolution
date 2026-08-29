@@ -26,6 +26,7 @@ import { registerAuth } from './modules/auth/routes.js';
 import { treeRoutes } from './modules/tree/routes.js';
 import { documentRoutes } from './modules/documents/routes.js';
 import { searchRoutes } from './modules/search/routes.js';
+import { adminRoutes } from './modules/admin/routes.js';
 
 const log = moduleLogger('server');
 
@@ -66,6 +67,7 @@ export async function buildApp({ logger: withLogger = true } = {}) {
   await app.register(treeRoutes, { prefix: '/api/folders' });
   await app.register(documentRoutes, { prefix: '/api' });
   await app.register(searchRoutes, { prefix: '/api/search' });
+  await app.register(adminRoutes, { prefix: '/api/admin' });
 
   await registerClient(app);
 

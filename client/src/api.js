@@ -71,6 +71,42 @@ export const api = {
     return request(`/api/folders/${folderId}/documents`, { method: 'POST', body: form, raw: true });
   },
 
+  admin: {
+    users: (q) => request(`/api/admin/users${q ? `?q=${encodeURIComponent(q)}` : ''}`),
+    createUser: (body) => request('/api/admin/users', { method: 'POST', body }),
+    setActive: (userId, active) =>
+      request(`/api/admin/users/${userId}/active`, { method: 'POST', body: { active } }),
+    setSuperAdmin: (userId, isSuperAdmin) =>
+      request(`/api/admin/users/${userId}/super-admin`, { method: 'POST', body: { isSuperAdmin } }),
+    resetPassword: (userId) => request(`/api/admin/users/${userId}/reset-password`, { method: 'POST' }),
+    unlock: (userId) => request(`/api/admin/users/${userId}/unlock`, { method: 'POST' }),
+
+    groups: () => request('/api/admin/groups'),
+    createGroup: (body) => request('/api/admin/groups', { method: 'POST', body }),
+    groupMembers: (groupId) => request(`/api/admin/groups/${groupId}/members`),
+    addMember: (groupId, principalId) =>
+      request(`/api/admin/groups/${groupId}/members`, { method: 'POST', body: { principalId } }),
+    removeMember: (groupId, principalId) =>
+      request(`/api/admin/groups/${groupId}/members/${principalId}`, { method: 'DELETE' }),
+
+    roles: () => request('/api/admin/roles'),
+    createRole: (body) => request('/api/admin/roles', { method: 'POST', body }),
+    deleteRole: (roleId) => request(`/api/admin/roles/${roleId}`, { method: 'DELETE' }),
+
+    principals: (q) => request(`/api/admin/principals${q ? `?q=${encodeURIComponent(q)}` : ''}`),
+    folderAcl: (folderId) => request(`/api/admin/folders/${folderId}/acl`),
+    setAce: (folderId, principalId, body) =>
+      request(`/api/admin/folders/${folderId}/acl/${principalId}`, { method: 'PUT', body }),
+    removeAce: (folderId, principalId) =>
+      request(`/api/admin/folders/${folderId}/acl/${principalId}`, { method: 'DELETE' }),
+    setInheritance: (folderId, inherits, copyInherited = true) =>
+      request(`/api/admin/folders/${folderId}/inheritance`, {
+        method: 'POST',
+        body: { inherits, copyInherited },
+      }),
+    extractionStats: () => request('/api/admin/extraction/stats'),
+  },
+
   search: (query, { folderId, limit = 25, offset = 0, content = true } = {}) => {
     const params = new URLSearchParams({ q: query, limit: String(limit), offset: String(offset) });
     if (folderId) params.set('folderId', folderId);

@@ -9,6 +9,7 @@ import {
   Download,
   ChevronLeft,
   Home,
+  Shield,
 } from 'lucide-react';
 
 import { api, ApiError } from '../api.js';
@@ -16,6 +17,7 @@ import { formatDate } from '../format.js';
 import { Button, IconButton, Card, Spinner, EmptyState, Alert, ReadOnlyBadge } from '../components/ui.jsx';
 import ScanPanel from '../components/ScanPanel.jsx';
 import { useTree } from '../TreeContext.jsx';
+import PermissionsPanel from '../components/PermissionsPanel.jsx';
 
 /**
  * Folder browser: subfolders and documents for one folder.
@@ -35,6 +37,7 @@ export default function Browse() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [showPermissions, setShowPermissions] = useState(false);
   const fileInput = useRef(null);
 
   const load = useCallback(async () => {
@@ -169,6 +172,16 @@ export default function Browse() {
               مجلد جديد
             </Button>
           ) : null}
+          {folderId && permissions.managePerms ? (
+            <Button
+              variant="secondary"
+              icon={Shield}
+              onClick={() => setShowPermissions((v) => !v)}
+              disabled={busy}
+            >
+              الصلاحيات
+            </Button>
+          ) : null}
           {folderId && permissions.upload ? (
             <>
               <Button icon={Upload} onClick={() => fileInput.current?.click()} disabled={busy}>
@@ -181,6 +194,15 @@ export default function Browse() {
       </div>
 
       {error ? <Alert tone="error">{error}</Alert> : null}
+
+      {showPermissions && folderId ? (
+        <PermissionsPanel
+          folderId={folderId}
+          folderName={data?.folder?.name ?? ''}
+          onClose={() => setShowPermissions(false)}
+          onChanged={() => Promise.all([load(), reloadTree()])}
+        />
+      ) : null}
 
       {/* Scanning sits beside the ordinary upload, never replacing it: without
           the bridge installed this renders a short note and the file picker
