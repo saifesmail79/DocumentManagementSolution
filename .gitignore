@@ -1,0 +1,25 @@
+node_modules/
+.env
+.env.*
+!.env.example
+
+# Runtime output
+server/logs/*.log
+*.log
+
+# Document storage — never commit user documents.
+# Anchored to the repo root so it does not also swallow src/storage/.
+/storage/
+/blobs/
+
+# Build output
+dist/
+build/
+client/dist/
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+*.swp
