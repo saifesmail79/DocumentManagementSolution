@@ -17,6 +17,7 @@ import { config } from './config/index.js';
 import { logger, moduleLogger } from './lib/logger.js';
 import { verifyConnection } from './db/index.js';
 import { registerAuth } from './modules/auth/routes.js';
+import { treeRoutes } from './modules/tree/routes.js';
 
 const log = moduleLogger('server');
 
@@ -47,6 +48,8 @@ export async function buildApp({ logger: withLogger = true } = {}) {
 
   // Called with the root instance on purpose — see the note in modules/auth/routes.js.
   registerAuth(app);
+
+  await app.register(treeRoutes, { prefix: '/api/folders' });
 
   /**
    * Liveness and readiness in one. Returns 503 when the database is unreachable
