@@ -18,7 +18,11 @@ build/
 client/dist/
 
 # Editor / OS
-.vscode/
+# Ignore personal editor settings but share the build task, so Ctrl+Shift+B works
+# from a fresh clone. Exclude the contents, not the directory: git does not descend
+# into an excluded directory, so a negation under `.vscode/` would never match.
+.vscode/*
+!.vscode/tasks.json
 .idea/
 Thumbs.db
 Desktop.ini

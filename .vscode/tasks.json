@@ -1,0 +1,36 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Start Backend",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "label": "DMS API",
+        "group": "dms",
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": false
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Start Backend + Frontend",
+      "detail": "Ctrl+Shift+B — runs the DMS API. The frontend task is added when the React app is scaffolded.",
+      "dependsOn": ["Start Backend"],
+      "dependsOrder": "parallel",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always"
+      },
+      "problemMatcher": []
+    }
+  ]
+}
