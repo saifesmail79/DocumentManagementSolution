@@ -16,6 +16,12 @@
 
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { config as loadEnv } from 'dotenv';
+
+// Load .env here as well as in src/config. The skip decision below is made at
+// module-evaluation time, before anything imports the app's config, so without
+// this the suite silently skips even when a database is configured.
+loadEnv();
 
 const CONFIGURED = Boolean(process.env.DB_SERVER);
 
