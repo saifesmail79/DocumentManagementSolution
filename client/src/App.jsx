@@ -1,7 +1,9 @@
 import { Routes, Route, Navigate, Link, useLocation, useNavigate } from 'react-router-dom';
-import { FileText, LogOut, Search as SearchIcon, FolderTree, KeyRound } from 'lucide-react';
+import { FileText, LogOut, Search as SearchIcon, FolderTree as FolderTreeIcon, KeyRound } from 'lucide-react';
 
 import { useAuth } from './auth.jsx';
+import { TreeProvider } from './TreeContext.jsx';
+import FolderTree from './components/FolderTree.jsx';
 import { Spinner } from './components/ui.jsx';
 import Login from './pages/Login.jsx';
 import ChangePassword from './pages/ChangePassword.jsx';
@@ -31,7 +33,11 @@ export default function App() {
   // one. Showing the shell with dead links would just produce 403s.
   if (user.mustChangePassword) return <ChangePassword forced />;
 
-  return <Shell />;
+  return (
+    <TreeProvider>
+      <Shell />
+    </TreeProvider>
+  );
 }
 
 function Shell() {
@@ -40,15 +46,15 @@ function Shell() {
   const navigate = useNavigate();
 
   const navigation = [
-    { to: '/folders', label: 'المجلدات', icon: FolderTree },
+    { to: '/folders', label: 'المجلدات', icon: FolderTreeIcon },
     { to: '/search', label: 'البحث', icon: SearchIcon },
   ];
 
   const active = navigation.find((item) => location.pathname.startsWith(item.to));
 
   return (
-    <div className="flex min-h-screen bg-surface-muted text-text">
-      <div className="flex flex-1 flex-col">
+    <div className="flex h-screen bg-surface-muted text-text">
+      <div className="flex min-h-0 flex-1 flex-col">
         <header className="border-b border-border bg-surface shadow-sm">
           <div className="flex items-center justify-between gap-4 px-6 py-3">
             {/* RIGHT SIDE in RTL: logo, app name, navigation */}
@@ -115,16 +121,26 @@ function Shell() {
           نظام إدارة الوثائق {active ? <span> &gt; {active.label}</span> : null}
         </div>
 
-        <main className="flex-1 overflow-auto p-6">
-          <Routes>
-            <Route path="/" element={<Navigate to="/folders" replace />} />
-            <Route path="/folders" element={<Browse />} />
-            <Route path="/folders/:folderId" element={<Browse />} />
-            <Route path="/search" element={<Search />} />
-            <Route path="/password" element={<ChangePassword />} />
-            <Route path="*" element={<Navigate to="/folders" replace />} />
-          </Routes>
-        </main>
+        <div className="flex min-h-0 flex-1">
+          {/* The tree is first in DOM order, so RTL puts it on the right — the
+              side an Arabic reader starts from. */}
+          {/* The divider lives on main's inline-start, which RTL places between
+              the two panels without a second border to keep in sync. */}
+          <aside className="hidden w-64 shrink-0 overflow-y-auto bg-surface p-3 lg:block">
+            <FolderTree />
+          </aside>
+
+          <main className="min-w-0 flex-1 overflow-auto border-border p-6 lg:border-s">
+            <Routes>
+              <Route path="/" element={<Navigate to="/folders" replace />} />
+              <Route path="/folders" element={<Browse />} />
+              <Route path="/folders/:folderId" element={<Browse />} />
+              <Route path="/search" element={<Search />} />
+              <Route path="/password" element={<ChangePassword />} />
+              <Route path="*" element={<Navigate to="/folders" replace />} />
+            </Routes>
+          </main>
+        </div>
       </div>
     </div>
   );

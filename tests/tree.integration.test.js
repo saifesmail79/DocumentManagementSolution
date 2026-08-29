@@ -216,6 +216,100 @@ describe('filing tree routes', { skip: CONFIGURED ? false : target.reason }, () 
     assert.equal(response.statusCode, 400);
   });
 
+  // ── The tree endpoint ──────────────────────────────────────────────────
+
+  test('the tree returns every browsable folder, and nothing else', async () => {
+    const body = (await get('/api/folders/tree', readerCookie)).json();
+    const names = body.folders.map((f) => f.name);
+
+    assert.ok(names.includes('cabinet'));
+    assert.ok(names.includes('contracts'));
+    assert.ok(!names.includes('personnel'), 'ungranted root must be absent');
+    assert.ok(!names.includes('vault'), 'broken inheritance with no grant must be absent');
+    assert.equal(body.truncated, false);
+  });
+
+  test('each tree node carries its parent, so the client can nest it', async () => {
+    const body = (await get('/api/folders/tree', readerCookie)).json();
+    const cabinet = body.folders.find((f) => f.name === 'cabinet');
+    const contracts = body.folders.find((f) => f.name === 'contracts');
+
+    assert.equal(cabinet.parentId, null, 'a root has no parent');
+    assert.equal(contracts.parentId, String(id.cabinet));
+    assert.equal(contracts.depth, 1);
+    assert.equal(typeof contracts.documentCount, 'number');
+  });
+
+  test('parents always precede their descendants', async () => {
+    const body = (await get('/api/folders/tree', readerCookie)).json();
+    const seen = new Set();
+    for (const folder of body.folders) {
+      if (folder.parentId && body.folders.some((f) => f.folderId === folder.parentId)) {
+        assert.ok(seen.has(folder.parentId), `${folder.name} appeared before its parent`);
+      }
+      seen.add(folder.folderId);
+    }
+  });
+
+  /**
+   * A folder can be visible while its parent is not — break inheritance on a
+   * child and grant it. That is a normal way to share one subfolder out of a
+   * private branch, and a tree builder that drops nodes whose parent is missing
+   * would hide a folder the user was deliberately given.
+   */
+  test('a folder granted inside an invisible parent is still returned', async () => {
+    await makeFolder('shared-corner', 'personnel', { inherits: false });
+    await grant('shared-corner', id.reader, PERM.BROWSE | PERM.READ);
+
+    const body = (await get('/api/folders/tree', readerCookie)).json();
+    const orphan = body.folders.find((f) => f.name === 'shared-corner');
+
+    assert.ok(orphan, 'the granted folder must be present');
+    assert.equal(orphan.parentId, String(id.personnel));
+    assert.ok(
+      !body.folders.some((f) => f.folderId === orphan.parentId),
+      'and its parent must genuinely be absent — this is the orphan case',
+    );
+
+    // It is still reachable directly, which is the point of the grant.
+    assert.equal((await get(`/api/folders/${id['shared-corner']}`, readerCookie)).statusCode, 200);
+  });
+
+  test('a user with no grants gets an empty tree', async () => {
+    const body = (await get('/api/folders/tree', strangerCookie)).json();
+    assert.deepEqual(body.folders, []);
+  });
+
+  test('the tree reports truncation rather than silently cutting off', async () => {
+    const body = (await get('/api/folders/tree?limit=1', readerCookie)).json();
+    assert.equal(body.folders.length, 1);
+    assert.equal(body.truncated, true, 'a capped tree must say so');
+  });
+
+  // ── Breadcrumb ancestors ───────────────────────────────────────────────
+
+  test('a folder ships the ancestor chain for its breadcrumb', async () => {
+    const body = (await get(`/api/folders/${id.contracts}`, readerCookie)).json();
+
+    assert.deepEqual(
+      body.ancestors.map((a) => a.name),
+      ['cabinet', 'contracts'],
+      'the chain runs root-first and includes the folder itself',
+    );
+    assert.ok(body.ancestors.every((a) => a.visible));
+  });
+
+  test('an invisible ancestor is a placeholder, not a gap', async () => {
+    const body = (await get(`/api/folders/${id['shared-corner']}`, readerCookie)).json();
+
+    // Collapsing the chain would imply the folder sits at the root, which is a
+    // lie about where it lives in the filing structure.
+    assert.equal(body.ancestors.length, 2);
+    assert.equal(body.ancestors[0].visible, false);
+    assert.equal(body.ancestors[0].name, null, 'the name of a folder you cannot see must not leak');
+    assert.equal(body.ancestors[1].name, 'shared-corner');
+  });
+
   // ── Soft deletion ──────────────────────────────────────────────────────
 
   test('a soft-deleted folder vanishes from the listing', async () => {

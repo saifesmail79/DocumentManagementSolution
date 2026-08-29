@@ -42,7 +42,14 @@ export async function pagesToPdfFile(pages, { title } = {}) {
     pdf.addPage([width, height]).drawImage(image, { x: 0, y: 0, width, height });
   }
 
-  const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15);
+  // The hyphen is last in the character class deliberately. Tailwind scans source
+  // files — comments included — for class names, and a bracket group beginning
+  // with a hyphen followed by a colon reads as an arbitrary property, which emits
+  // an invalid declaration into the stylesheet. Same characters, no phantom rule.
+  //
+  // 14 characters is yyyyMMddHHmmss; 15 would include the decimal point that
+  // precedes the milliseconds and produce a filename with two dots before .pdf.
+  const stamp = new Date().toISOString().replace(/[:T-]/g, '').slice(0, 14);
   // The filename only supplies the extension and a fallback title; the real
   // title is sent as a form field.
   const name = title ? `${title}.pdf` : `scan-${stamp}.pdf`;

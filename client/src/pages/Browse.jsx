@@ -1,11 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { Folder, FileText, Upload, FolderPlus, Trash2, Download, ChevronLeft } from 'lucide-react';
+import {
+  Folder,
+  FileText,
+  Upload,
+  FolderPlus,
+  Trash2,
+  Download,
+  ChevronLeft,
+  Home,
+} from 'lucide-react';
 
 import { api, ApiError } from '../api.js';
 import { formatDate } from '../format.js';
 import { Button, IconButton, Card, Spinner, EmptyState, Alert, ReadOnlyBadge } from '../components/ui.jsx';
 import ScanPanel from '../components/ScanPanel.jsx';
+import { useTree } from '../TreeContext.jsx';
 
 /**
  * Folder browser: subfolders and documents for one folder.
@@ -19,6 +29,7 @@ import ScanPanel from '../components/ScanPanel.jsx';
 export default function Browse() {
   const { folderId } = useParams();
   const navigate = useNavigate();
+  const { reload: reloadTree } = useTree();
 
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -63,7 +74,7 @@ export default function Browse() {
     setError(null);
     try {
       await api.upload(folderId, file);
-      await load();
+      await Promise.all([load(), reloadTree()]);
     } catch (caught) {
       setError(
         caught instanceof ApiError && caught.code === 'too_large'
@@ -82,7 +93,9 @@ export default function Browse() {
     setBusy(true);
     try {
       await api.createFolder(folderId ?? null, name.trim());
-      await load();
+      // The panel shows folders and their document counts, so both a new folder
+      // and a new document put it out of date.
+      await Promise.all([load(), reloadTree()]);
     } catch {
       setError('تعذر إنشاء المجلد.');
     } finally {
@@ -95,7 +108,7 @@ export default function Browse() {
     setBusy(true);
     try {
       await api.deleteDocument(documentId);
-      await load();
+      await Promise.all([load(), reloadTree()]);
     } catch {
       setError('تعذر حذف الوثيقة.');
     } finally {
@@ -110,6 +123,35 @@ export default function Browse() {
 
   return (
     <div className="space-y-4">
+      {data?.ancestors?.length ? (
+        <nav aria-label="مسار المجلد" className="flex flex-wrap items-center gap-1 text-xs text-text-muted">
+          <button onClick={() => navigate('/folders')} className="flex items-center gap-1 hover:text-primary">
+            <Home size={13} />
+            الجذر
+          </button>
+          {data.ancestors.map((ancestor) => (
+            <span key={ancestor.folderId} className="flex items-center gap-1">
+              <ChevronLeft size={12} className="text-text-muted/60" />
+              {ancestor.visible ? (
+                <button
+                  onClick={() => navigate(`/folders/${ancestor.folderId}`)}
+                  className="hover:text-primary"
+                >
+                  {ancestor.name}
+                </button>
+              ) : (
+                // A folder in the path that this user cannot see. Shown as a gap
+                // rather than skipped, so the breadcrumb does not imply the
+                // document sits nearer the root than it really does.
+                <span title="مجلد غير مصرّح لك بعرضه" className="cursor-default text-text-muted/60">
+                  …
+                </span>
+              )}
+            </span>
+          ))}
+        </nav>
+      ) : null}
+
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <h2 className="truncate text-lg font-semibold text-text">
@@ -144,7 +186,10 @@ export default function Browse() {
           the bridge installed this renders a short note and the file picker
           above keeps working unchanged. */}
       {folderId && permissions.upload ? (
-        <ScanPanel folderId={folderId} onUploaded={load} />
+        <ScanPanel
+          folderId={folderId}
+          onUploaded={() => Promise.all([load(), reloadTree()])}
+        />
       ) : null}
 
       {folderCount > 0 ? (

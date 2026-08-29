@@ -6,11 +6,25 @@
  * first and then forgets to apply to a second query in the same request.
  */
 
-import { getFolder, listSubfolders, listDocuments, createFolder } from './service.js';
+import {
+  getFolder,
+  listSubfolders,
+  listDocuments,
+  createFolder,
+  listTree,
+  getAncestors,
+} from './service.js';
 
 export async function treeRoutes(app) {
   // Nothing in this module is reachable without a session.
   app.addHook('preHandler', app.requireAuth);
+
+  /**
+   * The whole browsable tree, flat, for the navigation panel.
+   *
+   * Registered before /:folderId so the literal path wins the match.
+   */
+  app.get('/tree', async (request) => listTree(request.user.userId, { limit: request.query.limit }));
 
   /** Top-level folders this user can see. */
   app.get('/', async (request) => ({
@@ -30,16 +44,19 @@ export async function treeRoutes(app) {
     const folder = await getFolder(request.user.userId, folderId);
     if (!folder) return reply.code(404).send({ error: 'not_found' });
 
-    const [folders, documents] = await Promise.all([
+    const [folders, documents, ancestors] = await Promise.all([
       listSubfolders(request.user.userId, folderId),
       listDocuments(request.user.userId, folderId, {
         limit: request.query.limit,
         cursor: parseCursor(request.query.cursor),
       }),
+      // Shipped with the folder so the breadcrumb needs no second round trip.
+      getAncestors(request.user.userId, folderId),
     ]);
 
     return {
       folder,
+      ancestors,
       folders,
       documents: documents.documents,
       // Encoded so a client treats it as opaque and cannot craft one that

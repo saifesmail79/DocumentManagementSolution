@@ -90,6 +90,108 @@ export async function getFolder(userId, folderId) {
  * A folder the user cannot browse is simply absent — not greyed out, not a
  * placeholder. The tree a user sees is the tree they have.
  */
+/**
+ * Every folder the user may browse, as a flat list for the client to nest.
+ *
+ * One query rather than a request per expanded node: a filing tree is browsed by
+ * clicking around it, and a round trip per expand makes that feel broken. At a
+ * few thousand folders the whole visible tree is a handful of kilobytes.
+ *
+ * ─── Orphans are real and must not be dropped ───────────────────────────────
+ *
+ * A folder can be visible while its parent is not: breaking inheritance and
+ * granting on the child produces exactly that, and it is a normal way to share
+ * one subfolder out of a private branch. Such a folder's parent_id points at
+ * something absent from this result, so the caller must treat any folder whose
+ * parent is not in the set as a root. Filtering them out instead would hide
+ * folders the user has been deliberately granted.
+ *
+ * Ordered by mpath, which is depth-first: a parent always precedes its
+ * descendants, so a single pass can build the tree.
+ */
+export async function listTree(userId, { limit = 5000 } = {}) {
+  const cap = Math.min(Math.max(Number(limit) || 5000, 1), 20_000);
+
+  const result = await sql`
+    SELECT TOP (${cap + 1})
+           f.folder_id, f.parent_id, f.name, f.depth, f.inherits_acl,
+           p.perm_bits,
+           ISNULL(counts.document_count, 0) AS document_count
+      FROM dbo.folders f
+     CROSS APPLY dbo.fn_effective_permission(${userId}, f.folder_id) p
+      LEFT JOIN (
+            SELECT folder_id, COUNT(*) AS document_count
+              FROM dbo.documents
+             WHERE is_deleted = 0
+             GROUP BY folder_id
+           ) counts ON counts.folder_id = f.folder_id
+     WHERE f.is_deleted = 0
+       AND (p.perm_bits & ${PERM.BROWSE}) <> 0
+     ORDER BY f.mpath
+  `.execute(db);
+
+  // One row over the cap means there are more. Reporting it beats silently
+  // returning a truncated tree that looks complete.
+  const truncated = result.rows.length > cap;
+  const rows = truncated ? result.rows.slice(0, cap) : result.rows;
+
+  return {
+    folders: rows.map((row) => ({
+      folderId: String(row.folder_id),
+      parentId: row.parent_id === null ? null : String(row.parent_id),
+      name: row.name,
+      depth: Number(row.depth),
+      inheritsAcl: Number(row.inherits_acl) === 1,
+      documentCount: Number(row.document_count),
+      permissions: describeBits(Number(row.perm_bits)),
+    })),
+    truncated,
+  };
+}
+
+/**
+ * The chain of ancestors from the root down to `folderId`, for a breadcrumb.
+ *
+ * Walks the materialized path rather than recursing: mpath already holds the
+ * ancestor ids in order, so this is one indexed lookup per level with no
+ * recursive CTE.
+ *
+ * An ancestor the user cannot browse is returned as a placeholder with a null
+ * name rather than omitted, so the breadcrumb still shows the true depth instead
+ * of implying the folder sits closer to the root than it does.
+ */
+export async function getAncestors(userId, folderId) {
+  const found = await sql`
+    SELECT mpath FROM dbo.folders WHERE folder_id = ${folderId} AND is_deleted = 0
+  `.execute(db);
+
+  if (!found.rows[0]) return [];
+
+  // '/3/17/42/' -> ['3','17','42']
+  const ids = String(found.rows[0].mpath).split('/').filter(Boolean);
+  if (ids.length === 0) return [];
+
+  const result = await sql`
+    SELECT f.folder_id, f.name, f.depth, p.perm_bits
+      FROM dbo.folders f
+     CROSS APPLY dbo.fn_effective_permission(${userId}, f.folder_id) p
+     WHERE f.folder_id IN (${sql.join(ids.map((value) => sql`${value}`))})
+       AND f.is_deleted = 0
+  `.execute(db);
+
+  const byId = new Map(result.rows.map((row) => [String(row.folder_id), row]));
+
+  return ids.map((ancestorId) => {
+    const row = byId.get(ancestorId);
+    const visible = row ? (Number(row.perm_bits) & PERM.BROWSE) !== 0 : false;
+    return {
+      folderId: ancestorId,
+      name: visible ? row.name : null,
+      visible,
+    };
+  });
+}
+
 export async function listSubfolders(userId, parentId) {
   const result = await sql`
     SELECT f.folder_id, f.name, f.depth, f.inherits_acl, f.created_at, p.perm_bits,

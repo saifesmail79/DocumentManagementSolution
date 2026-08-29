@@ -51,6 +51,7 @@ export const api = {
     request('/api/auth/change-password', { method: 'POST', body: { currentPassword, newPassword } }),
 
   roots: () => request('/api/folders'),
+  tree: () => request('/api/folders/tree'),
   folder: (folderId, { cursor } = {}) =>
     request(`/api/folders/${folderId}${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`),
   createFolder: (parentId, name) => request('/api/folders', { method: 'POST', body: { parentId, name } }),
