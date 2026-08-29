@@ -72,6 +72,7 @@ export function resolveTestDatabase() {
  */
 const TRUNCATION_ORDER = [
   'user_sessions',
+  'extraction_queue',
   'document_tags',
   'tags',
   'document_field_values',

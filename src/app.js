@@ -20,6 +20,7 @@ import { verifyConnection } from './db/index.js';
 import { registerAuth } from './modules/auth/routes.js';
 import { treeRoutes } from './modules/tree/routes.js';
 import { documentRoutes } from './modules/documents/routes.js';
+import { searchRoutes } from './modules/search/routes.js';
 
 const log = moduleLogger('server');
 
@@ -59,6 +60,7 @@ export async function buildApp({ logger: withLogger = true } = {}) {
 
   await app.register(treeRoutes, { prefix: '/api/folders' });
   await app.register(documentRoutes, { prefix: '/api' });
+  await app.register(searchRoutes, { prefix: '/api/search' });
 
   /**
    * Liveness and readiness in one. Returns 503 when the database is unreachable

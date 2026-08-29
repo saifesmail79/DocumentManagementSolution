@@ -26,6 +26,7 @@ import { db, sql } from '../../db/index.js';
 import { storage } from '../../storage/index.js';
 import { buildRelativePath } from '../../storage/paths.js';
 import { config } from '../../config/index.js';
+import { normalizeArabic } from '../../lib/arabic.js';
 import { moduleLogger } from '../../lib/logger.js';
 import { PERM, permissionBits, has } from '../tree/service.js';
 
@@ -57,6 +58,33 @@ async function stageUpload(stream) {
 /** Removes a staged file after a failure. Best effort — an orphan is swept later. */
 async function discardStaged(staged) {
   if (staged) await storage.remove(staged.relativePath).catch(() => {});
+}
+
+/**
+ * Queues a version for text extraction.
+ *
+ * Content search needs the document's text, and extracting it inline would make
+ * every upload wait on a PDF parse. The queue is a table rather than Redis:
+ * there is already one durable store here, and a second process to keep alive on
+ * a Windows server -- with its own failure mode, backups and version -- is not
+ * worth it for a work list of a few thousand rows.
+ *
+ * MERGE rather than INSERT so a re-run updates the existing row: the unique
+ * constraint on (document_id, version_number) would otherwise turn a retry into
+ * a duplicate-key error.
+ */
+async function enqueueExtraction(trx, documentId, versionNumber) {
+  await sql`
+    MERGE dbo.extraction_queue WITH (HOLDLOCK) AS target
+    USING (SELECT ${documentId} AS document_id, ${versionNumber} AS version_number) AS source
+       ON target.document_id = source.document_id
+      AND target.version_number = source.version_number
+    WHEN MATCHED THEN
+      UPDATE SET status = 0, attempts = 0, last_error = NULL,
+                 queued_at = SYSUTCDATETIME(), started_at = NULL, finished_at = NULL
+    WHEN NOT MATCHED THEN
+      INSERT (document_id, version_number) VALUES (source.document_id, source.version_number);
+  `.execute(trx);
 }
 
 /**
@@ -100,9 +128,10 @@ export async function createDocument({
   try {
     const result = await db.transaction().execute(async (trx) => {
       const inserted = await sql`
-        INSERT INTO dbo.documents (folder_id, type_id, title, current_version, created_by)
+        INSERT INTO dbo.documents
+          (folder_id, type_id, title, title_normalized, current_version, created_by)
         OUTPUT INSERTED.document_id AS did, INSERTED.created_at AS created_at
-        VALUES (${folderId}, ${typeId}, ${cleanTitle}, 1, ${userId})
+        VALUES (${folderId}, ${typeId}, ${cleanTitle}, ${normalizeArabic(cleanTitle)}, 1, ${userId})
       `.execute(trx);
 
       const documentId = inserted.rows[0].did;
@@ -125,6 +154,10 @@ export async function createDocument({
                 ${staging.staged.bytes}, ${staging.staged.sha256},
                 ${mimeType || 'application/octet-stream'}, ${userId})
       `.execute(trx);
+
+      // Enqueued in the same transaction as the version. A queue row written
+      // outside it could reference a document whose insert then rolled back.
+      await enqueueExtraction(trx, documentId, 1);
 
       // Inside the transaction and after the rows: if this throws, the insert
       // rolls back and nothing references a file that was never put in place.
@@ -223,6 +256,7 @@ export async function addVersion({ userId, documentId, stream, filename, mimeTyp
         throw new Error('concurrent version conflict');
       }
 
+      await enqueueExtraction(trx, document.document_id, nextVersion);
       await storage.promote(staging.staged.relativePath, relativePath);
     });
 
