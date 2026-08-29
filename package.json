@@ -15,8 +15,8 @@
     "install:client": "npm --prefix client install",
     "dev:client": "npm --prefix client run dev",
     "build:client": "npm --prefix client run build",
-    "test": "node --test --test-concurrency=1 tests/arabic.test.js tests/storage.test.js tests/acl.integration.test.js tests/documents.integration.test.js tests/auth.integration.test.js tests/tree.integration.test.js tests/documents.upload.test.js tests/search.integration.test.js",
-    "test:db": "node --test --test-concurrency=1 tests/acl.integration.test.js tests/documents.integration.test.js tests/auth.integration.test.js tests/tree.integration.test.js tests/documents.upload.test.js tests/search.integration.test.js"
+    "test": "node --test --test-concurrency=1 tests/arabic.test.js tests/storage.test.js tests/acl.integration.test.js tests/documents.integration.test.js tests/auth.integration.test.js tests/tree.integration.test.js tests/documents.upload.test.js tests/search.integration.test.js tests/extraction.integration.test.js",
+    "test:db": "node --test --test-concurrency=1 tests/acl.integration.test.js tests/documents.integration.test.js tests/auth.integration.test.js tests/tree.integration.test.js tests/documents.upload.test.js tests/search.integration.test.js tests/extraction.integration.test.js"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",
@@ -28,6 +28,8 @@
     "dotenv": "^16.4.7",
     "fastify": "^5.2.1",
     "kysely": "^0.29.5",
+    "officeparser": "^7.8.0",
+    "pdfjs-dist": "^6.3.289",
     "pino": "^9.6.0",
     "range-parser": "^1.2.1",
     "tarn": "^3.0.2",
@@ -35,5 +37,8 @@
   },
   "devDependencies": {
     "pino-pretty": "^13.0.0"
+  },
+  "overrides": {
+    "pdfjs-dist": "$pdfjs-dist"
   }
 }

@@ -1,0 +1,365 @@
+/**
+ * Integration tests for text extraction.
+ *
+ * The valuable one is end to end: upload a file, run the worker, and confirm the
+ * document becomes findable by its CONTENT — that exercises the queue, the
+ * extractor, Arabic normalisation and the full-text index in one pass, which is
+ * the whole chain content search depends on.
+ *
+ * The worker is driven directly rather than by starting its polling loop, so the
+ * tests are deterministic instead of racing a timer.
+ */
+
+import { test, before, after, describe } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { config as loadEnv } from 'dotenv';
+import { resolveTestDatabase, ensureTestDatabase, resetDatabase } from './helpers/test-database.js';
+
+loadEnv();
+
+const target = resolveTestDatabase();
+const CONFIGURED = target.configured;
+
+const STORAGE_ROOT = await mkdtemp(path.join(tmpdir(), 'dms-extract-test-'));
+process.env.STORAGE_ROOT = STORAGE_ROOT;
+
+let db;
+let sql;
+let app;
+let PERM;
+let storage;
+let worker;
+
+const PASSWORD = 'correct-horse-battery-staple';
+const id = {};
+
+/**
+ * A structurally minimal PDF with one blank page and no text operators.
+ *
+ * This is what a scan looks like to an extractor: a page with no text layer.
+ * Built by hand rather than with a PDF library so the test has no extra
+ * dependency and the bytes are exactly what is intended.
+ */
+const BLANK_PDF = [
+  '%PDF-1.4',
+  '1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj',
+  '2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj',
+  '3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<<>>>>endobj',
+  'trailer<</Root 1 0 R/Size 4>>',
+  '%%EOF',
+].join('\n');
+
+async function makeUser(username) {
+  const { hashPassword } = await import('../src/modules/auth/passwords.js');
+  const hash = await hashPassword(PASSWORD);
+  const p = await sql`
+    INSERT INTO dbo.principals (principal_type, display_name)
+    OUTPUT INSERTED.principal_id AS pid VALUES ('user', ${username})
+  `.execute(db);
+  const pid = p.rows[0].pid;
+  await sql`
+    INSERT INTO dbo.users (user_id, username, password_hash) VALUES (${pid}, ${username}, ${hash})
+  `.execute(db);
+  id[username] = pid;
+  return pid;
+}
+
+async function makeFolder(name) {
+  const r = await sql`
+    INSERT INTO dbo.folders (parent_id, name, mpath, depth)
+    OUTPUT INSERTED.folder_id AS fid VALUES (NULL, ${name}, '/pending/', 0)
+  `.execute(db);
+  const fid = r.rows[0].fid;
+  await sql`UPDATE dbo.folders SET mpath = ${`/${fid}/`} WHERE folder_id = ${fid}`.execute(db);
+  id[name] = fid;
+  return fid;
+}
+
+function multipart({ filename, content, contentType = 'text/plain' }) {
+  const boundary = '----dmsextract0123456789';
+  return {
+    payload: Buffer.concat([
+      Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\n` +
+          `Content-Type: ${contentType}\r\n\r\n`,
+        'utf8',
+      ),
+      Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8'),
+      Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8'),
+    ]),
+    headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+  };
+}
+
+async function upload(cookie, filename, content, contentType) {
+  const body = multipart({ filename, content, contentType });
+  const response = await app.inject({
+    method: 'POST',
+    url: `/api/folders/${id.cabinet}/documents`,
+    headers: { ...body.headers, cookie },
+    payload: body.payload,
+  });
+  assert.equal(response.statusCode, 201, `upload of ${filename} failed: ${response.body}`);
+  return response.json().documentId;
+}
+
+async function statusOf(documentId) {
+  const r = await sql`
+    SELECT extraction_status, content_normalized FROM dbo.documents WHERE document_id = ${documentId}
+  `.execute(db);
+  return r.rows[0];
+}
+
+/** Polls until the full-text index catches up, rather than sleeping and hoping. */
+async function waitForFullText(term, { attempts = 60, delayMs = 250 } = {}) {
+  for (let n = 0; n < attempts; n += 1) {
+    const found = await sql`
+      SELECT COUNT(*) AS n FROM dbo.documents WHERE CONTAINS(content_normalized, ${`"${term}"`})
+    `.execute(db);
+    if (Number(found.rows[0].n) > 0) return true;
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  return false;
+}
+
+describe('text extraction', { skip: CONFIGURED ? false : target.reason }, () => {
+  let cookie;
+
+  before(async () => {
+    await ensureTestDatabase(target.database);
+    ({ db, sql } = await import('../src/db/index.js'));
+    const { runMigrations } = await import('../src/db/migrate.js');
+    await runMigrations();
+    await resetDatabase(db, sql);
+    ({ PERM } = await import('../src/db/migrations/0001-identity-and-acl.js'));
+    ({ storage } = await import('../src/storage/index.js'));
+    await storage.init();
+    worker = await import('../src/modules/extraction/worker.js');
+
+    const { buildApp } = await import('../src/app.js');
+    app = await buildApp({ logger: false });
+
+    await makeUser('clerk');
+    await makeFolder('cabinet');
+    await sql`
+      INSERT INTO dbo.access_control_entries (folder_id, principal_id, allow_bits, deny_bits)
+      VALUES (${id.cabinet}, ${id.clerk}, ${PERM.BROWSE | PERM.READ | PERM.UPLOAD}, 0)
+    `.execute(db);
+
+    const login = await app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { username: 'clerk', password: PASSWORD },
+    });
+    cookie = `dms_session=${login.cookies.find((c) => c.name === 'dms_session').value}`;
+  });
+
+  after(async () => {
+    if (app) await app.close();
+    if (db) await db.destroy();
+    await rm(STORAGE_ROOT, { recursive: true, force: true }).catch(() => {});
+  });
+
+  test('uploading enqueues the document for extraction', async () => {
+    const documentId = await upload(cookie, 'note.txt', 'محتوى تجريبي بسيط للاختبار');
+
+    const queued = await sql`
+      SELECT status, version_number FROM dbo.extraction_queue WHERE document_id = ${documentId}
+    `.execute(db);
+
+    assert.equal(queued.rows.length, 1);
+    assert.equal(Number(queued.rows[0].status), worker.QUEUE.PENDING);
+    assert.equal(Number(queued.rows[0].version_number), 1);
+  });
+
+  // ── The chain that content search depends on ───────────────────────────
+
+  test('an uploaded document becomes findable by its content', async () => {
+    const documentId = await upload(
+      cookie,
+      'contract.txt',
+      'هذا العقد يتضمن كلمة مُميّزة جداً وهي الاستئجار الطويل',
+    );
+
+    await worker.drainQueue();
+
+    const row = await statusOf(documentId);
+    assert.equal(Number(row.extraction_status), worker.DOC_EXTRACTION.EXTRACTED);
+    assert.ok(row.content_normalized?.length > 0, 'text should have been stored');
+
+    // Normalisation must have been applied on the way in: the source has
+    // tashkeel (مُميّزة) which the collation does not strip, so an unnormalised
+    // store would be unfindable by the plain spelling.
+    assert.ok(!/[ً-ٟ]/.test(row.content_normalized), 'tashkeel should be stripped');
+
+    assert.ok(await waitForFullText('الاستئجار'), 'full-text index did not catch up');
+
+    const search = await app.inject({
+      method: 'GET',
+      url: '/api/search?q=الاستئجار',
+      headers: { cookie },
+    });
+
+    assert.equal(search.statusCode, 200);
+    assert.equal(search.json().contentSearched, true);
+    assert.ok(
+      search.json().results.some((r) => r.documentId === documentId),
+      'the document should be findable by a word that appears only in its body',
+    );
+  });
+
+  test('content is findable through an Arabic spelling variant', async () => {
+    const documentId = await upload(cookie, 'library.txt', 'يوجد في المكتبة أرشيف قديم جداً');
+    await worker.drainQueue();
+    assert.ok(await waitForFullText('المكتبه'), 'the normalised form should be indexed');
+
+    // The stored word is المكتبة; the user types المكتبه. Neither the collation
+    // nor the word breaker closes that — only normalising both sides does.
+    const search = await app.inject({
+      method: 'GET',
+      url: `/api/search?q=${encodeURIComponent('المكتبه')}`,
+      headers: { cookie },
+    });
+
+    assert.ok(search.json().results.some((r) => r.documentId === documentId));
+  });
+
+  // ── Honest outcomes for things that cannot be indexed ───────────────────
+
+  /**
+   * The case that matters most for this deployment: a scan is a photograph of a
+   * page, so it has no text layer and there is nothing to index. Reporting it as
+   * "unsupported" rather than "failed" is what makes it a work list for OCR
+   * instead of noise in an error log.
+   */
+  test('a PDF with no text layer is recorded as such, not as a failure', async () => {
+    const documentId = await upload(cookie, 'scan.pdf', BLANK_PDF, 'application/pdf');
+
+    await worker.drainQueue();
+
+    const row = await statusOf(documentId);
+    assert.equal(Number(row.extraction_status), worker.DOC_EXTRACTION.UNSUPPORTED);
+    assert.equal(row.content_normalized, null, 'nothing should be indexed');
+
+    const queued = await sql`
+      SELECT status, last_error FROM dbo.extraction_queue WHERE document_id = ${documentId}
+    `.execute(db);
+
+    assert.equal(Number(queued.rows[0].status), worker.QUEUE.SKIPPED);
+    assert.match(queued.rows[0].last_error, /no_text_layer/);
+  });
+
+  test('an image is unsupported rather than retried', async () => {
+    // A one-pixel PNG. Nothing to extract until OCR exists.
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64',
+    );
+    const documentId = await upload(cookie, 'page.png', png, 'image/png');
+
+    await worker.drainQueue();
+
+    const row = await statusOf(documentId);
+    assert.equal(Number(row.extraction_status), worker.DOC_EXTRACTION.UNSUPPORTED);
+
+    const queued = await sql`
+      SELECT status, attempts FROM dbo.extraction_queue WHERE document_id = ${documentId}
+    `.execute(db);
+    assert.equal(Number(queued.rows[0].status), worker.QUEUE.SKIPPED);
+    assert.equal(Number(queued.rows[0].attempts), 1, 'an unsupported type must not be retried');
+  });
+
+  // ── Failure handling ───────────────────────────────────────────────────
+
+  /**
+   * The concern raised when this design was chosen: a failing background job
+   * would silently break search. It does not — the failure is bounded, recorded
+   * with its reason, and visible.
+   */
+  test('a missing file fails, retries, then stops permanently with the reason kept', async () => {
+    const documentId = await upload(cookie, 'vanishing.txt', 'نص سيختفي ملفه قبل الاستخراج');
+
+    const row = await sql`
+      SELECT storage_path FROM dbo.document_versions WHERE document_id = ${documentId}
+    `.execute(db);
+    await storage.remove(row.rows[0].storage_path);
+
+    // Each pass claims the job, fails, and marks it retryable until attempts run out.
+    for (let pass = 0; pass < 4; pass += 1) await worker.processOne({ maxAttempts: 3 });
+
+    const queued = await sql`
+      SELECT status, attempts, last_error FROM dbo.extraction_queue WHERE document_id = ${documentId}
+    `.execute(db);
+
+    assert.equal(Number(queued.rows[0].status), worker.QUEUE.FAILED);
+    assert.equal(Number(queued.rows[0].attempts), 3, 'retries must be bounded');
+    assert.ok(queued.rows[0].last_error, 'the reason must be kept for diagnosis');
+
+    assert.equal(Number((await statusOf(documentId)).extraction_status), worker.DOC_EXTRACTION.FAILED);
+  });
+
+  test('one failing document does not stop the queue', async () => {
+    const broken = await upload(cookie, 'broken.txt', 'سيُحذف هذا الملف');
+    const fine = await upload(cookie, 'fine.txt', 'هذه وثيقة سليمة تحتوي كلمة الفريدة تماما');
+
+    const row = await sql`
+      SELECT storage_path FROM dbo.document_versions WHERE document_id = ${broken}
+    `.execute(db);
+    await storage.remove(row.rows[0].storage_path);
+
+    await worker.drainQueue();
+
+    assert.equal(Number((await statusOf(fine)).extraction_status), worker.DOC_EXTRACTION.EXTRACTED);
+  });
+
+  // ── Queue mechanics ────────────────────────────────────────────────────
+
+  test('a job is claimed once, so two workers cannot duplicate work', async () => {
+    await upload(cookie, 'solo.txt', 'وثيقة واحدة فقط في الطابور');
+
+    // Two claims in flight at once. READPAST makes the second skip the row the
+    // first has locked rather than block on it.
+    const [first, second] = await Promise.all([worker.processOne(), worker.processOne()]);
+
+    const claims = [first, second].filter((r) => r.claimed && r.documentId).map((r) => r.documentId);
+    assert.equal(new Set(claims).size, claims.length, 'the same job was claimed twice');
+  });
+
+  test('a new version re-queues the document', async () => {
+    const documentId = await upload(cookie, 'v1.txt', 'النسخة الأولى من الوثيقة');
+    await worker.drainQueue();
+
+    const body = multipart({ filename: 'v2.txt', content: 'النسخة الثانية تحتوي كلمة الاستبدال' });
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/documents/${documentId}/versions`,
+      headers: { ...body.headers, cookie },
+      payload: body.payload,
+    });
+    assert.equal(response.statusCode, 201);
+
+    const queued = await sql`
+      SELECT version_number, status FROM dbo.extraction_queue
+       WHERE document_id = ${documentId} ORDER BY version_number
+    `.execute(db);
+
+    assert.equal(queued.rows.length, 2, 'each version gets its own queue entry');
+    assert.equal(Number(queued.rows[1].status), worker.QUEUE.PENDING);
+
+    await worker.drainQueue();
+
+    // The indexed content must now be the new version's, not the old one's.
+    const row = await statusOf(documentId);
+    assert.ok(row.content_normalized.includes('الاستبدال'));
+  });
+
+  test('queueStats reports what happened', async () => {
+    const stats = await worker.queueStats();
+    assert.ok(stats.done > 0, 'some jobs completed');
+    assert.ok(stats.skipped > 0, 'some were skipped as unindexable');
+    assert.equal(typeof stats.pending, 'number');
+  });
+});

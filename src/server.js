@@ -17,10 +17,12 @@ import { moduleLogger } from './lib/logger.js';
 import { verifyConnection, checkFullTextSearch, closeDatabase } from './db/index.js';
 import { buildApp } from './app.js';
 import { storage } from './storage/index.js';
+import { startExtractionWorker } from './modules/extraction/worker.js';
 
 const log = moduleLogger('server');
 
 let app;
+let extraction;
 
 async function start() {
   // Fail loudly here rather than on the first user request.
@@ -33,6 +35,10 @@ async function start() {
   await storage.init();
 
   app = await buildApp();
+
+  // Started after the database and storage checks pass: a worker polling a
+  // database that is not reachable just logs errors on a timer.
+  extraction = startExtractionWorker();
 
   await app.listen({ host: config.server.host, port: config.server.port });
   log.info(
@@ -49,6 +55,7 @@ async function start() {
 async function shutdown(signal) {
   log.info({ signal }, 'shutting down');
   try {
+    extraction?.stop();
     if (app) await app.close();
     await closeDatabase();
     process.exit(0);

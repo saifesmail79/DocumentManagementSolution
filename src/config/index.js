@@ -160,6 +160,20 @@ export const config = Object.freeze({
     cookieSecure: boolean('AUTH_COOKIE_SECURE', optional('NODE_ENV', 'development') === 'production'),
   }),
 
+  extraction: Object.freeze({
+    /** The worker runs in the API process. Turn off to run it separately, or not at all. */
+    enabled: boolean('EXTRACTION_ENABLED', true),
+    pollMs: integer('EXTRACTION_POLL_MS', 15_000, { min: 1000 }),
+    /** Jobs per polling pass. Bounds how long one tick can hold the process busy. */
+    batchSize: integer('EXTRACTION_BATCH_SIZE', 25, { min: 1, max: 500 }),
+    /** Attempts before a document is marked permanently failed rather than retried forever. */
+    maxAttempts: integer('EXTRACTION_MAX_ATTEMPTS', 3, { min: 1, max: 20 }),
+    /** Files above this are skipped: parsing a 200MB PDF for a search index is not worth the memory. */
+    maxBytes: integer('EXTRACTION_MAX_BYTES', 64 * 1024 * 1024, { min: 1024 }),
+    /** Characters kept per document. Beyond this, more text adds nothing findable. */
+    maxChars: integer('EXTRACTION_MAX_CHARS', 2_000_000, { min: 1000 }),
+  }),
+
   logging: Object.freeze({
     level: optional('LOG_LEVEL', 'info'),
     pretty: boolean('LOG_PRETTY', optional('NODE_ENV', 'development') !== 'production'),
