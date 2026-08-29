@@ -24,8 +24,7 @@
  *   • Timestamps are datetime2(3) in UTC, defaulted with SYSUTCDATETIME().
  */
 
-// Individual migrations are imported here as they are written, e.g.
-//   import { m0001CoreTree } from './0001-core-tree.js';
+import { m0001IdentityAndAcl } from './0001-identity-and-acl.js';
 
 /**
  * @typedef {object} Migration
@@ -37,6 +36,5 @@
 
 /** @type {Migration[]} */
 export const MIGRATIONS = [
-  // Migration 0001 (filing tree, principals, ACL, effective_permissions) is
-  // pending the reviewed schema design — see docs/schema-design-inputs.md.
+  m0001IdentityAndAcl,
 ];

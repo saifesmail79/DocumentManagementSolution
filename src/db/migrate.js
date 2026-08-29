@@ -152,13 +152,15 @@ export async function runMigrations() {
             });
           }
         } catch (error) {
+          const detail = describeSqlError(error);
           log.error(
-            { id: migration.id, name: migration.name, err: error },
+            { id: migration.id, name: migration.name, sqlErrors: detail, err: error },
             'migration failed — schema left unchanged by this migration',
           );
-          throw new Error(`Migration ${migration.id} (${migration.name}) failed: ${error.message}`, {
-            cause: error,
-          });
+          throw new Error(
+            `Migration ${migration.id} (${migration.name}) failed: ${detail.join(' | ')}`,
+            { cause: error },
+          );
         }
 
         const ms = Date.now() - started;
@@ -173,6 +175,34 @@ export async function runMigrations() {
         .catch((error) => log.warn({ err: error }, 'failed to release migration lock'));
     }
   });
+}
+
+/**
+ * Extracts something readable from a tedious failure.
+ *
+ * tedious raises an AggregateError whose own `message` is undefined and whose
+ * detail lives in `.errors[]`. Reporting error.message alone yields
+ * "failed: undefined", which says nothing about what SQL was wrong — so unpack
+ * the number, line and text that actually identify the problem.
+ */
+function describeSqlError(error) {
+  const parts = [];
+  const collect = (e) => {
+    if (!e) return;
+    if (Array.isArray(e.errors)) {
+      e.errors.forEach(collect);
+      return;
+    }
+    const bits = [];
+    if (e.number !== undefined) bits.push(`SQL ${e.number}`);
+    if (e.lineNumber !== undefined) bits.push(`line ${e.lineNumber}`);
+    if (e.procName) bits.push(`in ${e.procName}`);
+    const text = e.message ?? String(e);
+    parts.push(bits.length > 0 ? `${bits.join(' ')}: ${text}` : text);
+  };
+  collect(error);
+  if (error?.cause) collect(error.cause);
+  return parts.length > 0 ? [...new Set(parts)] : [String(error?.message ?? error)];
 }
 
 async function recordMigration(executor, migration, durationMs) {
