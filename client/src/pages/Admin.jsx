@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 
 import { api, ApiError } from '../api.js';
+import QueueHealth from '../components/QueueHealth.jsx';
 import { useAuth } from '../auth.jsx';
 import { formatDate } from '../format.js';
 import { Button, Card, Spinner, Alert, TextField, EmptyState } from '../components/ui.jsx';
@@ -811,12 +812,23 @@ function DiagnosticsTab() {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const [reindexed, setReindexed] = useState(null);
+  const [failures, setFailures] = useState([]);
+  const [renditions, setRenditions] = useState(null);
 
   const load = useCallback(async () => {
     try {
-      const [s, m] = await Promise.all([api.admin.extractionStats(), api.admin.mailStatus()]);
+      // Fetched together: a diagnostics screen that loads in four stages shows
+      // three different half-truths on the way.
+      const [s, m, f, r] = await Promise.all([
+        api.admin.extractionStats(),
+        api.admin.mailStatus(),
+        api.admin.extractionFailures().catch(() => ({ failures: [] })),
+        api.admin.renditionStatus().catch(() => null),
+      ]);
       setStats(s);
       setMail(m);
+      setFailures(f.failures ?? []);
+      setRenditions(r);
     } catch {
       setError('تعذر تحميل بيانات التشخيص.');
     }
@@ -851,7 +863,29 @@ function DiagnosticsTab() {
         <Stat label="عبر OCR" value={stats.documents.ocr} />
         <Stat label="غير مفهرسة" value={stats.documents.unindexed} tone="warn" />
         <Stat label="فشل الاستخراج" value={stats.documents.failed} tone="bad" />
+        <Stat
+          label="قيد الانتظار"
+          value={stats.documents.pending}
+          tone={stats.documents.pending > 0 ? 'warn' : undefined}
+        />
       </div>
+
+      <QueueHealth
+        title="طابور فهرسة النصوص"
+        queue={stats.queue}
+        stuckJobs={stats.worker?.stuckJobs ?? 0}
+        worker={stats.worker}
+        failures={failures}
+      />
+
+      {renditions ? (
+        <QueueHealth
+          title="طابور المعاينات والصور المصغّرة"
+          queue={renditions.queue}
+          stuckJobs={renditions.stuckJobs ?? 0}
+          failures={renditions.failures}
+        />
+      ) : null}
 
       <Card className="p-4">
         <div className="mb-2 flex items-center justify-between gap-2">

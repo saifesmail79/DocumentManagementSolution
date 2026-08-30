@@ -180,6 +180,43 @@ export async function detectTools({ force = false } = {}) {
 
 export async function renditionStatus() {
   const tools = await detectTools({ force: true });
+
+  /*
+   * A tool probe alone is a false green light.
+   *
+   * `soffice --version` answering says LibreOffice is installed; it says nothing
+   * about whether conversions are succeeding. This screen reported "Office
+   * previews: working" for a deployment where every single conversion was
+   * failing, because the probe passed. The queue is the only thing that knows
+   * what actually happened, so it is reported alongside.
+   */
+  const counts = await sql`
+    SELECT status, COUNT(*) AS total FROM dbo.rendition_queue GROUP BY status
+  `.execute(db);
+
+  const queue = { pending: 0, running: 0, done: 0, retryable: 0, failed: 0, skipped: 0 };
+  const names = ['pending', 'running', 'done', 'retryable', 'failed', 'skipped'];
+  for (const row of counts.rows) {
+    const name = names[Number(row.status)];
+    if (name) queue[name] = Number(row.total);
+  }
+
+  const stuck = await sql`
+    SELECT COUNT(*) AS n FROM dbo.rendition_queue
+     WHERE status = ${QUEUE.RUNNING}
+       AND queued_at IS NOT NULL
+       AND DATEDIFF(minute, queued_at, SYSUTCDATETIME()) > 30
+  `.execute(db);
+
+  const recent = await sql`
+    SELECT TOP (10) q.document_id, q.version_number, q.kind, q.attempts, q.last_error, q.finished_at,
+           d.title
+      FROM dbo.rendition_queue q
+      JOIN dbo.documents d ON d.document_id = q.document_id
+     WHERE q.status IN (${QUEUE.FAILED}, ${QUEUE.SKIPPED}) AND d.is_deleted = 0
+     ORDER BY q.finished_at DESC
+  `.execute(db);
+
   return {
     enabled: config.renditions.enabled,
     ...tools,
@@ -188,6 +225,17 @@ export async function renditionStatus() {
     officePreview: tools.libreoffice.available,
     pdfThumbnails: tools.ghostscript.available,
     imageThumbnails: true,
+    queue,
+    stuckJobs: Number(stuck.rows[0].n),
+    failures: recent.rows.map((row) => ({
+      documentId: String(row.document_id),
+      version: Number(row.version_number),
+      title: row.title,
+      kind: row.kind,
+      attempts: Number(row.attempts),
+      reason: row.last_error,
+      finishedAt: row.finished_at,
+    })),
   };
 }
 

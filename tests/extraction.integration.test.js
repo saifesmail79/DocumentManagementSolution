@@ -560,6 +560,114 @@ describe('text extraction', { skip: CONFIGURED ? false : target.reason }, () => 
     );
   });
 
+  // ── Telling somebody ───────────────────────────────────────────────────
+  //
+  // Every fault in this system's history was recorded correctly and shown to
+  // nobody. These assert the reporting, not the processing.
+
+  test('the document API says whether its contents are searchable', async () => {
+    const documentId = await upload(cookie, 'readable.txt', 'نص واضح وقابل للفهرسة تماماً', 'text/plain');
+    await worker.drainQueue();
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/documents/${documentId}`,
+      headers: { cookie },
+    });
+
+    assert.equal(response.statusCode, 200);
+    const body = response.json();
+    assert.equal(
+      body.extractionStatus,
+      worker.DOC_EXTRACTION.EXTRACTED,
+      'the client cannot tell a searchable document from an unsearchable one',
+    );
+    assert.equal(body.extractionError, null);
+  });
+
+  test('a document that failed carries the reason to the client', async () => {
+    const documentId = await upload(cookie, 'doomed.txt', 'محتوى سيفشل استخراجه', 'text/plain');
+
+    // The queue's own record of a permanent failure, as a dead worker or a
+    // missing tool would leave it.
+    await sql`
+      UPDATE dbo.extraction_queue
+         SET status = ${worker.QUEUE.FAILED}, attempts = 3, finished_at = SYSUTCDATETIME(),
+             last_error = 'ocrmypdf_not_installed'
+       WHERE document_id = ${documentId}
+    `.execute(db);
+    await sql`
+      UPDATE dbo.documents SET extraction_status = ${worker.DOC_EXTRACTION.FAILED}
+       WHERE document_id = ${documentId}
+    `.execute(db);
+
+    const body = (
+      await app.inject({ method: 'GET', url: `/api/documents/${documentId}`, headers: { cookie } })
+    ).json();
+
+    assert.equal(body.extractionStatus, worker.DOC_EXTRACTION.FAILED);
+    assert.equal(body.extractionError, 'ocrmypdf_not_installed', 'the reason never reached the user');
+  });
+
+  /**
+   * A completed OCR job stores its engine in last_error ("ocr:ocrmypdf"). Read
+   * carelessly that reads as a failure, and would be shown to a user as one.
+   */
+  test('a successful OCR note is never reported as an error', async () => {
+    const documentId = await upload(cookie, 'scanned.txt', 'محتوى من التعرف الضوئي', 'text/plain');
+    await worker.drainQueue();
+
+    await sql`
+      UPDATE dbo.extraction_queue
+         SET status = ${worker.QUEUE.DONE}, last_error = 'ocr:ocrmypdf'
+       WHERE document_id = ${documentId}
+    `.execute(db);
+
+    const body = (
+      await app.inject({ method: 'GET', url: `/api/documents/${documentId}`, headers: { cookie } })
+    ).json();
+
+    assert.equal(body.extractionError, null, 'a success note was surfaced as a failure reason');
+  });
+
+  test('the unsearchable list names the documents and their reasons', async () => {
+    const documentId = await upload(cookie, 'listed.txt', 'وثيقة ستظهر في قائمة الأعطال', 'text/plain');
+    await sql`
+      UPDATE dbo.extraction_queue
+         SET status = ${worker.QUEUE.FAILED}, attempts = 3, finished_at = SYSUTCDATETIME(),
+             last_error = 'parseOfficeAsync is not a function'
+       WHERE document_id = ${documentId}
+    `.execute(db);
+
+    const failures = await worker.listUnsearchable();
+    const mine = failures.find((f) => String(f.documentId) === String(documentId));
+
+    assert.ok(mine, 'a permanently failed document was missing from the list');
+    assert.equal(mine.reason, 'parseOfficeAsync is not a function');
+    assert.ok(mine.title, 'a reason with no document title is not actionable');
+  });
+
+  test('worker health distinguishes idle from switched off', async () => {
+    const { setSetting, clearSetting, resetSettingsCache } = await import(
+      '../src/modules/settings/service.js'
+    );
+
+    const healthy = await worker.workerHealth();
+    assert.equal(healthy.running, true);
+    assert.equal(typeof healthy.stuckJobs, 'number');
+
+    await setSetting({ key: 'extraction.enabled', value: 'false', actorId: id.scanner });
+    resetSettingsCache();
+    try {
+      const paused = await worker.workerHealth();
+      assert.equal(paused.running, false, 'a switched-off worker still reported as running');
+      assert.equal(paused.enabledInEnvironment, true, 'the two switches must be distinguishable');
+    } finally {
+      await clearSetting({ key: 'extraction.enabled' });
+      resetSettingsCache();
+    }
+  });
+
   test('a job still running is left alone', async () => {
     const documentId = await upload(cookie, 'in-progress.txt', 'قيد المعالجة الآن', 'text/plain');
 

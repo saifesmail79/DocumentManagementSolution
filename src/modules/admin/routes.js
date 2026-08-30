@@ -38,6 +38,7 @@ import {
 } from './acl.js';
 import { queueStats, extractionStats } from '../extraction/worker.js';
 import { ocrStatus } from '../extraction/ocr.js';
+import { listUnsearchable, workerHealth } from '../extraction/worker.js';
 import { getSetting } from '../settings/service.js';
 import { verifyMail } from '../../lib/mailer.js';
 import { listAudit, auditActions, record, ACTION } from '../audit/service.js';
@@ -167,7 +168,27 @@ export async function adminRoutes(app) {
       // The stored setting, not the environment variable: reporting the value
       // the operator did not set is how a diagnostics screen becomes a liar.
       ocr: await ocrStatus({ enabled: await getSetting('ocr.enabled') }),
+      // Whether the worker is actually running, which a queue count alone cannot
+      // say: "nothing pending" and "nothing being processed" look identical.
+      worker: await workerHealth(),
     }));
+
+    /**
+     * The documents that are not searchable, and why each one is not.
+     *
+     * A count says something is wrong. This says which documents and for what
+     * reason, which is what turns a red number into something an administrator
+     * can act on.
+     */
+    identity.get('/extraction/failures', async (request) => ({
+      failures: await listUnsearchable({ limit: Number(request.query?.limit) || 50 }),
+    }));
+
+    /** Renditions: tool availability AND what the queue actually did with it. */
+    identity.get('/renditions/status', async () => {
+      const { renditionStatus } = await import('../renditions/service.js');
+      return renditionStatus();
+    });
 
     /**
      * Puts every unsearchable document back on the queue.

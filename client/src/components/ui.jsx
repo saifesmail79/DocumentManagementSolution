@@ -95,7 +95,13 @@ export function Alert({ tone = 'error', children }) {
     info: 'bg-blue-50 border-blue-200 text-blue-600',
   };
   return (
-    <div className={`rounded-lg border px-3 py-2 text-sm ${tones[tone]}`} role="alert">
+    // whitespace-pre-line so a message covering several files keeps one per
+    // line. Ten failures collapsed into one run-on sentence is how a list of
+    // reasons becomes unreadable.
+    <div
+      className={`whitespace-pre-line rounded-lg border px-3 py-2 text-sm ${tones[tone]}`}
+      role="alert"
+    >
       {children}
     </div>
   );

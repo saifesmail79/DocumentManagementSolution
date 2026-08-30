@@ -419,3 +419,85 @@ export async function requeueUnsearchable() {
   log.info({ requeued }, 'unsearchable documents requeued');
   return { requeued };
 }
+
+/**
+ * The documents that are not searchable, with the reason for each.
+ *
+ * A count on a dashboard says something is wrong; this says which documents and
+ * why, which is the difference between knowing there is a problem and being able
+ * to act on it. RETRYABLE rows that have used up their attempts are included —
+ * they are finished in every sense but the one the status column records.
+ *
+ * `last_error` is only meaningful on a row that did not succeed: a completed OCR
+ * job stores its engine there ("ocr:ocrmypdf"), which would read as a failure.
+ * Only failing statuses are selected, so that cannot leak into this list.
+ */
+export async function listUnsearchable({ limit = 50 } = {}) {
+  const pageSize = Math.min(Math.max(Number(limit) || 50, 1), 200);
+
+  const result = await sql`
+    SELECT TOP (${pageSize})
+           q.document_id, q.version_number, q.status, q.attempts, q.last_error, q.finished_at,
+           d.title, d.folder_id, d.extraction_status,
+           v.original_filename, v.mime_type,
+           f.name AS folder_name
+      FROM dbo.extraction_queue q
+      JOIN dbo.documents d ON d.document_id = q.document_id
+      LEFT JOIN dbo.folders f ON f.folder_id = d.folder_id
+      LEFT JOIN dbo.document_versions v
+        ON v.document_id = q.document_id AND v.version_number = q.version_number
+     WHERE d.is_deleted = 0
+       AND (
+             q.status IN (${QUEUE.FAILED}, ${QUEUE.SKIPPED})
+             OR (q.status = ${QUEUE.RETRYABLE} AND q.attempts >= ${config.extraction.maxAttempts})
+           )
+     ORDER BY q.finished_at DESC, q.queue_id DESC
+  `.execute(db);
+
+  return result.rows.map((row) => ({
+    documentId: String(row.document_id),
+    version: Number(row.version_number),
+    title: row.title,
+    folderId: String(row.folder_id),
+    folderName: row.folder_name,
+    filename: row.original_filename,
+    mimeType: row.mime_type,
+    status: Number(row.status),
+    attempts: Number(row.attempts),
+    reason: row.last_error,
+    finishedAt: row.finished_at,
+  }));
+}
+
+/**
+ * Whether the worker is actually doing anything, and if not, why.
+ *
+ * "Nothing is being indexed" has several causes that look identical from a
+ * queue count: the environment switch is off, the stored setting is off, or the
+ * worker is alive and simply has nothing to do. Only the last is healthy.
+ */
+export async function workerHealth() {
+  const enabledInEnvironment = config.extraction.enabled;
+  const enabledBySetting = await getSetting('extraction.enabled');
+
+  const stuck = await sql`
+    SELECT COUNT(*) AS n FROM dbo.extraction_queue
+     WHERE status = ${QUEUE.RUNNING}
+       AND started_at IS NOT NULL
+       AND DATEDIFF(second, started_at, SYSUTCDATETIME()) > ${Math.floor(STALE_CLAIM_MS / 1000)}
+  `.execute(db);
+
+  const oldestWaiting = await sql`
+    SELECT MIN(queued_at) AS oldest FROM dbo.extraction_queue
+     WHERE status IN (${QUEUE.PENDING}, ${QUEUE.RETRYABLE})
+  `.execute(db);
+
+  return {
+    enabledInEnvironment,
+    enabledBySetting: Boolean(enabledBySetting),
+    running: enabledInEnvironment && Boolean(enabledBySetting),
+    stuckJobs: Number(stuck.rows[0].n),
+    oldestWaitingSince: oldestWaiting.rows[0].oldest ?? null,
+    pollMs: config.extraction.pollMs,
+  };
+}

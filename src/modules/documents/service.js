@@ -397,9 +397,18 @@ export async function getDocument({ userId, documentId }) {
            d.current_version, d.created_at, d.updated_at,
            d.lifecycle_state, d.expires_at, d.legal_hold, d.legal_hold_reason,
            d.locked_at,
+           d.extraction_status,
            t.name AS type_name, s.name AS sensitivity_name,
            locker.display_name AS locked_by,
-           p.perm_bits
+           p.perm_bits,
+           -- Why the content is not searchable, when it is not. Only the failing
+           -- statuses carry a reason worth showing, so it is read from the
+           -- queue's own record rather than duplicated onto the document.
+           (SELECT TOP (1) q.last_error
+              FROM dbo.extraction_queue q
+             WHERE q.document_id = d.document_id
+               AND q.status IN (4, 5)
+             ORDER BY q.finished_at DESC) AS extraction_error
       FROM dbo.documents d
      CROSS APPLY dbo.fn_effective_permission(${userId}, d.folder_id) p
       LEFT JOIN dbo.document_types     t ON t.type_id  = d.type_id
@@ -460,6 +469,18 @@ export async function getDocument({ userId, documentId }) {
     legalHoldReason: row.legal_hold_reason,
     lockedBy: row.locked_by,
     lockedAt: row.locked_at,
+    /*
+     * Whether this document's contents can be searched, and why not when they
+     * cannot.
+     *
+     * Previously absent from every response, so a document whose text extraction
+     * had failed looked identical to one fully indexed — the person who uploaded
+     * it had no way to discover that searching inside it would never find
+     * anything. That is the single most consequential thing this endpoint can
+     * tell them, and it was the one thing it did not say.
+     */
+    extractionStatus: Number(row.extraction_status ?? 0),
+    extractionError: row.extraction_error ?? null,
     permissions: describeBits(Number(row.perm_bits)),
     versions,
   };

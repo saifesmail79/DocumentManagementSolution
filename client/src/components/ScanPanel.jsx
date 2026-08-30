@@ -4,6 +4,7 @@ import { ScanLine, StopCircle, RefreshCw, Upload } from 'lucide-react';
 import { scanBridge, ScanBridgeError } from '../scanBridge.js';
 import { pagesToPdfFile } from '../scanToPdf.js';
 import { api } from '../api.js';
+import { describeUploadFailure } from '../uploadErrors.js';
 import { Button, TextField, Alert, Spinner } from './ui.jsx';
 
 /**
@@ -131,8 +132,11 @@ export default function ScanPanel({ folderId, onUploaded }) {
       setWarnings([]);
       setTitle('');
       onUploaded?.();
-    } catch {
-      setError('تعذر رفع الوثيقة الممسوحة.');
+    } catch (caught) {
+      // One fixed sentence for every possible failure told the operator nothing:
+      // a blocked duplicate, a full disk and a permission refusal all read the
+      // same. The server's own reason is far more use.
+      setError(describeUploadFailure(caught));
     } finally {
       setUploading(false);
     }

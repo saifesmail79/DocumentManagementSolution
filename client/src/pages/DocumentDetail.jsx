@@ -5,6 +5,7 @@ import { FileText, Download, Save, History, Folder, ArrowRight, Eye, EyeOff } fr
 import { api, ApiError } from '../api.js';
 import { formatDate, formatBytes } from '../format.js';
 import { Button, Card, Spinner, Alert, TextField, ReadOnlyBadge } from '../components/ui.jsx';
+import SearchabilityNotice, { EXTRACTION } from '../components/SearchabilityNotice.jsx';
 import {
   TagPanel,
   CommentPanel,
@@ -73,6 +74,36 @@ export default function DocumentDetail() {
   useEffect(() => {
     load();
   }, [load]);
+
+  /*
+   * A freshly uploaded document is always PENDING, and extraction finishes
+   * seconds to minutes later. Without this the "being indexed" notice sits there
+   * until someone reloads by hand, which reads exactly like the stuck state it
+   * exists to distinguish itself from.
+   *
+   * Polls only while pending, and stops as soon as the status moves — including
+   * when it moves to a failure, so the reason appears on its own.
+   */
+  useEffect(() => {
+    if (Number(document?.extractionStatus) !== EXTRACTION.PENDING) return undefined;
+
+    const timer = setInterval(async () => {
+      if (window.document.visibilityState !== 'visible') return;
+      try {
+        // Only the document, and only into the document state: calling load()
+        // here would blank the page to a spinner every ten seconds and throw
+        // away whatever the user was typing into the metadata form.
+        const fresh = await api.document(documentId);
+        setDocument((current) =>
+          current && fresh.extractionStatus === current.extractionStatus ? current : fresh,
+        );
+      } catch {
+        // A failed poll is not worth reporting; the next one may work.
+      }
+    }, 10_000);
+
+    return () => clearInterval(timer);
+  }, [document?.extractionStatus, documentId]);
 
   // The applicable field set depends on the chosen type, so it is refetched when
   // the type changes rather than filtered client-side — the server already knows
@@ -165,6 +196,13 @@ export default function DocumentDetail() {
 
       {error ? <Alert tone="error">{error}</Alert> : null}
       {saved ? <Alert tone="success">تم حفظ التعديلات.</Alert> : null}
+
+      {/* Only shown when there is something to say — a fully indexed document
+          renders nothing here. */}
+      <SearchabilityNotice
+        status={document.extractionStatus}
+        reason={document.extractionError}
+      />
 
       {/*
         Rendered in an iframe rather than by shipping a PDF viewer: every target

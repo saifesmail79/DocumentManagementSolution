@@ -258,6 +258,8 @@ export const api = {
       }),
     extractionStats: () => request('/api/admin/extraction/stats'),
     reindex: () => request('/api/admin/extraction/reindex', { method: 'POST' }),
+    extractionFailures: () => request('/api/admin/extraction/failures'),
+    renditionStatus: () => request('/api/admin/renditions/status'),
     mailStatus: () => request('/api/admin/mail/status'),
     missingBlobs: () => request('/api/admin/storage/missing'),
     purge: (dryRun) => request('/api/admin/storage/purge', { method: 'POST', body: { dryRun } }),

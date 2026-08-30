@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 
 import { api, ApiError } from '../api.js';
+import { describeUploadFailure } from '../uploadErrors.js';
 import { formatDate } from '../format.js';
 import { Button, IconButton, Card, Spinner, EmptyState, Alert, ReadOnlyBadge } from '../components/ui.jsx';
 import ScanPanel from '../components/ScanPanel.jsx';
@@ -94,22 +95,22 @@ export default function Browse() {
         const result = await api.upload(folderId, file);
         if (result.duplicateOf?.length) duplicates.push(file.name);
       } catch (caught) {
-        failed.push(
-          caught instanceof ApiError && caught.code === 'too_large'
-            ? `${file.name}: يتجاوز الحد المسموح`
-            : caught instanceof ApiError && caught.code === 'duplicate'
-              ? `${file.name}: مكرر`
-              : caught instanceof ApiError && caught.code === 'required_field'
-                ? `${file.name}: حقول مطلوبة (${caught.body?.detail ?? ''})`
-                : file.name,
-        );
+        failed.push(describeUploadFailure(caught, file.name));
       }
     }
 
     // Reported per file rather than as one pass/fail: dropping ten files and
     // being told only that "something failed" is not actionable.
-    if (failed.length) setError(`تعذر رفع: ${failed.join('، ')}`);
-    if (duplicates.length) setNotice(`نسخة مطابقة موجودة مسبقاً من: ${duplicates.join('، ')}`);
+    if (failed.length) setError(failed.join('\n'));
+    if (duplicates.length) {
+      setNotice(`رُفع الملف، ولكن توجد نسخة مطابقة مسبقاً من: ${duplicates.join('، ')}`);
+    } else if (files.length > failed.length) {
+      // Indexing happens on a queue after the response, so a document is
+      // searchable by title immediately and by content a little later. Saying so
+      // once here prevents the far more alarming conclusion that search is
+      // broken.
+      setNotice('تم الرفع. تجري فهرسة المحتوى في الخلفية — قد لا يظهر في البحث النصي فوراً.');
+    }
 
     await Promise.all([load(), reloadTree()]);
     setBusy(false);
@@ -167,13 +168,26 @@ export default function Browse() {
       try {
         const targetId = await ensurePath(entry.path);
         await api.upload(targetId, entry.file);
-      } catch {
-        failed.push([...entry.path, entry.file.name].join('/'));
+      } catch (caught) {
+        failed.push(describeUploadFailure(caught, [...entry.path, entry.file.name].join('/')));
       }
     }
 
-    if (failed.length) setError(`تعذر رفع: ${failed.slice(0, 5).join('، ')}`);
-    setNotice(`تم رفع ${entries.length - failed.length} من ${entries.length} ملفاً مع الحفاظ على هيكل المجلدات.`);
+    if (failed.length) {
+      const shown = failed.slice(0, 5).join('\n');
+      const rest = failed.length > 5 ? `\n(و${failed.length - 5} ملفاً آخر)` : '';
+      setError(shown + rest);
+    }
+
+    // Only when something actually landed. Announcing "0 of 1 uploaded" as a
+    // notice alongside an error reads as success to anyone skimming.
+    const succeeded = entries.length - failed.length;
+    if (succeeded > 0) {
+      setNotice(
+        `تم رفع ${succeeded} من ${entries.length} ملفاً مع الحفاظ على هيكل المجلدات.`
+          + ' تجري فهرسة المحتوى في الخلفية.',
+      );
+    }
 
     await Promise.all([load(), reloadTree()]);
     setBusy(false);
