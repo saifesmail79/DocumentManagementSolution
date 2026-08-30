@@ -140,11 +140,23 @@ export default function ScanPanel({ folderId, onUploaded }) {
 
   if (status === 'checking') return <Spinner label="جارٍ البحث عن الماسح…" />;
 
+  /*
+   * Two different failures reach this branch and the browser cannot tell them
+   * apart. When Scan Bridge refuses this site's origin, the refusal is blocked
+   * by CORS before any response reaches us — fetch throws the same generic
+   * network error it throws when nothing is listening at all. The
+   * `origin_rejected` message above can therefore only appear for a request
+   * that completes, which a rejected one never does.
+   *
+   * Claiming "not installed" for both sent someone hunting for an install they
+   * already had. Naming both possibilities is the honest thing a browser can do.
+   */
   if (status === 'unavailable') {
     return (
       <Alert tone="info">
-        المسح الضوئي من المتصفح يحتاج أداة Scan Bridge، وهي غير مثبّتة على هذا الجهاز.
-        يمكنك رفع ملف من القرص كالمعتاد.
+        تعذّر الوصول إلى أداة Scan Bridge على هذا الجهاز — إمّا أنّها غير مثبّتة أو غير
+        مشغّلة، أو أنّ هذا الموقع غير مُصرّح له في إعداداتها. يمكنك رفع ملف من القرص
+        كالمعتاد.
       </Alert>
     );
   }
