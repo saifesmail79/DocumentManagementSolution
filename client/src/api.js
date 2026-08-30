@@ -257,6 +257,7 @@ export const api = {
         body: { inherits, copyInherited },
       }),
     extractionStats: () => request('/api/admin/extraction/stats'),
+    reindex: () => request('/api/admin/extraction/reindex', { method: 'POST' }),
     mailStatus: () => request('/api/admin/mail/status'),
     missingBlobs: () => request('/api/admin/storage/missing'),
     purge: (dryRun) => request('/api/admin/storage/purge', { method: 'POST', body: { dryRun } }),

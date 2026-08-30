@@ -358,3 +358,43 @@ export async function queueStats() {
   }
   return stats;
 }
+
+/**
+ * Puts every unsearchable document back on the queue.
+ *
+ * ─── Why this has to exist ──────────────────────────────────────────────────
+ *
+ * A job that exhausts its attempts is finished for good, and a job skipped as
+ * unindexable is never revisited. Both are correct while the cause is the
+ * document. Neither is correct when the cause was the server — a missing OCR
+ * engine, a broken library call, a tool installed the day after the upload.
+ *
+ * Without this the only remedy is to delete and re-upload every affected file,
+ * which loses its version history and its metadata. Two real cases here: Office
+ * documents that failed on a library rename, and scans skipped because OCRmyPDF
+ * was not yet configured.
+ *
+ * Attempts reset to zero, so a document that genuinely cannot be read simply
+ * fails again and stops. Documents already extracted are left alone.
+ *
+ * @returns {Promise<{requeued: number}>}
+ */
+export async function requeueUnsearchable() {
+  const result = await sql`
+    UPDATE q
+       SET status = ${QUEUE.PENDING},
+           attempts = 0,
+           last_error = NULL,
+           started_at = NULL,
+           finished_at = NULL
+      FROM dbo.extraction_queue AS q
+      JOIN dbo.documents AS d ON d.document_id = q.document_id
+     WHERE d.deleted_at IS NULL
+       AND q.version_number = d.current_version
+       AND q.status IN (${QUEUE.FAILED}, ${QUEUE.SKIPPED})
+  `.execute(db);
+
+  const requeued = Number(result.numAffectedRows ?? 0);
+  log.info({ requeued }, 'unsearchable documents requeued');
+  return { requeued };
+}

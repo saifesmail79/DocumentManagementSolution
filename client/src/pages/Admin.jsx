@@ -810,6 +810,7 @@ function DiagnosticsTab() {
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
+  const [reindexed, setReindexed] = useState(null);
 
   const load = useCallback(async () => {
     try {
@@ -825,6 +826,20 @@ function DiagnosticsTab() {
     load();
   }, [load]);
 
+  async function reindex() {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.admin.reindex();
+      setReindexed(result.requeued);
+      await load();
+    } catch {
+      setError('تعذرت إعادة الفهرسة.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (!stats) return <Spinner />;
 
   return (
@@ -839,7 +854,29 @@ function DiagnosticsTab() {
       </div>
 
       <Card className="p-4">
-        <h3 className="mb-2 text-sm font-semibold text-text">المسح الضوئي للنصوص (OCR)</h3>
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold text-text">المسح الضوئي للنصوص (OCR)</h3>
+          {/*
+            Failed and skipped jobs are terminal by design, which is right while
+            the cause is the document and wrong when the cause was the server —
+            an OCR engine installed later, a parser since fixed. Without this the
+            only remedy is deleting and re-uploading each file, losing its
+            version history.
+          */}
+          <Button
+            variant="secondary"
+            onClick={reindex}
+            disabled={busy}
+            className="!px-2 !py-1 text-xs"
+          >
+            إعادة فهرسة غير المفهرَس
+          </Button>
+        </div>
+        {reindexed !== null ? (
+          <Alert tone="success">
+            أُعيدت {reindexed} وثيقة إلى قائمة الفهرسة. ستُعالَج خلال دقائق.
+          </Alert>
+        ) : null}
         {!stats.ocr.enabled ? (
           <Alert tone="warning">
             OCR معطّل. الوثائق الممسوحة ضوئياً تُخزَّن وتُستعرض لكن لا يمكن البحث في محتواها.

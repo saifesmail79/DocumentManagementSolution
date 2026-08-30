@@ -466,6 +466,47 @@ describe('text extraction', { skip: CONFIGURED ? false : target.reason }, () => 
     assert.ok(row.content_normalized.includes(normalizeArabic('المهجورة')));
   });
 
+  /**
+   * The remedy after fixing a server-side cause. Both real cases here were
+   * exactly that: Office documents failed on a library rename, and scans were
+   * skipped because OCRmyPDF was not yet configured. Neither document was at
+   * fault, and neither would ever have been retried.
+   */
+  test('reindexing requeues what failed, and leaves indexed documents alone', async () => {
+    const broken = await upload(cookie, 'was-broken.txt', 'محتوى كان يفشل سابقاً', 'text/plain');
+    const fine = await upload(cookie, 'was-fine.txt', 'محتوى نجح من أول مرة', 'text/plain');
+
+    await worker.drainQueue();
+
+    // Exactly the two terminal states a server-side fault leaves behind.
+    await sql`
+      UPDATE dbo.extraction_queue
+         SET status = ${worker.QUEUE.FAILED}, attempts = 3, last_error = 'parseOfficeAsync is not a function'
+       WHERE document_id = ${broken}
+    `.execute(db);
+
+    const { requeued } = await worker.requeueUnsearchable();
+    assert.ok(requeued >= 1, 'nothing was requeued');
+
+    const after = await sql`
+      SELECT document_id, status, attempts, last_error FROM dbo.extraction_queue
+       WHERE document_id IN (${broken}, ${fine})
+    `.execute(db);
+
+    const brokenRow = after.rows.find((r) => String(r.document_id) === String(broken));
+    assert.equal(Number(brokenRow.status), worker.QUEUE.PENDING);
+    assert.equal(Number(brokenRow.attempts), 0, 'attempts must reset or it fails again immediately');
+    assert.equal(brokenRow.last_error, null, 'the stale reason should not outlive the retry');
+
+    // A document that extracted cleanly must not be dragged through OCR again.
+    const fineRow = after.rows.find((r) => String(r.document_id) === String(fine));
+    assert.equal(Number(fineRow.status), worker.QUEUE.DONE, 'an indexed document was requeued needlessly');
+
+    await worker.drainQueue();
+    const row = await statusOf(broken);
+    assert.equal(Number(row.extraction_status), worker.DOC_EXTRACTION.EXTRACTED);
+  });
+
   test('a job still running is left alone', async () => {
     const documentId = await upload(cookie, 'in-progress.txt', 'قيد المعالجة الآن', 'text/plain');
 

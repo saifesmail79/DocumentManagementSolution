@@ -169,6 +169,30 @@ export async function adminRoutes(app) {
       ocr: await ocrStatus({ enabled: await getSetting('ocr.enabled') }),
     }));
 
+    /**
+     * Puts every unsearchable document back on the queue.
+     *
+     * The remedy after fixing a server-side cause — an OCR engine installed
+     * later, a broken parser corrected. Without it the only way to index those
+     * documents again is to delete and re-upload each one, losing its version
+     * history and metadata.
+     */
+    identity.post('/extraction/reindex', async (request) => {
+      const { requeueUnsearchable } = await import('../extraction/worker.js');
+      const result = await requeueUnsearchable();
+
+      await record({
+        actor: request.user,
+        action: ACTION.SETTING_CHANGED,
+        targetType: 'extraction',
+        targetId: 'reindex',
+        detail: `requeued ${result.requeued} document(s) for extraction`,
+        request,
+      });
+
+      return result;
+    });
+
     /** The audit trail. */
     identity.get('/audit', async (request) => {
       const { actor, action, targetType, targetId, folderId, from, to, limit, cursor } =
