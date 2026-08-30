@@ -240,7 +240,8 @@ async function ocrImage(absolutePath) {
  * writes the recognised text to a plain file, which is all that is wanted here.
  * The output PDF goes to a temporary directory and is discarded: the stored
  * document must stay exactly the bytes the user uploaded, because its SHA-256 is
- * recorded and verified.
+ * recorded and verified. That is also why rotating and deskewing here is safe —
+ * they change the copy being read, never the file being kept.
  */
 async function ocrPdf(absolutePath) {
   const workDir = await mkdtemp(path.join(tmpdir(), 'dms-ocr-'));
@@ -258,6 +259,16 @@ async function ocrPdf(absolutePath) {
         // Pages that already carry text are left alone rather than failing the
         // run: a mixed PDF (scanned pages plus a digital cover sheet) is common.
         '--skip-text',
+        // A page fed upside down reads as mirrored nonsense — "physical" comes
+        // back as "jeaisAyd" — and nothing anywhere reports a problem, because
+        // OCR did produce plenty of characters. OCRmyPDF can detect and correct
+        // the orientation, but does nothing about it unless asked.
+        '--rotate-pages',
+        '--rotate-pages-threshold',
+        String(config.ocr.rotateThreshold),
+        // Feeders introduce a degree or two of skew, which costs accuracy on
+        // Arabic far more than on Latin script.
+        '--deskew',
         '--optimize',
         '0',
         '--output-type',
@@ -311,12 +322,19 @@ export async function attemptOcr(absolutePath, { filename, mimeType, enabled = c
   // OCR that finds almost nothing has failed, whatever its exit code — a blank
   // page, a photograph of a wall, a document in a script the language data does
   // not cover. Indexing a handful of stray characters looks like success.
-  if (trimmed.length < config.ocr.minCharacters) {
-    return { ok: false, reason: 'ocr_found_no_text', detail: `${trimmed.length} characters` };
+  //
+  // Letters and digits, not total length: a blank page's sidecar comes back as a
+  // couple of dozen characters of whitespace and page separators, which clears a
+  // length floor and is then recorded as a successful OCR. Unicode classes, so
+  // Arabic counts as letters.
+  const meaningful = (trimmed.match(/[\p{L}\p{N}]/gu) ?? []).length;
+
+  if (meaningful < config.ocr.minCharacters) {
+    return { ok: false, reason: 'ocr_found_no_text', detail: `${meaningful} letters or digits` };
   }
 
   log.info(
-    { engine: isPdf ? 'ocrmypdf' : 'tesseract', characters: trimmed.length },
+    { engine: isPdf ? 'ocrmypdf' : 'tesseract', characters: trimmed.length, meaningful },
     'OCR produced text',
   );
 

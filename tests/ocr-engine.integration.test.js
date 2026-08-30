@@ -189,6 +189,33 @@ describe('OCR engines (real Tesseract and OCRmyPDF)', { skip: SKIP }, () => {
   });
 
   /**
+   * A page fed upside down.
+   *
+   * This is the failure that prompted the whole check: a real scan came back as
+   * 2,685 characters of mirrored nonsense — "physical" as "jeaisAyd", "Network"
+   * as "JIO0MIaN" — and every status in the system said the document had been
+   * OCR'd successfully. Plenty of characters were produced, so nothing looked
+   * wrong anywhere.
+   *
+   * OCRmyPDF had in fact detected the page as facing down, with confidence
+   * 11.28, and declined to rotate because its own default threshold is 14.
+   */
+  test('a page scanned upside down is corrected, not read as nonsense', async () => {
+    const result = await ocr.attemptOcr(path.join(FIXTURES, 'arabic-scan-upside-down.pdf'), {
+      filename: 'arabic-scan-upside-down.pdf',
+      mimeType: 'application/pdf',
+    });
+
+    assert.equal(result.ok, true, `OCR failed: ${result.reason ?? ''}`);
+
+    const score = accuracy(flatten(EXPECTED_LINES.join(' ')), flatten(result.text));
+    assert.ok(
+      score >= 0.9,
+      `upside-down page scored ${(score * 100).toFixed(1)}% — got: ${flatten(result.text).slice(0, 160)}`,
+    );
+  });
+
+  /**
    * OCRmyPDF spawns Tesseract itself, so our `--tessdata-dir` flag never
    * reaches it — the directory has to arrive as TESSDATA_PREFIX in the child
    * environment. It also resolves Ghostscript as the bare name `gs`, which a

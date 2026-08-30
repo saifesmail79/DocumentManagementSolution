@@ -48,6 +48,20 @@ function integer(key, fallback, { min, max } = {}) {
   return value;
 }
 
+/** As `integer`, but for a value that is legitimately fractional. */
+function number(key, fallback, { min, max } = {}) {
+  const raw = process.env[key];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) {
+    problems.push(`${key} must be a number, got "${raw}"`);
+    return fallback;
+  }
+  if (min !== undefined && value < min) problems.push(`${key} must be >= ${min}`);
+  if (max !== undefined && value > max) problems.push(`${key} must be <= ${max}`);
+  return value;
+}
+
 function boolean(key, fallback) {
   const raw = process.env[key];
   if (raw === undefined || raw.trim() === '') return fallback;
@@ -217,6 +231,29 @@ export const config = Object.freeze({
      */
     tessdataDir: optional('OCR_TESSDATA_DIR', ''),
     ocrmypdfPath: optional('OCR_OCRMYPDF_PATH', 'ocrmypdf'),
+    /**
+     * How sure OCRmyPDF must be before it rotates a page it believes is upside
+     * down. Lower means readier to rotate.
+     *
+     * Its own default is 14, which is too strict for real scans. Two upside-down
+     * pages measured here, both identified correctly and both left alone:
+     *
+     *   a dense English page   facing down, confidence 11.28
+     *   a sparse Arabic page   facing down, confidence  5.68
+     *
+     * Confidence tracks how much text the page carries, not how sure the
+     * direction is — the direction was right in both. The recognised text came
+     * back as mirrored nonsense ("physical" as "jeaisAyd") while every status in
+     * the system reported a successful OCR, because plenty of characters were
+     * produced.
+     *
+     * The harm is symmetric: a rotation missed and a rotation wrongly applied
+     * both yield an unreadable document, silently. So this is set to catch both
+     * observed cases while still ignoring near-zero guesses, which is where a
+     * near-blank page would land. Two data points is thin evidence, hence the
+     * environment override.
+     */
+    rotateThreshold: number('OCR_ROTATE_THRESHOLD', 3, { min: 0, max: 100 }),
     /** Hard kill after this. A wedged OCR run would otherwise hold a worker slot forever. */
     timeoutMs: integer('OCR_TIMEOUT_MS', 300_000, { min: 10_000 }),
     /** Below this many characters, OCR is treated as having found nothing. */
