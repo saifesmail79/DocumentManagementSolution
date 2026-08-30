@@ -42,13 +42,13 @@ const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bm
  *
  * @returns {Promise<{code: number, stdout: string, stderr: string, timedOut: boolean}>}
  */
-function run(command, args, { timeoutMs = 60_000, cwd } = {}) {
+function run(command, args, { timeoutMs = 60_000, cwd, env } = {}) {
   return new Promise((resolve, reject) => {
     let child;
     try {
       // shell: false is the default and is load-bearing — a filename containing
       // a quote or a semicolon must never be parsed as shell syntax.
-      child = spawn(command, args, { cwd, shell: false, windowsHide: true });
+      child = spawn(command, args, { cwd, env, shell: false, windowsHide: true });
     } catch (error) {
       return reject(error);
     }
@@ -83,6 +83,40 @@ function run(command, args, { timeoutMs = 60_000, cwd } = {}) {
       resolve({ code: code ?? -1, stdout, stderr, timedOut });
     });
   });
+}
+
+/**
+ * The environment OCRmyPDF needs, which is not the one it inherits.
+ *
+ * Two things have to be injected:
+ *
+ *   TESSDATA_PREFIX — OCRmyPDF shells out to Tesseract itself, so our
+ *   `--tessdata-dir` flag never reaches it. Without this it refuses the job up
+ *   front with "does not have language data for: ara", even though Tesseract
+ *   run directly reads Arabic fine. Note that Tesseract 5 wants the directory
+ *   holding the .traineddata files, not its parent — the pre-4.x convention.
+ *
+ *   PATH — OCRmyPDF resolves Ghostscript as the bare name `gs`. A per-user
+ *   Ghostscript install is not on the machine PATH, and a Windows service gets
+ *   the machine PATH rather than the installing user's, so the directory is
+ *   prepended here instead of being assumed.
+ */
+function ocrChildEnv() {
+  const env = { ...process.env };
+
+  if (config.ocr.tessdataDir) env.TESSDATA_PREFIX = config.ocr.tessdataDir;
+
+  const ghostscript = config.renditions.ghostscriptPath;
+  if (ghostscript && path.isAbsolute(ghostscript)) {
+    const binDir = path.dirname(ghostscript);
+    // Windows env keys are case-insensitive but the object's are not, so reuse
+    // whatever casing the real environment used rather than adding a second key
+    // that the child would ignore.
+    const key = Object.keys(env).find((name) => name.toUpperCase() === 'PATH') ?? 'PATH';
+    env[key] = env[key] ? `${binDir}${path.delimiter}${env[key]}` : binDir;
+  }
+
+  return env;
 }
 
 let detected = null;
@@ -146,7 +180,11 @@ export async function ocrStatus() {
 
 async function installedLanguages() {
   try {
-    const result = await run(config.ocr.tesseractPath, ['--list-langs'], { timeoutMs: 10_000 });
+    const result = await run(
+      config.ocr.tesseractPath,
+      [...(config.ocr.tessdataDir ? ['--tessdata-dir', config.ocr.tessdataDir] : []), '--list-langs'],
+      { timeoutMs: 10_000 },
+    );
     if (result.code !== 0) return [];
     return (result.stdout || result.stderr)
       .split('\n')
@@ -171,6 +209,9 @@ async function ocrImage(absolutePath) {
       'stdout',
       '-l',
       config.ocr.languages,
+      // Only when configured: passing an empty --tessdata-dir makes tesseract
+      // look in the wrong place and report every language as missing.
+      ...(config.ocr.tessdataDir ? ['--tessdata-dir', config.ocr.tessdataDir] : []),
       // 1 = automatic page segmentation with orientation and script detection.
       // A scanned page fed at the default setting is frequently read upside down.
       '--psm',
@@ -217,7 +258,7 @@ async function ocrPdf(absolutePath) {
         absolutePath,
         outputPdf,
       ],
-      { timeoutMs: config.ocr.timeoutMs, cwd: workDir },
+      { timeoutMs: config.ocr.timeoutMs, cwd: workDir, env: ocrChildEnv() },
     );
 
     if (result.timedOut) throw new Error(`OCR timed out after ${config.ocr.timeoutMs}ms`);

@@ -210,6 +210,12 @@ export const config = Object.freeze({
      */
     languages: optional('OCR_LANGUAGES', 'ara+eng'),
     tesseractPath: optional('OCR_TESSERACT_PATH', 'tesseract'),
+    /**
+     * Where the .traineddata files live, when they are not beside the engine.
+     * Installing language data into Program Files needs administrator rights,
+     * so a user-owned directory is the normal arrangement on Windows.
+     */
+    tessdataDir: optional('OCR_TESSDATA_DIR', ''),
     ocrmypdfPath: optional('OCR_OCRMYPDF_PATH', 'ocrmypdf'),
     /** Hard kill after this. A wedged OCR run would otherwise hold a worker slot forever. */
     timeoutMs: integer('OCR_TIMEOUT_MS', 300_000, { min: 10_000 }),

@@ -26,6 +26,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdtemp, rm, readdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -45,12 +46,90 @@ const PDF = /\.pdf$/i;
 
 const THUMBNAIL_WIDTH = 320;
 
-function run(command, args, { timeoutMs = 120_000, cwd } = {}) {
+/**
+ * The environment LibreOffice is given, which keeps it away from the printer.
+ *
+ * ─── The failure this prevents ──────────────────────────────────────────────
+ *
+ * VCL asks Windows for the default printer during startup — headless, even when
+ * the job is `--convert-to pdf` and nothing will ever be printed. On a machine
+ * whose default printer is an unreachable network device that call blocks in the
+ * print spooler until it gives up.
+ *
+ * Measured on the development machine, whose default was a RICOH on a WSD port
+ * that had stopped answering: 48.6s for a single capability query against it,
+ * against 0.1–1.0s for every local printer. Conversions took ~52s, essentially
+ * all of it that one call, and Windows put "waiting for printer" on screen each
+ * time. Nothing reported an error — the work simply took a minute.
+ *
+ * `SAL_DISABLE_DEFAULTPRINTER` short-circuits `Printer::GetDefaultPrinterName()`
+ * before it reaches the spooler; `SAL_DISABLE_PRINTERLIST` does the same for the
+ * queue enumeration in `ImplInitPrnQueueList()`. Both are read straight from the
+ * environment in vcl/source/gdi/print.cxx with no platform guard, and both are
+ * the documented workaround for LibreOffice bug 42673.
+ *
+ * Scoped to the child process, so an interactive LibreOffice on the same machine
+ * is unaffected — it inherits the desktop's environment, not the server's.
+ *
+ * The only thing lost is the printer's page geometry as a fallback for documents
+ * that carry no page size of their own. Stored documents effectively always do,
+ * and a preview inheriting A4 instead of a specific printer's default is a much
+ * smaller problem than a preview that takes a minute to appear.
+ */
+const LIBREOFFICE_ENV = Object.freeze({
+  ...process.env,
+  SAL_DISABLE_DEFAULTPRINTER: '1',
+  SAL_DISABLE_PRINTERLIST: '1',
+});
+
+/**
+ * The LibreOffice binary to actually spawn.
+ *
+ * ─── Why this is not just the configured path ───────────────────────────────
+ *
+ * Windows ships two front ends to the same program. `soffice.exe` is marked as
+ * a GUI-subsystem binary: launched without a console it never writes to stdout
+ * and, in the headless invocations used here, never exits — the parent waits
+ * until its own timeout and concludes the tool is missing. `soffice.com` is the
+ * console front end, and it behaves the way a command-line program should.
+ *
+ * Measured on this machine: `soffice.exe --version` produced no output and had
+ * still not exited after two minutes; `soffice.com --version` answered in
+ * milliseconds.
+ *
+ * The installer advertises the `.exe`, so that is what an operator will
+ * naturally put in the configuration, and the resulting failure is invisible —
+ * previews just never appear, with no error anywhere. Preferring the sibling
+ * `.com` when one exists costs a single stat and removes an entire class of
+ * "renditions are silently off in production" report.
+ *
+ * The configured value still wins when it is anything else, so pointing at a
+ * wrapper script or a non-standard install keeps working.
+ */
+let libreOfficeCommand = null;
+
+function libreOffice() {
+  if (libreOfficeCommand) return libreOfficeCommand;
+
+  const configured = config.renditions.libreOfficePath;
+  libreOfficeCommand = configured;
+
+  if (process.platform === 'win32' && /soffice\.exe$/i.test(configured)) {
+    const consoleFrontEnd = configured.replace(/soffice\.exe$/i, 'soffice.com');
+    if (existsSync(consoleFrontEnd)) libreOfficeCommand = consoleFrontEnd;
+  }
+
+  return libreOfficeCommand;
+}
+
+function run(command, args, { timeoutMs = 120_000, cwd, env } = {}) {
   return new Promise((resolve, reject) => {
     let child;
     try {
       // No shell, argument array: a filename must never become command syntax.
-      child = spawn(command, args, { cwd, shell: false, windowsHide: true });
+      // env undefined means inherit process.env unchanged, which is what every
+      // caller but LibreOffice wants.
+      child = spawn(command, args, { cwd, env, shell: false, windowsHide: true });
     } catch (error) {
       return reject(error);
     }
@@ -81,9 +160,9 @@ let detected = null;
 export async function detectTools({ force = false } = {}) {
   if (detected && !force) return detected;
 
-  const probe = async (command, args) => {
+  const probe = async (command, args, options = {}) => {
     try {
-      const result = await run(command, args, { timeoutMs: 15_000 });
+      const result = await run(command, args, { timeoutMs: 15_000, ...options });
       return { available: result.code === 0 };
     } catch {
       return { available: false };
@@ -91,7 +170,7 @@ export async function detectTools({ force = false } = {}) {
   };
 
   const [libreoffice, ghostscript] = await Promise.all([
-    probe(config.renditions.libreOfficePath, ['--version']),
+    probe(libreOffice(), ['--version'], { env: LIBREOFFICE_ENV }),
     probe(config.renditions.ghostscriptPath, ['--version']),
   ]);
 
@@ -227,7 +306,6 @@ async function buildThumbnail(absolutePath, filename) {
     if (!tools.ghostscript.available) return null;
 
     const png = await rasterisePdfFirstPage(absolutePath);
-    if (!png) return null;
 
     const buffer = await sharp(png)
       .resize({ width: THUMBNAIL_WIDTH, withoutEnlargement: true })
@@ -244,7 +322,6 @@ async function buildThumbnail(absolutePath, filename) {
     const workDir = path.dirname(pdf);
     try {
       const png = await rasterisePdfFirstPage(pdf);
-      if (!png) return null;
       const buffer = await sharp(png)
         .resize({ width: THUMBNAIL_WIDTH, withoutEnlargement: true })
         .webp({ quality: 78 })
@@ -284,11 +361,18 @@ async function convertToPdf(absolutePath) {
   const workDir = await mkdtemp(path.join(tmpdir(), 'dms-render-'));
 
   const result = await run(
-    config.renditions.libreOfficePath,
+    libreOffice(),
     [
       '--headless',
-      // Its own profile directory per run: concurrent LibreOffice processes
-      // sharing one profile deadlock, which presents as a hung conversion.
+      // A fresh profile per run: two LibreOffice processes sharing one deadlock,
+      // which presents as a hung conversion. Building it costs well under a
+      // second — reusing a profile across runs was tried and measured no faster,
+      // because startup was never the expensive part. See LIBREOFFICE_ENV.
+      //
+      // It lives under the OS temp directory because the path has to stay short.
+      // LibreOffice builds a deep tree inside the profile and dies outright —
+      // 0xC0000409, no message, no output file — once that crosses the Windows
+      // 260-character limit.
       `-env:UserInstallation=file:///${workDir.replace(/\\/g, '/')}/profile`,
       '--convert-to',
       'pdf',
@@ -296,25 +380,43 @@ async function convertToPdf(absolutePath) {
       workDir,
       absolutePath,
     ],
-    { timeoutMs: config.renditions.timeoutMs, cwd: workDir },
+    { timeoutMs: config.renditions.timeoutMs, cwd: workDir, env: LIBREOFFICE_ENV },
   );
 
-  if (result.code !== 0 || result.timedOut) {
+  // Returning null here would be a lie with consequences. The caller reads null
+  // as "nothing can render this file type" and marks the job SKIPPED, which is
+  // terminal — only PENDING and RETRYABLE are ever claimed again. So a
+  // conversion that failed because the machine was briefly busy, or because
+  // LibreOffice stalled on something, would be abandoned for good and recorded
+  // as an unsupported format. Throwing routes it to the retry path instead, and
+  // says what actually happened.
+  if (result.timedOut) {
     await rm(workDir, { recursive: true, force: true }).catch(() => {});
-    return null;
+    throw new Error(`LibreOffice timed out after ${config.renditions.timeoutMs}ms`);
+  }
+
+  if (result.code !== 0) {
+    await rm(workDir, { recursive: true, force: true }).catch(() => {});
+    throw new Error(`LibreOffice exited ${result.code}: ${result.stderr.slice(0, 300)}`);
   }
 
   const files = await readdir(workDir);
   const pdf = files.find((file) => file.toLowerCase().endsWith('.pdf'));
   if (!pdf) {
     await rm(workDir, { recursive: true, force: true }).catch(() => {});
-    return null;
+    throw new Error('LibreOffice reported success but produced no PDF');
   }
 
   return path.join(workDir, pdf);
 }
 
-/** Ghostscript, first page only. Returns PNG bytes, or null. */
+/**
+ * Ghostscript, first page only. Returns PNG bytes.
+ *
+ * Throws rather than returning null for the same reason `convertToPdf` does: the
+ * caller treats null as "this file type has no renderer" and gives up
+ * permanently, which is the wrong answer for a timeout or a transient failure.
+ */
 async function rasterisePdfFirstPage(pdfPath) {
   const workDir = await mkdtemp(path.join(tmpdir(), 'dms-raster-'));
   const output = path.join(workDir, 'page.png');
@@ -334,10 +436,14 @@ async function rasterisePdfFirstPage(pdfPath) {
       { timeoutMs: config.renditions.timeoutMs },
     );
 
-    if (result.code !== 0 || result.timedOut) return null;
+    if (result.timedOut) {
+      throw new Error(`Ghostscript timed out after ${config.renditions.timeoutMs}ms`);
+    }
+    if (result.code !== 0) {
+      throw new Error(`Ghostscript exited ${result.code}: ${result.stderr.slice(0, 300)}`);
+    }
+
     return await readFile(output);
-  } catch {
-    return null;
   } finally {
     await rm(workDir, { recursive: true, force: true }).catch(() => {});
   }
