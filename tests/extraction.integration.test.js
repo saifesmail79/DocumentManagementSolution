@@ -15,8 +15,11 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { config as loadEnv } from 'dotenv';
 import { resolveTestDatabase, ensureTestDatabase, resetDatabase } from './helpers/test-database.js';
+import { normalizeArabic } from '../src/lib/arabic.js';
 
 loadEnv();
 
@@ -25,6 +28,8 @@ const CONFIGURED = target.configured;
 
 const STORAGE_ROOT = await mkdtemp(path.join(tmpdir(), 'dms-extract-test-'));
 process.env.STORAGE_ROOT = STORAGE_ROOT;
+
+const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
 
 let db;
 let sql;
@@ -104,6 +109,14 @@ async function upload(cookie, filename, content, contentType) {
   });
   assert.equal(response.statusCode, 201, `upload of ${filename} failed: ${response.body}`);
   return response.json().documentId;
+}
+
+/** The queue's own account of why a document failed, for a legible assertion. */
+async function lastError(documentId) {
+  const r = await sql`
+    SELECT status, attempts, last_error FROM dbo.extraction_queue WHERE document_id = ${documentId}
+  `.execute(db);
+  return r.rows[0] ?? null;
 }
 
 async function statusOf(documentId) {
@@ -361,5 +374,118 @@ describe('text extraction', { skip: CONFIGURED ? false : target.reason }, () => 
     assert.ok(stats.done > 0, 'some jobs completed');
     assert.ok(stats.skipped > 0, 'some were skipped as unindexable');
     assert.equal(typeof stats.pending, 'number');
+  });
+
+  // ── Office documents ───────────────────────────────────────────────────
+  //
+  // These use real .docx and .xlsx files rather than synthesised bytes, because
+  // the bug they exist to catch was in the library call itself and no amount of
+  // fake input would have reached it. officeparser 6 renamed parseOfficeAsync to
+  // parseOffice; calling the old name threw on every Word and Excel upload, the
+  // job retried three times and gave up, and the documents were stored, listed,
+  // and silently never searchable. There was no Office coverage at all.
+
+  test('a Word document becomes searchable', async () => {
+    const bytes = await readFile(path.join(FIXTURES, 'arabic-contract.docx'));
+    const documentId = await upload(
+      cookie,
+      'contract.docx',
+      bytes,
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    );
+
+    await worker.drainQueue();
+
+    const row = await statusOf(documentId);
+    assert.equal(
+      Number(row.extraction_status),
+      worker.DOC_EXTRACTION.EXTRACTED,
+      `extraction did not succeed: ${JSON.stringify(await lastError(documentId))}`,
+    );
+
+    // The specific near-miss worth pinning: the parser returns a result object,
+    // not a string. String(result) yields "[object Object]", which is long
+    // enough to pass a "did we get text?" check and would have indexed that
+    // literal for every Office document in the system.
+    assert.ok(!row.content_normalized.includes('object Object'), 'the result object was stringified');
+    assert.ok(row.content_normalized.includes('الاتصالات'), 'the document text was not indexed');
+  });
+
+  test('a spreadsheet becomes searchable', async () => {
+    const bytes = await readFile(path.join(FIXTURES, 'arabic-sheet.xlsx'));
+    const documentId = await upload(
+      cookie,
+      'sheet.xlsx',
+      bytes,
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+
+    await worker.drainQueue();
+
+    const row = await statusOf(documentId);
+    assert.equal(
+      Number(row.extraction_status),
+      worker.DOC_EXTRACTION.EXTRACTED,
+      `extraction did not succeed: ${JSON.stringify(await lastError(documentId))}`,
+    );
+    assert.ok(!row.content_normalized.includes('object Object'));
+    assert.ok(
+      row.content_normalized.includes('servermaintenancecontract')
+        || row.content_normalized.includes('ServerMaintenanceContract'),
+      'cell text was not indexed',
+    );
+  });
+
+  /**
+   * A worker killed mid-job leaves its row in RUNNING. Nothing moved it out
+   * again, so the document stayed unsearchable for good — no error, no retry,
+   * and nothing visible but a queue row nobody reads. It had already happened in
+   * production here.
+   */
+  test('a job abandoned by a dead worker is reclaimed', async () => {
+    const documentId = await upload(cookie, 'abandoned.txt', 'الوثيقة المهجورة تماماً', 'text/plain');
+
+    // Exactly the state a killed process leaves behind: claimed, started long
+    // ago, never finished.
+    await sql`
+      UPDATE dbo.extraction_queue
+         SET status = ${worker.QUEUE.RUNNING},
+             started_at = DATEADD(hour, -2, SYSUTCDATETIME()),
+             finished_at = NULL
+       WHERE document_id = ${documentId}
+    `.execute(db);
+
+    await worker.drainQueue();
+
+    const row = await statusOf(documentId);
+    assert.equal(
+      Number(row.extraction_status),
+      worker.DOC_EXTRACTION.EXTRACTED,
+      'the abandoned job was never picked up again',
+    );
+    assert.ok(row.content_normalized.includes(normalizeArabic('المهجورة')));
+  });
+
+  test('a job still running is left alone', async () => {
+    const documentId = await upload(cookie, 'in-progress.txt', 'قيد المعالجة الآن', 'text/plain');
+
+    // Claimed a moment ago: another worker is presumably still on it, and
+    // stealing it would mean two workers on one document.
+    await sql`
+      UPDATE dbo.extraction_queue
+         SET status = ${worker.QUEUE.RUNNING}, started_at = SYSUTCDATETIME(), finished_at = NULL
+       WHERE document_id = ${documentId}
+    `.execute(db);
+
+    await worker.drainQueue();
+
+    const queued = await sql`
+      SELECT status FROM dbo.extraction_queue WHERE document_id = ${documentId}
+    `.execute(db);
+    assert.equal(
+      Number(queued.rows[0].status),
+      worker.QUEUE.RUNNING,
+      'a fresh claim was stolen from the worker holding it',
+    );
   });
 });

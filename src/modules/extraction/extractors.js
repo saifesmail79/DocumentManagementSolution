@@ -153,9 +153,19 @@ async function extractPdf(absolutePath, maxChars) {
 }
 
 async function extractOffice(absolutePath, maxChars) {
-  const { parseOfficeAsync } = await import('officeparser');
+  // officeparser 6 renamed parseOfficeAsync to parseOffice and changed what it
+  // returns: a result object, not a string. Calling the old name threw
+  // "parseOfficeAsync is not a function" on every Word and Excel upload, and the
+  // job retried three times and gave up — so Office documents were stored,
+  // listed, and never searchable.
+  //
+  // String(result) is NOT the fix. The object stringifies to "[object Object]",
+  // which is long enough to look like a successful extraction and would have
+  // indexed that literal text for every document.
+  const { parseOffice } = await import('officeparser');
 
-  const text = String(await parseOfficeAsync(absolutePath)).slice(0, maxChars);
+  const parsed = await parseOffice(absolutePath);
+  const text = String(parsed.toText()).slice(0, maxChars);
 
   return text.trim().length < MIN_MEANINGFUL_CHARS
     ? { outcome: OUTCOME.NO_TEXT_LAYER, text: '', detail: 'document carried no readable text' }

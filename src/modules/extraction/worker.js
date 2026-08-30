@@ -64,10 +64,30 @@ export const DOC_EXTRACTION = Object.freeze({
 });
 
 /**
+ * How long a job may sit in RUNNING before another worker may take it.
+ *
+ * Generous, because it must exceed the slowest legitimate job — a large scanned
+ * PDF through OCR — or two workers would process the same document at once.
+ */
+const STALE_CLAIM_MS = 30 * 60 * 1000;
+
+/**
  * Atomically claims one job.
  *
  * READPAST makes a second worker skip a row another has locked rather than wait
  * for it, which is what lets several run at once without a coordinator.
+ *
+ * ─── Why RUNNING is reclaimable ─────────────────────────────────────────────
+ *
+ * A worker that dies mid-job — the process killed, the machine restarted —
+ * leaves its row in RUNNING. Nothing ever moves it out again, so the document
+ * stays unsearchable permanently, with no error recorded anywhere and no sign of
+ * a problem beyond a queue row nobody reads. That had already happened once in
+ * production here.
+ *
+ * A RUNNING row older than STALE_CLAIM_MS is therefore treated as abandoned.
+ * `attempts` still increments, so a job that reliably kills its worker exhausts
+ * its retries and stops rather than looping forever.
  */
 async function claimJob(maxAttempts) {
   const result = await sql`
@@ -77,7 +97,14 @@ async function claimJob(maxAttempts) {
            attempts = q.attempts + 1
       OUTPUT INSERTED.queue_id, INSERTED.document_id, INSERTED.version_number, INSERTED.attempts
       FROM dbo.extraction_queue AS q WITH (READPAST, UPDLOCK, ROWLOCK)
-     WHERE q.status IN (${QUEUE.PENDING}, ${QUEUE.RETRYABLE})
+     WHERE (
+             q.status IN (${QUEUE.PENDING}, ${QUEUE.RETRYABLE})
+             OR (
+               q.status = ${QUEUE.RUNNING}
+               AND q.started_at IS NOT NULL
+               AND DATEDIFF(second, q.started_at, SYSUTCDATETIME()) > ${Math.floor(STALE_CLAIM_MS / 1000)}
+             )
+           )
        AND q.attempts < ${maxAttempts}
   `.execute(db);
 
