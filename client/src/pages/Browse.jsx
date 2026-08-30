@@ -46,6 +46,7 @@ export default function Browse() {
   const [notice, setNotice] = useState(null);
   const [selected, setSelected] = useState(() => new Set());
   const fileInput = useRef(null);
+  const folderInput = useRef(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -109,6 +110,70 @@ export default function Browse() {
     // being told only that "something failed" is not actionable.
     if (failed.length) setError(`تعذر رفع: ${failed.join('، ')}`);
     if (duplicates.length) setNotice(`نسخة مطابقة موجودة مسبقاً من: ${duplicates.join('، ')}`);
+
+    await Promise.all([load(), reloadTree()]);
+    setBusy(false);
+  }
+
+  /**
+   * Uploads a dropped folder, recreating its structure.
+   *
+   * Folders are created depth-first and cached by path, so a tree of two
+   * hundred files in twenty folders makes twenty folder calls rather than two
+   * hundred. A folder that already exists comes back as an error the cache
+   * absorbs — creating and looking up are the same operation here.
+   */
+  async function uploadTree(entries) {
+    if (!folderId || entries.length === 0) return;
+
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+
+    const created = new Map([['', folderId]]);
+    const failed = [];
+
+    /** Ensures every folder on a path exists, returning the deepest id. */
+    async function ensurePath(segments) {
+      let parentId = folderId;
+      let key = '';
+
+      for (const segment of segments) {
+        key = key ? `${key}/${segment}` : segment;
+        if (created.has(key)) {
+          parentId = created.get(key);
+          continue;
+        }
+
+        try {
+          const result = await api.createFolder(parentId, segment);
+          parentId = result.folderId;
+        } catch {
+          // Most likely it already exists from an earlier run. Find it rather
+          // than failing the whole tree.
+          const listing = await api.folder(parentId).catch(() => null);
+          const match = listing?.folders?.find((f) => f.name === segment);
+          if (!match) throw new Error(`could not create ${segment}`);
+          parentId = match.folderId;
+        }
+
+        created.set(key, parentId);
+      }
+
+      return parentId;
+    }
+
+    for (const entry of entries) {
+      try {
+        const targetId = await ensurePath(entry.path);
+        await api.upload(targetId, entry.file);
+      } catch {
+        failed.push([...entry.path, entry.file.name].join('/'));
+      }
+    }
+
+    if (failed.length) setError(`تعذر رفع: ${failed.slice(0, 5).join('، ')}`);
+    setNotice(`تم رفع ${entries.length - failed.length} من ${entries.length} ملفاً مع الحفاظ على هيكل المجلدات.`);
 
     await Promise.all([load(), reloadTree()]);
     setBusy(false);
@@ -220,6 +285,39 @@ export default function Browse() {
                 {busy ? 'جارٍ الرفع…' : 'رفع وثيقة'}
               </Button>
               <input ref={fileInput} type="file" multiple className="hidden" onChange={upload} />
+              <Button
+                variant="secondary"
+                icon={FolderPlus}
+                onClick={() => folderInput.current?.click()}
+                disabled={busy}
+              >
+                رفع مجلد
+              </Button>
+              {/* webkitdirectory is the only way to pick a directory. React does
+                  not know the attribute, so it is set through a ref callback. */}
+              <input
+                ref={(node) => {
+                  folderInput.current = node;
+                  if (node) {
+                    node.setAttribute('webkitdirectory', '');
+                    node.setAttribute('directory', '');
+                  }
+                }}
+                type="file"
+                multiple
+                className="hidden"
+                onChange={(event) => {
+                  const picked = [...(event.target.files ?? [])].map((file) => ({
+                    file,
+                    // webkitRelativePath is "root/sub/file.pdf"; the file's own
+                    // name is dropped, and so is the outermost folder, which the
+                    // user chose and is already the destination.
+                    path: String(file.webkitRelativePath || '').split('/').slice(1, -1),
+                  }));
+                  event.target.value = '';
+                  if (picked.length) uploadTree(picked);
+                }}
+              />
             </>
           ) : null}
         </div>
@@ -285,7 +383,11 @@ export default function Browse() {
       ) : null}
 
       {folderId ? (
-        <DropZone onFiles={uploadFiles} disabled={busy || !permissions.upload}>
+        <DropZone
+          onFiles={uploadFiles}
+          onTree={uploadTree}
+          disabled={busy || !permissions.upload}
+        >
         <Card className="overflow-hidden">
           {documentCount > 0 ? (
             <div className="overflow-x-auto">
