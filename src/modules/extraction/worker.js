@@ -219,8 +219,20 @@ export async function processOne({ maxAttempts = config.extraction.maxAttempts }
       // OCR was available and did not help. Recorded with its reason so the
       // difference between "no OCR installed" and "OCR found nothing" is
       // visible, rather than both looking like an unreadable document.
+      //
+      // `detail` is kept, not dropped. The reason alone is a category, and the
+      // categories are wide: `ocr_failed` covered both a crashed engine and
+      // Tesseract being unable to open an Arabic path, and only the message it
+      // printed distinguished them. That message existed, was caught, and was
+      // thrown away one line before it would have been useful — leaving a
+      // diagnostics screen that said an image was unreadable when what had
+      // actually happened was that the engine never opened it.
       await markDocument(documentId, DOC_EXTRACTION.UNSUPPORTED);
-      await finishJob(queueId, QUEUE.SKIPPED, `${result.outcome}; ${recognised.reason}`);
+      await finishJob(
+        queueId,
+        QUEUE.SKIPPED,
+        [`${result.outcome}; ${recognised.reason}`, recognised.detail].filter(Boolean).join(': '),
+      );
       return { claimed: true, outcome: recognised.reason, documentId: String(documentId) };
     }
 

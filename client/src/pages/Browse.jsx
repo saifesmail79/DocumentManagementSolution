@@ -103,7 +103,7 @@ export default function Browse() {
     // being told only that "something failed" is not actionable.
     if (failed.length) setError(failed.join('\n'));
     if (duplicates.length) {
-      setNotice(`رُفع الملف، ولكن توجد نسخة مطابقة مسبقاً من: ${duplicates.join('، ')}`);
+      setNotice(`رُفع الملف، مع وجود نسخة مطابقة في المجلد نفسه من: ${duplicates.join('، ')}`);
     } else if (files.length > failed.length) {
       // Indexing happens on a queue after the response, so a document is
       // searchable by title immediately and by content a little later. Saying so

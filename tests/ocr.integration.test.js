@@ -357,9 +357,35 @@ describe('OCR', { skip: CONFIGURED ? false : target.reason }, () => {
     assert.ok(Number(queued.rows[0].attempts) >= 1);
   });
 
+  /**
+   * What the engine said, not just that it said something.
+   *
+   * `ocr_failed` is a category, and a wide one: it covered a crashed engine and
+   * Tesseract being unable to open a path in equal measure. The engine's own
+   * message was caught and then dropped one line before it was written, so the
+   * screen showed a bare `ocr_failed` against a fault whose message named
+   * itself exactly. The reason an operator can act on is the detail, so the
+   * detail has to survive.
+   */
+  test('a failing engine\'s own message reaches the diagnostics screen', async () => {
+    const documentId = await upload(cookie, 'noisy-failure.png', 'process.exit(3);');
+
+    await worker.drainQueue();
+
+    const queued = await sql`
+      SELECT last_error FROM dbo.extraction_queue WHERE document_id = ${documentId}
+    `.execute(db);
+
+    const reason = queued.rows[0].last_error ?? '';
+    assert.match(reason, /ocr_failed/, 'the category is still recorded');
+    assert.match(reason, /exited 3/, 'and so is what the engine actually reported');
+  });
+
   test('a filename with shell metacharacters is passed safely', async () => {
-    // spawn() with an argument array and no shell: this filename must reach the
-    // engine as a filename, never as command syntax.
+    // spawn() with an argument array and no shell throughout: a filename must
+    // never be parsed as command syntax. Images no longer hand Tesseract a path
+    // at all — the bytes go in on stdin — which removes the question for this
+    // path entirely; OCRmyPDF is still given a path, still as one array element.
     const documentId = await upload(cookie, 'a & b; echo pwned.png', STUB_SCAN);
 
     await worker.drainQueue();

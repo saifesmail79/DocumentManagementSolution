@@ -427,4 +427,113 @@ describe('document upload and content', { skip: CONFIGURED ? false : target.reas
     });
     assert.equal(response.statusCode, 400);
   });
+
+  // ── Duplicates, scoped to one folder ───────────────────────────────────
+  //
+  // The rule is deliberately narrow: a folder may not hold the same file twice,
+  // and a subfolder is a different folder. Searching the whole archive was the
+  // alternative and is wrong in an office — the same circular genuinely is filed
+  // under several departments, and refusing that leaves the clerk no way out but
+  // to alter the file until its bytes differ.
+
+  describe('duplicate policy', () => {
+    const SAME = 'IDENTICAL-BYTES-FOR-DUPLICATE-TESTS';
+
+    async function setPolicy(value) {
+      const { setSetting, resetSettingsCache } = await import('../src/modules/settings/service.js');
+      await setSetting({ key: 'upload.duplicate_policy', value });
+      resetSettingsCache();
+    }
+
+    async function makeSubfolder(name, parentName) {
+      const parent = id[parentName];
+      const r = await sql`
+        INSERT INTO dbo.folders (parent_id, name, mpath, depth)
+        OUTPUT INSERTED.folder_id AS fid
+        VALUES (${parent}, ${name}, '/pending/', 1)
+      `.execute(db);
+      const fid = r.rows[0].fid;
+      const parentPath = await sql`SELECT mpath FROM dbo.folders WHERE folder_id = ${parent}`.execute(db);
+      await sql`
+        UPDATE dbo.folders SET mpath = ${`${parentPath.rows[0].mpath}${fid}/`} WHERE folder_id = ${fid}
+      `.execute(db);
+      id[name] = fid;
+      return fid;
+    }
+
+    after(async () => {
+      const { clearSetting, resetSettingsCache } = await import('../src/modules/settings/service.js');
+      await clearSetting({ key: 'upload.duplicate_policy' });
+      resetSettingsCache();
+    });
+
+    test('block refuses a second identical file in the same folder', async () => {
+      await setPolicy('block');
+
+      const first = await upload(uploaderCookie, id.cabinet, { filename: 'a.pdf', content: SAME });
+      assert.equal(first.statusCode, 201);
+
+      const second = await upload(uploaderCookie, id.cabinet, { filename: 'b.pdf', content: SAME });
+      assert.equal(second.statusCode, 409);
+      assert.equal(second.json().error, 'duplicate');
+
+      // The colliding document is named, because "where is the copy I already
+      // have?" is always the next question.
+      const collided = second.json().duplicates ?? [];
+      assert.ok(collided.length > 0, 'the refusal named nothing to look at');
+      assert.equal(String(collided[0].folderId), String(id.cabinet));
+    });
+
+    test('block leaves nothing behind when it refuses', async () => {
+      await setPolicy('block');
+      const before = await sql`SELECT COUNT(*) AS n FROM dbo.documents WHERE is_deleted = 0`.execute(db);
+
+      await upload(uploaderCookie, id.cabinet, { filename: 'again.pdf', content: SAME });
+
+      const after = await sql`SELECT COUNT(*) AS n FROM dbo.documents WHERE is_deleted = 0`.execute(db);
+      assert.equal(
+        Number(after.rows[0].n),
+        Number(before.rows[0].n),
+        'a refused upload created a row anyway',
+      );
+    });
+
+    test('a subfolder may hold its own copy even under block', async () => {
+      await setPolicy('block');
+      await makeSubfolder('subcabinet', 'cabinet');
+      await grant('subcabinet', id.uploader, PERM.BROWSE | PERM.READ | PERM.UPLOAD);
+
+      const response = await upload(uploaderCookie, id.subcabinet, { filename: 'c.pdf', content: SAME });
+      assert.equal(
+        response.statusCode,
+        201,
+        'the rule is per folder — a subfolder is a different folder',
+      );
+    });
+
+    test('warn stores the file and reports the collision', async () => {
+      await setPolicy('warn');
+
+      const response = await upload(uploaderCookie, id.cabinet, { filename: 'd.pdf', content: SAME });
+      assert.equal(response.statusCode, 201, 'warn must not refuse');
+      assert.ok(response.json().duplicateOf?.length, 'warn must still report the collision');
+    });
+
+    test('allow says nothing at all', async () => {
+      await setPolicy('allow');
+
+      const response = await upload(uploaderCookie, id.cabinet, { filename: 'e.pdf', content: SAME });
+      assert.equal(response.statusCode, 201);
+    });
+
+    test('different content in the same folder is never a duplicate', async () => {
+      await setPolicy('block');
+
+      const response = await upload(uploaderCookie, id.cabinet, {
+        filename: 'f.pdf',
+        content: `${SAME}-but-different`,
+      });
+      assert.equal(response.statusCode, 201);
+    });
+  });
 });

@@ -35,14 +35,17 @@ export function describeUploadFailure(caught, filename) {
 
   switch (caught.code) {
     case 'duplicate': {
-      const where = (body.duplicates ?? [])
+      // The match is always in the destination folder now, so naming the folder
+      // would only repeat where the user already is. Naming the document is the
+      // useful half — it is what they open to check before deciding.
+      const which = (body.duplicates ?? [])
         .slice(0, 3)
-        .map((d) => (d.folderName ? `«${d.title}» في ${d.folderName}` : `«${d.title}»`))
+        .map((d) => `«${d.title}»`)
         .join('، ');
 
-      return where
-        ? `${name}نسخة مطابقة محفوظة مسبقاً — ${where}. لم يُرفع الملف لأن سياسة التكرار مضبوطة على المنع.`
-        : `${name}نسخة مطابقة محفوظة مسبقاً، ولم يُرفع الملف لأن سياسة التكرار مضبوطة على المنع.`;
+      return which
+        ? `${name}يوجد الملف نفسه في هذا المجلد بالفعل باسم ${which}، ولم يُرفع مرة أخرى.`
+        : `${name}يوجد الملف نفسه في هذا المجلد بالفعل، ولم يُرفع مرة أخرى.`;
     }
 
     case 'too_large':

@@ -838,6 +838,46 @@ function DiagnosticsTab() {
     load();
   }, [load]);
 
+  /**
+   * Whether either queue still has work to do.
+   *
+   * `running` alone is not enough: a job sits in `pending` for up to a full
+   * worker poll before it is claimed, and a screen that called that "finished"
+   * would announce completion before anything had started.
+   */
+  const inFlight =
+    (stats?.queue?.pending ?? 0) +
+      (stats?.queue?.running ?? 0) +
+      (renditions?.queue?.pending ?? 0) +
+      (renditions?.queue?.running ?? 0) >
+    0;
+
+  /**
+   * Refreshes itself while work is in flight.
+   *
+   * ─── Why this had to exist ──────────────────────────────────────────────
+   *
+   * Reindexing reported "1 document requeued" and then never said another
+   * word. The one refresh it did run fired milliseconds after the POST — long
+   * before the worker's next poll — so it re-rendered the state from *before*
+   * the work, and nothing ever fetched again. An operator had no way to tell a
+   * job still running from one that had finished, or from one that had failed
+   * again for the same reason as last time. The honest answer to "is it done?"
+   * was to reload the page and guess.
+   *
+   * The effect re-runs after every refresh (setStats always yields a new
+   * object), which is what chains one poll to the next, and it stops as soon as
+   * both queues read zero — so an idle diagnostics screen makes no requests at
+   * all.
+   */
+  useEffect(() => {
+    if (!inFlight) return undefined;
+    // Slower than the eye wants and faster than the worker's own poll, which is
+    // what actually bounds how quickly anything can change.
+    const timer = setTimeout(load, 4000);
+    return () => clearTimeout(timer);
+  }, [inFlight, load, stats, renditions]);
+
   async function reindex() {
     setBusy(true);
     setError(null);
@@ -876,6 +916,7 @@ function DiagnosticsTab() {
         stuckJobs={stats.worker?.stuckJobs ?? 0}
         worker={stats.worker}
         failures={failures}
+        live={inFlight}
       />
 
       {renditions ? (
@@ -884,6 +925,7 @@ function DiagnosticsTab() {
           queue={renditions.queue}
           stuckJobs={renditions.stuckJobs ?? 0}
           failures={renditions.failures}
+          live={inFlight}
         />
       ) : null}
 
@@ -906,11 +948,27 @@ function DiagnosticsTab() {
             إعادة فهرسة غير المفهرَس
           </Button>
         </div>
-        {reindexed !== null ? (
-          <Alert tone="success">
-            أُعيدت {reindexed} وثيقة إلى قائمة الفهرسة. ستُعالَج خلال دقائق.
+        {/*
+          Three outcomes, because "requeued N documents" answers a different
+          question from the one being asked. Requeueing is instant and says
+          nothing about whether the work succeeded; what an operator needs is
+          when it is over, and whether anything is still broken.
+        */}
+        {reindexed === null ? null : reindexed === 0 ? (
+          <Alert tone="success">لا توجد وثائق تحتاج إلى إعادة الفهرسة.</Alert>
+        ) : inFlight ? (
+          <Alert tone="warning">
+            أُعيدت {reindexed} وثيقة إلى قائمة الفهرسة — جارٍ المعالجة الآن. تتحدّث هذه
+            الصفحة تلقائياً عند الانتهاء.
           </Alert>
-        ) : null}
+        ) : (
+          <Alert tone="success">
+            اكتملت معالجة الوثائق المُعاد فهرستها.
+            {failures.length > 0
+              ? ' لا تزال بعض الوثائق غير مفهرَسة — راجع القائمة أعلاه، والسبب مذكور تحت كل وثيقة.'
+              : ' جميع الوثائق مفهرَسة الآن.'}
+          </Alert>
+        )}
         {!stats.ocr.enabled ? (
           <Alert tone="warning">
             OCR معطّل. الوثائق الممسوحة ضوئياً تُخزَّن وتُستعرض لكن لا يمكن البحث في محتواها.

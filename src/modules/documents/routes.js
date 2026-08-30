@@ -254,7 +254,15 @@ export async function documentRoutes(app) {
     const sha256 = String(request.params.sha256 ?? '').toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(sha256)) return reply.code(400).send({ error: 'invalid_hash' });
 
-    return { duplicates: await findDuplicates({ userId: request.user.userId, sha256 }) };
+    // folderId is optional: a client that has already chosen a destination gets
+    // the same answer the upload itself would give, and one that has not gets
+    // every copy it may see.
+    const folderId = request.query?.folderId ? parseId(request.query.folderId) : null;
+
+    return {
+      duplicates: await findDuplicates({ userId: request.user.userId, sha256, folderId }),
+      scope: folderId ? 'folder' : 'all',
+    };
   });
 
   /** The recycle bin: what has been deleted and can still be brought back. */

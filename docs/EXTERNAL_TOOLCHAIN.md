@@ -73,6 +73,29 @@ configs\        tessconfigs\        pdf.ttf
 Confirm with `tesseract --list-langs --tessdata-dir <dir>` — it must list `ara`.
 The admin extraction status screen reports the same thing.
 
+### It cannot open a file whose path is Arabic
+
+Tesseract's CLI opens its input through Leptonica, which on Windows converts the
+path to the machine's **ANSI codepage** before calling `fopen`. Arabic has no
+representation in CP1252, so the path arrives full of question marks and the open
+fails:
+
+```
+Error, cannot read input file C:/dms-storage/2026/08/9_v1_?_?_?_-_235_??_8-3-2026.tif: Invalid argument
+```
+
+This is not an edge case here. Storage paths carry the document's title, and
+`sanitizeTitle` deliberately keeps Arabic so files stay legible on disk — so in
+an Arabic office *every scanned image* failed, recorded as a bare `ocr_failed`
+and indistinguishable from a corrupt file.
+
+`ocrImage` therefore passes `-` and streams the image to Tesseract's **stdin**,
+which never touches the codepage. Staging an ASCII-named copy would have worked
+too, but only until the temp directory itself sat under an Arabic user profile.
+
+PDFs were never affected: OCRmyPDF is Python, opens the file itself, and hands
+Tesseract its own ASCII-named rasters.
+
 ---
 
 ## 2. OCRmyPDF

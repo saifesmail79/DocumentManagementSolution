@@ -27,6 +27,8 @@
 
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { copyFile, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { config as loadEnv } from 'dotenv';
@@ -164,6 +166,51 @@ describe('OCR engines (real Tesseract and OCRmyPDF)', { skip: SKIP }, () => {
     // which a whole-page score alone would partly absorb.
     for (const line of EXPECTED_LINES) {
       assert.ok(accuracy(line, closestRun(text, line)) >= 0.9, `line not recovered: ${line}`);
+    }
+  });
+
+  /**
+   * The path, not the image.
+   *
+   * Tesseract's CLI opens its input through Leptonica, which on Windows
+   * converts the path to the machine's ANSI codepage first. Arabic does not
+   * survive that conversion — every Arabic character arrived as a question
+   * mark and the open failed with "cannot read input file ... Invalid
+   * argument". Storage paths carry the document's title, so in an Arabic office
+   * this was not an edge case: every scanned image failed, recorded only as
+   * `ocr_failed`, indistinguishable from a corrupt file.
+   *
+   * The fixture is the same one the test above recognises at 95%+, so a failure
+   * here can only be the path. Arabic-Indic digits are in the name deliberately
+   * — they are equally unrepresentable, and a fix that special-cased letters
+   * would pass without them.
+   */
+  test('an image whose path is Arabic is recognised, not refused', async () => {
+    const workDir = await mkdtemp(path.join(tmpdir(), 'dms-ocr-path-'));
+    // The shape sanitizeTitle produces: Arabic kept, spaces collapsed.
+    const arabicPath = path.join(workDir, 'وثيقة_عربية_٢٣٥.png');
+
+    try {
+      await copyFile(path.join(FIXTURES, 'arabic-scan.png'), arabicPath);
+
+      const result = await ocr.attemptOcr(arabicPath, {
+        filename: 'وثيقة عربية ٢٣٥.png',
+        mimeType: 'image/png',
+      });
+
+      assert.equal(
+        result.ok,
+        true,
+        `OCR failed on an Arabic path: ${result.reason ?? ''} ${result.detail ?? ''}`,
+      );
+
+      const score = accuracy(flatten(EXPECTED_LINES.join(' ')), flatten(result.text));
+      assert.ok(
+        score >= 0.95,
+        `Arabic path scored ${(score * 100).toFixed(1)}% — got: ${flatten(result.text)}`,
+      );
+    } finally {
+      await rm(workDir, { recursive: true, force: true }).catch(() => {});
     }
   });
 

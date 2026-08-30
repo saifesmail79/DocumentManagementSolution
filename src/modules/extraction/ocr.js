@@ -25,6 +25,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { createReadStream } from 'node:fs';
 import { readFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -40,9 +41,12 @@ const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bm
 /**
  * Runs a command with an argument array and no shell.
  *
+ * `input` is a path whose bytes are streamed to the child's stdin, for a tool
+ * that can be handed its input rather than sent to fetch it. See ocrImage.
+ *
  * @returns {Promise<{code: number, stdout: string, stderr: string, timedOut: boolean}>}
  */
-function run(command, args, { timeoutMs = 60_000, cwd, env } = {}) {
+function run(command, args, { timeoutMs = 60_000, cwd, env, input } = {}) {
   return new Promise((resolve, reject) => {
     let child;
     try {
@@ -51,6 +55,24 @@ function run(command, args, { timeoutMs = 60_000, cwd, env } = {}) {
       child = spawn(command, args, { cwd, env, shell: false, windowsHide: true });
     } catch (error) {
       return reject(error);
+    }
+
+    if (input) {
+      // A child that rejects its input closes stdin early, and one killed on
+      // timeout closes it abruptly — both break the pipe mid-write. Neither is
+      // an error of ours: the child reports what happened through its exit code
+      // and stderr, which the caller is already reading. An unhandled EPIPE
+      // here would instead crash the worker.
+      child.stdin.on('error', () => {});
+
+      const source = createReadStream(input);
+      source.on('error', (error) => {
+        // The file itself is unreadable — deleted, or permissions. Stop the
+        // child rather than leaving it blocked on a stdin that will never end.
+        child.kill('SIGKILL');
+        reject(error);
+      });
+      source.pipe(child.stdin);
     }
 
     let stdout = '';
@@ -207,12 +229,36 @@ async function installedLanguages() {
  * OCRs an image file.
  *
  * `stdout` output, so nothing is written next to the user's document.
+ *
+ * ─── Why the image arrives on stdin rather than as a path ───────────────────
+ *
+ * Tesseract's CLI opens its input through Leptonica, which on Windows converts
+ * the path down to the machine's ANSI codepage before calling fopen. Arabic has
+ * no representation in CP1252, so every Arabic character in the path became a
+ * question mark and the open failed:
+ *
+ *   Error, cannot read input file C:/dms-storage/2026/08/9_v1_?_?_?_-_235_??_...
+ *
+ * Storage paths carry the document's title — sanitizeTitle deliberately keeps
+ * Arabic letters so files stay legible on disk — so in an Arabic office this is
+ * not an edge case, it is most of the library. Every Arabic-titled image failed
+ * with `ocr_failed` while looking, from the outside, like an unreadable file.
+ *
+ * `-` means "read the image from stdin", which never goes near the codepage.
+ * That fixes the whole class rather than Arabic specifically: any title in any
+ * script the server's ANSI codepage cannot express would have failed the same
+ * way. It also avoids staging a copy, which would only have moved the problem
+ * to whether the temporary directory's own path is representable — and on a
+ * Windows box whose user account is named in Arabic, it is not.
+ *
+ * PDFs never had this bug: OCRmyPDF is Python, opens the file itself, and hands
+ * Tesseract its own ASCII-named rasters.
  */
 async function ocrImage(absolutePath) {
   const result = await run(
     config.ocr.tesseractPath,
     [
-      absolutePath,
+      '-',
       'stdout',
       '-l',
       config.ocr.languages,
@@ -224,7 +270,7 @@ async function ocrImage(absolutePath) {
       '--psm',
       '1',
     ],
-    { timeoutMs: config.ocr.timeoutMs },
+    { timeoutMs: config.ocr.timeoutMs, input: absolutePath },
   );
 
   if (result.timedOut) throw new Error(`OCR timed out after ${config.ocr.timeoutMs}ms`);

@@ -179,7 +179,9 @@ export async function createDocument({
 
   // The hash is already computed from the bytes on their way to disk, so this
   // costs one indexed lookup rather than reading anything again.
-  const duplicates = await findDuplicates({ userId, sha256: staging.staged.sha256 });
+  // Scoped to the destination: the rule is that one folder may not hold the
+  // same file twice. A subfolder is a different folder and keeps its own copy.
+  const duplicates = await findDuplicates({ userId, sha256: staging.staged.sha256, folderId });
   const policy = await duplicatePolicy();
 
   if (duplicates.length > 0 && policy === 'block') {

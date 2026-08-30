@@ -23,11 +23,32 @@ const log = moduleLogger('documents');
 /**
  * Finds live documents whose content is byte-identical.
  *
- * Only ones the user may browse are returned — a duplicate warning naming a
- * document in a folder they cannot see would leak both its existence and its
- * title.
+ * ─── Scope: one folder, not the archive ─────────────────────────────────────
+ *
+ * `folderId` restricts the search to a single folder, and the upload path always
+ * passes it. The rule that gives is simple enough to explain in a sentence: a
+ * folder may not hold the same file twice, and a subfolder is a different
+ * folder, so it may hold its own copy.
+ *
+ * Searching the whole archive was the obvious alternative and is wrong in an
+ * office. The same circular genuinely is filed under three departments, and
+ * refusing the second and third filings makes the system unusable — the clerk's
+ * only escape is to alter the file until its bytes differ, which defeats the
+ * check entirely. Within one folder, though, a second identical copy is never
+ * anything but a mistake.
+ *
+ * Omitting `folderId` searches everywhere, which is what the pre-flight lookup
+ * wants when the caller has not chosen a destination yet.
+ *
+ * ─── Why the permission filter stays ────────────────────────────────────────
+ *
+ * Only documents the user may browse are returned. Without that, a refusal
+ * becomes an oracle: upload a file into a folder you cannot read, and the
+ * rejection tells you that exact file is filed there. The cost is that a
+ * write-only drop-box folder cannot enforce the rule, which is the right way
+ * round — tidiness must not buy a way to probe for documents.
  */
-export async function findDuplicates({ userId, sha256, excludeDocumentId = null }) {
+export async function findDuplicates({ userId, sha256, folderId = null, excludeDocumentId = null }) {
   if (!sha256) return [];
 
   const result = await sql`
@@ -41,6 +62,7 @@ export async function findDuplicates({ userId, sha256, excludeDocumentId = null 
      WHERE v.sha256 = ${sha256}
        AND d.is_deleted = 0
        AND (p.perm_bits & ${PERM.BROWSE}) <> 0
+       AND (${folderId} IS NULL OR d.folder_id = ${folderId})
        AND (${excludeDocumentId} IS NULL OR d.document_id <> ${excludeDocumentId})
      ORDER BY v.uploaded_at DESC
   `.execute(db);

@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom';
-import { AlertTriangle, PauseCircle } from 'lucide-react';
+import { AlertTriangle, PauseCircle, RefreshCw } from 'lucide-react';
 
 import { Card, Alert } from './ui.jsx';
 
@@ -40,7 +40,15 @@ function Tile({ label, value, tone, hint }) {
   );
 }
 
-export default function QueueHealth({ title, queue, stuckJobs, worker, failures, onOpenDocument }) {
+export default function QueueHealth({
+  title,
+  queue,
+  stuckJobs,
+  worker,
+  failures,
+  onOpenDocument,
+  live = false,
+}) {
   const navigate = useNavigate();
   const open = onOpenDocument ?? ((id) => navigate(`/documents/${id}`));
 
@@ -49,7 +57,20 @@ export default function QueueHealth({ title, queue, stuckJobs, worker, failures,
 
   return (
     <Card className="p-4">
-      <h3 className="mb-2 text-sm font-semibold text-text">{title}</h3>
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold text-text">{title}</h3>
+        {/*
+          Numbers that change on their own are indistinguishable from numbers
+          that are simply stale. Saying which one this is turns "reload and hope"
+          into waiting for a count to reach zero.
+        */}
+        {live ? (
+          <span className="flex items-center gap-1 text-[11px] text-text-muted">
+            <RefreshCw size={11} className="animate-spin" />
+            يتحدّث تلقائياً
+          </span>
+        ) : null}
+      </div>
 
       {/* Named conditions come first. Six numbers do not tell an operator that
           the worker is off; one sentence does. */}
