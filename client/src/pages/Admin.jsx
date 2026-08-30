@@ -11,12 +11,21 @@ import {
   Trash2,
   SlidersHorizontal,
   Activity,
+  Webhook,
+  GitBranch,
+  BarChart3,
 } from 'lucide-react';
 
 import { api, ApiError } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import { formatDate } from '../format.js';
 import { Button, Card, Spinner, Alert, TextField, EmptyState } from '../components/ui.jsx';
+import {
+  ApiKeysTab,
+  WebhooksTab,
+  ApprovalTemplatesTab,
+  ReportsTab,
+} from '../components/AdminTabs.jsx';
 
 /**
  * Administration: users, groups and roles.
@@ -30,6 +39,10 @@ const TABS = [
   { key: 'groups', label: 'المجموعات', icon: UsersRound },
   { key: 'roles', label: 'الأدوار', icon: KeyRound },
   { key: 'settings', label: 'الإعدادات', icon: SlidersHorizontal },
+  { key: 'approvals', label: 'مسارات الاعتماد', icon: GitBranch },
+  { key: 'keys', label: 'مفاتيح API', icon: KeyRound },
+  { key: 'webhooks', label: 'الويب هوكس', icon: Webhook },
+  { key: 'reports', label: 'التقارير', icon: BarChart3 },
   { key: 'diagnostics', label: 'التشخيص', icon: Activity },
 ];
 
@@ -72,6 +85,10 @@ export default function Admin() {
       {tab === 'groups' ? <GroupsTab /> : null}
       {tab === 'roles' ? <RolesTab /> : null}
       {tab === 'settings' ? <SettingsTab /> : null}
+      {tab === 'approvals' ? <ApprovalTemplatesTab /> : null}
+      {tab === 'keys' ? <ApiKeysTab /> : null}
+      {tab === 'webhooks' ? <WebhooksTab /> : null}
+      {tab === 'reports' ? <ReportsTab /> : null}
       {tab === 'diagnostics' ? <DiagnosticsTab /> : null}
     </div>
   );

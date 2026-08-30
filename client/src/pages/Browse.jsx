@@ -10,6 +10,10 @@ import {
   ChevronLeft,
   Home,
   Shield,
+  Move,
+  Package,
+  CheckSquare,
+  Square,
 } from 'lucide-react';
 
 import { api, ApiError } from '../api.js';
@@ -40,6 +44,7 @@ export default function Browse() {
   const [busy, setBusy] = useState(false);
   const [showPermissions, setShowPermissions] = useState(false);
   const [notice, setNotice] = useState(null);
+  const [selected, setSelected] = useState(() => new Set());
   const fileInput = useRef(null);
 
   const load = useCallback(async () => {
@@ -65,6 +70,9 @@ export default function Browse() {
 
   useEffect(() => {
     load();
+    // Cleared on navigation: ids from the previous folder would otherwise stay
+    // selected and a bulk action would act on documents no longer on screen.
+    setSelected(new Set());
   }, [load]);
 
   const permissions = data?.folder?.permissions ?? {};
@@ -220,6 +228,20 @@ export default function Browse() {
       {error ? <Alert tone="error">{error}</Alert> : null}
       {notice ? <Alert tone="warning">{notice}</Alert> : null}
 
+      {selected.size > 0 ? (
+        <BulkBar
+          selected={selected}
+          permissions={permissions}
+          onClear={() => setSelected(new Set())}
+          onDone={async (message) => {
+            setSelected(new Set());
+            if (message) setNotice(message);
+            await Promise.all([load(), reloadTree()]);
+          }}
+          onError={setError}
+        />
+      ) : null}
+
       {showPermissions && folderId ? (
         <PermissionsPanel
           folderId={folderId}
@@ -270,6 +292,25 @@ export default function Browse() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-surface-muted text-xs uppercase tracking-wider text-text-muted">
+                    <th className="border-b border-border px-3 py-3 text-center font-semibold">
+                      <button
+                        onClick={() =>
+                          setSelected(
+                            selected.size === data.documents.length
+                              ? new Set()
+                              : new Set(data.documents.map((d) => d.documentId)),
+                          )
+                        }
+                        aria-label="تحديد الكل"
+                        className="text-text-muted hover:text-primary"
+                      >
+                        {selected.size === data.documents.length && data.documents.length > 0 ? (
+                          <CheckSquare size={15} />
+                        ) : (
+                          <Square size={15} />
+                        )}
+                      </button>
+                    </th>
                     <th className="border-b border-border px-4 py-3 text-center font-semibold">#</th>
                     <th className="border-b border-border px-4 py-3 text-right font-semibold">العنوان</th>
                     <th className="border-b border-border px-4 py-3 text-right font-semibold">النوع</th>
@@ -281,9 +322,41 @@ export default function Browse() {
                 <tbody className="divide-y divide-border/50">
                   {data.documents.map((doc, index) => (
                     <tr key={doc.documentId} className="transition-colors hover:bg-surface-muted/30">
+                      <td className="px-3 py-3 text-center">
+                        <button
+                          onClick={() => {
+                            const next = new Set(selected);
+                            if (next.has(doc.documentId)) next.delete(doc.documentId);
+                            else next.add(doc.documentId);
+                            setSelected(next);
+                          }}
+                          aria-label={`تحديد ${doc.title}`}
+                          className="text-text-muted hover:text-primary"
+                        >
+                          {selected.has(doc.documentId) ? (
+                            <CheckSquare size={15} className="text-primary" />
+                          ) : (
+                            <Square size={15} />
+                          )}
+                        </button>
+                      </td>
                       <td className="num px-4 py-3 text-center text-xs text-text-muted">{index + 1}</td>
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center gap-2">
+                          {/* The rendition endpoint answers 202 while the worker
+                              catches up, so a broken image is the normal early
+                              state — hidden rather than shown as a broken icon. */}
+                          {doc.canRead ? (
+                            <img
+                              src={api.thumbnailUrl(doc.documentId)}
+                              alt=""
+                              loading="lazy"
+                              onError={(event) => {
+                                event.currentTarget.style.display = 'none';
+                              }}
+                              className="h-8 w-8 shrink-0 rounded border border-border object-cover"
+                            />
+                          ) : null}
                           <FileText size={15} className="shrink-0 text-text-muted" />
                           <button
                             onClick={() => navigate(`/documents/${doc.documentId}`)}
@@ -344,6 +417,111 @@ export default function Browse() {
           hint="لم تُمنح صلاحية على أي مجلد بعد. راجع مدير النظام."
         />
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * The action bar that appears once documents are selected.
+ *
+ * Every action reports per document rather than as one pass or fail — a
+ * selection can span folders with different grants, and "done" while nine were
+ * skipped misleads the user about where their documents are.
+ */
+function BulkBar({ selected, permissions, onClear, onDone, onError }) {
+  const [busy, setBusy] = useState(false);
+  const { folders } = useTree();
+  const ids = [...selected];
+
+  async function run(fn, describe) {
+    setBusy(true);
+    onError(null);
+    try {
+      const result = await fn();
+      const failed = result.failed ?? 0;
+      onDone(
+        failed > 0
+          ? `${describe}: نجح ${result.succeeded} وتعذّر ${failed}.`
+          : `${describe}: ${result.succeeded} وثيقة.`,
+      );
+    } catch {
+      onError('تعذر تنفيذ الإجراء الجماعي.');
+      setBusy(false);
+    }
+  }
+
+  async function download() {
+    setBusy(true);
+    try {
+      // Posted through fetch rather than a link because the id list is a body,
+      // then handed to the browser as a blob so the ZIP still saves normally.
+      const response = await fetch(api.bulkDownloadUrl, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ documentIds: ids }),
+      });
+      if (!response.ok) throw new Error('download failed');
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'documents.zip';
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      onError('تعذر تنزيل الملف المضغوط.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-xl border border-primary/30 bg-primary/5 p-3">
+      <span className="num text-sm font-medium text-primary">{selected.size} محددة</span>
+
+      <Button variant="secondary" icon={Package} onClick={download} disabled={busy} className="!px-3 !py-1 text-xs">
+        تنزيل مضغوط
+      </Button>
+
+      {permissions.delete ? (
+        <>
+          <select
+            disabled={busy}
+            defaultValue=""
+            onChange={(event) => {
+              if (event.target.value) {
+                run(() => api.bulkMove(ids, event.target.value), 'نقل');
+              }
+            }}
+            className="rounded-lg border border-border bg-control px-2 py-1 text-xs"
+          >
+            <option value="">نقل إلى…</option>
+            {folders.map((folder) => (
+              <option key={folder.folderId} value={folder.folderId}>
+                {folder.name}
+              </option>
+            ))}
+          </select>
+
+          <Button
+            variant="danger"
+            icon={Trash2}
+            disabled={busy}
+            onClick={() => {
+              if (window.confirm(`حذف ${selected.size} وثيقة؟`)) run(() => api.bulkDelete(ids), 'حذف');
+            }}
+            className="!px-3 !py-1 text-xs"
+          >
+            حذف
+          </Button>
+        </>
+      ) : null}
+
+      <button onClick={onClear} className="ms-auto text-xs text-text-muted hover:text-text">
+        إلغاء التحديد
+      </button>
     </div>
   );
 }

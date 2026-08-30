@@ -5,6 +5,16 @@ import { FileText, Download, Save, History, Folder, ArrowRight, Eye, EyeOff } fr
 import { api, ApiError } from '../api.js';
 import { formatDate, formatBytes } from '../format.js';
 import { Button, Card, Spinner, Alert, TextField, ReadOnlyBadge } from '../components/ui.jsx';
+import {
+  TagPanel,
+  CommentPanel,
+  RelationPanel,
+  StatePanel,
+  SharePanel,
+  ApprovalPanel,
+  VersionPanel,
+} from '../components/DocumentPanels.jsx';
+import { useAuth } from '../auth.jsx';
 
 /**
  * One document: its metadata, its custom fields, and its version history.
@@ -16,6 +26,7 @@ import { Button, Card, Spinner, Alert, TextField, ReadOnlyBadge } from '../compo
 export default function DocumentDetail() {
   const { documentId } = useParams();
   const navigate = useNavigate();
+  const { user } = useAuth();
 
   const [document, setDocument] = useState(null);
   const [types, setTypes] = useState([]);
@@ -272,29 +283,12 @@ export default function DocumentDetail() {
               {document.canRead ? 'لا توجد إصدارات.' : 'يتطلب عرض السجل صلاحية القراءة.'}
             </p>
           ) : (
-            <ul className="space-y-2">
-              {document.versions.map((version) => (
-                <li key={version.version} className="rounded border border-border p-2 text-xs">
-                  <div className="flex items-center justify-between">
-                    <span className="num font-medium text-text">إصدار {version.version}</span>
-                    <span className="num text-text-muted">{formatBytes(version.bytes)}</span>
-                  </div>
-                  <p className="mt-1 text-text-muted">
-                    {version.uploadedBy} · {formatDate(version.uploadedAt)}
-                  </p>
-                  {version.comment ? <p className="mt-1 text-text">{version.comment}</p> : null}
-                  <a
-                    href={api.contentUrl(documentId, version.version)}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="mt-1 inline-flex items-center gap-1 text-primary hover:underline"
-                  >
-                    <Download size={11} />
-                    فتح هذا الإصدار
-                  </a>
-                </li>
-              ))}
-            </ul>
+            <VersionPanel
+              documentId={documentId}
+              versions={document.versions}
+              canRestore={document.permissions?.upload}
+              onChanged={load}
+            />
           )}
 
           <button
@@ -305,6 +299,24 @@ export default function DocumentDetail() {
             المجلد
           </button>
         </Card>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-3">
+        <div className="space-y-4 lg:col-span-2">
+          <CommentPanel
+            documentId={documentId}
+            currentUserId={user.userId}
+            canRead={document.canRead}
+          />
+        </div>
+
+        <div className="space-y-4">
+          <StatePanel document={document} isSuperAdmin={user.isSuperAdmin} onChanged={load} />
+          <TagPanel documentId={documentId} canEdit={document.permissions?.editMeta} />
+          <RelationPanel documentId={documentId} onOpen={(id) => navigate(`/documents/${id}`)} />
+          <ApprovalPanel documentId={documentId} canRead={document.canRead} onChanged={load} />
+          <SharePanel documentId={documentId} canRead={document.canRead} />
+        </div>
       </div>
     </div>
   );

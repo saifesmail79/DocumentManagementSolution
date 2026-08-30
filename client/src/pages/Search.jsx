@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Search as SearchIcon, FileText, Folder, X, SlidersHorizontal } from 'lucide-react';
+import { Search as SearchIcon, FileText, Folder, X, SlidersHorizontal, Bookmark, Star } from 'lucide-react';
 
 import { api } from '../api.js';
 import { formatDate } from '../format.js';
@@ -27,6 +27,9 @@ export default function Search() {
   const [error, setError] = useState(null);
   const [advanced, setAdvanced] = useState(false);
   const [criteria, setCriteria] = useState({ fields: [] });
+  const [facets, setFacets] = useState(null);
+  const [snippets, setSnippets] = useState({});
+  const [saved, setSaved] = useState([]);
 
   useEffect(() => {
     setDraft(query);
@@ -41,9 +44,22 @@ export default function Search() {
 
     api
       .search(query)
-      .then((data) => {
+      .then(async (data) => {
         // A slow earlier request must not overwrite a newer one's results.
-        if (!cancelled) setResults(data);
+        if (cancelled) return;
+        setResults(data);
+
+        // Facets and snippets are fetched alongside rather than inside the
+        // search response: they are useful separately and a client that does not
+        // want them should not pay for them.
+        const ids = data.results.map((r) => r.documentId);
+        const [facetResult, snippetResult] = await Promise.all([
+          api.facets(`q=${encodeURIComponent(query)}`).catch(() => null),
+          ids.length ? api.snippets(ids, query).catch(() => ({ snippets: {} })) : { snippets: {} },
+        ]);
+        if (cancelled) return;
+        setFacets(facetResult);
+        setSnippets(snippetResult.snippets ?? {});
       })
       .catch(() => {
         if (!cancelled) setError('تعذر تنفيذ البحث.');
@@ -89,6 +105,27 @@ export default function Search() {
       setError('تعذر تنفيذ البحث.');
     } finally {
       setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    api
+      .savedSearches()
+      .then((result) => setSaved(result.searches))
+      .catch(() => setSaved([]));
+  }, []);
+
+  async function persist() {
+    const name = window.prompt('اسم البحث المحفوظ');
+    if (!name?.trim()) return;
+    try {
+      await api.saveSearch({
+        name: name.trim(),
+        criteria: { q: draft.trim() || null, ...criteria },
+      });
+      setSaved((await api.savedSearches()).searches);
+    } catch {
+      setError('تعذر حفظ البحث.');
     }
   }
 
@@ -140,6 +177,39 @@ export default function Search() {
         />
       ) : null}
 
+      {saved.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Bookmark size={13} className="text-text-muted" />
+          {saved.map((entry) => (
+            <span key={entry.searchId} className="flex items-center gap-1">
+              <button
+                onClick={() => {
+                  setCriteria({ fields: [], ...entry.criteria });
+                  setDraft(entry.criteria?.q ?? '');
+                  setAdvanced(true);
+                }}
+                className="rounded-full bg-surface-muted px-2.5 py-1 text-xs text-text hover:bg-primary/10 hover:text-primary"
+              >
+                {entry.name}
+                {entry.isShared && !entry.isMine ? ` · ${entry.owner}` : ''}
+              </button>
+              {entry.isMine ? (
+                <button
+                  onClick={async () => {
+                    await api.deleteSavedSearch(entry.searchId);
+                    setSaved((await api.savedSearches()).searches);
+                  }}
+                  aria-label="حذف البحث المحفوظ"
+                  className="text-text-muted hover:text-red-600"
+                >
+                  <X size={11} />
+                </button>
+              ) : null}
+            </span>
+          ))}
+        </div>
+      ) : null}
+
       {error ? <Alert tone="error">{error}</Alert> : null}
       {loading ? <Spinner label="جارٍ البحث…" /> : null}
 
@@ -147,12 +217,31 @@ export default function Search() {
         <>
           <div className="flex flex-wrap items-center gap-2 text-xs text-text-muted">
             <span className="num">{results.total} نتيجة</span>
+            <button onClick={persist} className="flex items-center gap-1 text-primary hover:underline">
+              <Star size={12} />
+              حفظ البحث
+            </button>
             {!results.contentSearched ? (
               <span className="rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-amber-600">
                 بحث في العناوين فقط — لم يُفهرس محتوى الوثائق بعد
               </span>
             ) : null}
           </div>
+
+          {facets ? (
+            <div className="flex flex-wrap gap-3 rounded-xl border border-border bg-surface p-3">
+              <FacetGroup
+                label="النوع"
+                items={facets.types}
+                onPick={(name) => {
+                  setAdvanced(true);
+                  setCriteria((current) => ({ ...current, typeName: name }));
+                }}
+              />
+              <FacetGroup label="السرية" items={facets.sensitivities} />
+              <FacetGroup label="الحالة" items={facets.states} />
+            </div>
+          ) : null}
 
           {results.results.length === 0 ? (
             <EmptyState
@@ -179,6 +268,11 @@ export default function Search() {
                         </button>
                         {!item.canRead ? <ReadOnlyBadge /> : null}
                       </div>
+                      {snippets[item.documentId] ? (
+                        <p className="mt-0.5 line-clamp-2 text-xs text-text-muted">
+                          {snippets[item.documentId].text}
+                        </p>
+                      ) : null}
                       <button
                         onClick={() => navigate(`/folders/${item.folderId}`)}
                         className="mt-0.5 flex items-center gap-1 text-xs text-text-muted hover:text-primary"
@@ -215,6 +309,37 @@ export default function Search() {
           hint="يشمل البحث عناوين الوثائق ومحتواها، ضمن المجلدات المصرّح لك بها فقط."
         />
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * One facet dimension.
+ *
+ * The counts come from the same predicate the results do, so a chip reading
+ * "Contracts (12)" cannot select down to nine.
+ */
+function FacetGroup({ label, items, onPick }) {
+  if (!items?.length) return null;
+
+  return (
+    <div className="min-w-[8rem]">
+      <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-text-muted">{label}</p>
+      <ul className="space-y-0.5">
+        {items.slice(0, 5).map((item) => (
+          <li key={item.name}>
+            <button
+              onClick={() => onPick?.(item.name)}
+              disabled={!onPick}
+              className="flex w-full items-center justify-between gap-2 rounded px-1.5 py-0.5 text-xs
+                text-text disabled:cursor-default hover:bg-primary/10"
+            >
+              <span className="truncate">{item.name}</span>
+              <span className="num text-text-muted">{item.count}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

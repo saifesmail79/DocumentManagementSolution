@@ -95,6 +95,127 @@ export const api = {
 
   advancedSearch: (criteria) =>
     request('/api/search/advanced', { method: 'POST', body: criteria }),
+  facets: (params = '') => request(`/api/search/facets${params ? `?${params}` : ''}`),
+  snippets: (documentIds, q) =>
+    request('/api/search/snippets', { method: 'POST', body: { documentIds, q } }),
+
+  // ── Personal shelves ───────────────────────────────────────────────────
+  favourites: () => request('/api/favourites'),
+  addFavourite: (documentId) => request(`/api/favourites/${documentId}`, { method: 'PUT', body: {} }),
+  removeFavourite: (documentId) => request(`/api/favourites/${documentId}`, { method: 'DELETE' }),
+  recent: () => request('/api/recent'),
+
+  // ── Watches and notifications ──────────────────────────────────────────
+  watches: () => request('/api/watches'),
+  watch: (body) => request('/api/watches', { method: 'POST', body }),
+  unwatch: (params) => request(`/api/watches?${new URLSearchParams(params)}`, { method: 'DELETE' }),
+  notifications: (unread) => request(`/api/notifications${unread ? '?unread=true' : ''}`),
+  markRead: (notificationId) =>
+    request('/api/notifications/read', { method: 'POST', body: { notificationId } }),
+
+  // ── Comments, relations, tags ──────────────────────────────────────────
+  comments: (documentId) => request(`/api/documents/${documentId}/comments`),
+  addComment: (documentId, body, parentCommentId) =>
+    request(`/api/documents/${documentId}/comments`, { method: 'POST', body: { body, parentCommentId } }),
+  deleteComment: (commentId) => request(`/api/comments/${commentId}`, { method: 'DELETE' }),
+
+  relations: (documentId) => request(`/api/documents/${documentId}/relations`),
+  relate: (documentId, toDocument, relationType) =>
+    request(`/api/documents/${documentId}/relations`, { method: 'POST', body: { toDocument, relationType } }),
+  unrelate: (relationId) => request(`/api/relations/${relationId}`, { method: 'DELETE' }),
+
+  tags: (q) => request(`/api/tags${q ? `?q=${encodeURIComponent(q)}` : ''}`),
+  documentTags: (documentId) => request(`/api/documents/${documentId}/tags`),
+  setTags: (documentId, tags) =>
+    request(`/api/documents/${documentId}/tags`, { method: 'PUT', body: { tags } }),
+  taggedDocuments: (name) => request(`/api/tags/${encodeURIComponent(name)}/documents`),
+
+  // ── Saved searches ─────────────────────────────────────────────────────
+  savedSearches: () => request('/api/saved-searches'),
+  saveSearch: (body) => request('/api/saved-searches', { method: 'POST', body }),
+  deleteSavedSearch: (searchId) => request(`/api/saved-searches/${searchId}`, { method: 'DELETE' }),
+
+  // ── Approvals ──────────────────────────────────────────────────────────
+  pendingApprovals: () => request('/api/approvals/pending'),
+  documentApprovals: (documentId) => request(`/api/documents/${documentId}/approvals`),
+  requestApproval: (documentId, body) =>
+    request(`/api/documents/${documentId}/approvals`, { method: 'POST', body }),
+  decideApproval: (requestId, decision, note) =>
+    request(`/api/approvals/${requestId}/decision`, { method: 'POST', body: { decision, note } }),
+  cancelApproval: (requestId) => request(`/api/approvals/${requestId}/cancel`, { method: 'POST', body: {} }),
+  approvalTemplates: () => request('/api/approval-templates'),
+  createApprovalTemplate: (body) => request('/api/approval-templates', { method: 'POST', body }),
+  deleteApprovalTemplate: (templateId) =>
+    request(`/api/approval-templates/${templateId}`, { method: 'DELETE' }),
+
+  // ── Bulk operations ────────────────────────────────────────────────────
+  bulkMove: (documentIds, targetFolderId) =>
+    request('/api/bulk/move', { method: 'POST', body: { documentIds, targetFolderId } }),
+  bulkMetadata: (body) => request('/api/bulk/metadata', { method: 'POST', body }),
+  bulkDelete: (documentIds) => request('/api/bulk/delete', { method: 'POST', body: { documentIds } }),
+  bulkDownloadUrl: '/api/bulk/download',
+
+  // ── Document state ─────────────────────────────────────────────────────
+  checkOut: (documentId) => request(`/api/documents/${documentId}/checkout`, { method: 'POST', body: {} }),
+  checkIn: (documentId) => request(`/api/documents/${documentId}/checkin`, { method: 'POST', body: {} }),
+  setLifecycle: (documentId, state) =>
+    request(`/api/documents/${documentId}/lifecycle`, { method: 'POST', body: { state } }),
+  setExpiry: (documentId, expiresAt) =>
+    request(`/api/documents/${documentId}/expiry`, { method: 'POST', body: { expiresAt } }),
+  setLegalHold: (documentId, hold, reason) =>
+    request(`/api/documents/${documentId}/legal-hold`, { method: 'POST', body: { hold, reason } }),
+  restoreVersion: (documentId, versionNumber, comment) =>
+    request(`/api/documents/${documentId}/versions/${versionNumber}/restore`, {
+      method: 'POST',
+      body: { comment },
+    }),
+
+  // ── Sharing and QR ─────────────────────────────────────────────────────
+  shares: (documentId) => request(`/api/documents/${documentId}/shares`),
+  createShare: (documentId, body) =>
+    request(`/api/documents/${documentId}/shares`, { method: 'POST', body }),
+  revokeShare: (shareId) => request(`/api/shares/${shareId}`, { method: 'DELETE' }),
+  qrUrl: (documentId) => `/api/documents/${documentId}/qr`,
+  stampedUrl: (documentId) => `/api/documents/${documentId}/content?stamp=qr`,
+  thumbnailUrl: (documentId) => `/api/documents/${documentId}/rendition/thumbnail`,
+  previewUrl: (documentId) => `/api/documents/${documentId}/rendition/preview`,
+
+  // ── Folder defaults ────────────────────────────────────────────────────
+  folderDefaults: (folderId) => request(`/api/folders/${folderId}/defaults`),
+  setFolderDefaults: (folderId, defaults) =>
+    request(`/api/folders/${folderId}/defaults`, { method: 'PUT', body: { defaults } }),
+
+  // ── Resumable upload ───────────────────────────────────────────────────
+  startUpload: (body) => request('/api/uploads', { method: 'POST', body }),
+  uploadChunk: async (sessionId, offset, blob) => {
+    const response = await fetch(`/api/uploads/${sessionId}`, {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/octet-stream', 'X-Upload-Offset': String(offset) },
+      body: blob,
+    });
+    const parsed = await response.json().catch(() => null);
+    if (!response.ok) throw new ApiError(response.status, parsed);
+    return parsed;
+  },
+  completeUpload: (sessionId) => request(`/api/uploads/${sessionId}/complete`, { method: 'POST', body: {} }),
+  abortUpload: (sessionId) => request(`/api/uploads/${sessionId}`, { method: 'DELETE' }),
+
+  // ── Reporting and integration administration ───────────────────────────
+  reports: {
+    overview: () => request('/api/reports/overview'),
+    trend: (days = 30) => request(`/api/reports/trend?days=${days}`),
+    storage: () => request('/api/reports/storage'),
+    contributors: (days = 30) => request(`/api/reports/contributors?days=${days}`),
+    distribution: () => request('/api/reports/distribution'),
+  },
+  apiKeys: () => request('/api/api-keys'),
+  createApiKey: (body) => request('/api/api-keys', { method: 'POST', body }),
+  revokeApiKey: (keyId) => request(`/api/api-keys/${keyId}`, { method: 'DELETE' }),
+  webhooks: () => request('/api/webhooks'),
+  createWebhook: (body) => request('/api/webhooks', { method: 'POST', body }),
+  deleteWebhook: (webhookId) => request(`/api/webhooks/${webhookId}`, { method: 'DELETE' }),
+  exportCsvUrl: (folderId) => `/api/export/metadata.csv${folderId ? `?folderId=${folderId}` : ''}`,
 
   settings: {
     list: () => request('/api/settings'),

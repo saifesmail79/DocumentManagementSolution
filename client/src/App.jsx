@@ -7,6 +7,7 @@ import {
   KeyRound,
   Settings,
   Trash2,
+  Star,
 } from 'lucide-react';
 
 import { useAuth } from './auth.jsx';
@@ -20,6 +21,8 @@ import Search from './pages/Search.jsx';
 import Admin from './pages/Admin.jsx';
 import DocumentDetail from './pages/DocumentDetail.jsx';
 import RecycleBin from './pages/RecycleBin.jsx';
+import MyDocuments from './pages/MyDocuments.jsx';
+import NotificationBell from './components/NotificationBell.jsx';
 
 /**
  * Application shell, per docs/UI_UX_AGENT_STANDARDS.md section 2:
@@ -58,6 +61,7 @@ function Shell() {
 
   const navigation = [
     { to: '/folders', label: 'المجلدات', icon: FolderTreeIcon },
+    { to: '/my', label: 'مساحتي', icon: Star },
     { to: '/search', label: 'البحث', icon: SearchIcon },
     { to: '/recycle-bin', label: 'المحذوفات', icon: Trash2 },
     // Rendered only for super admins. The API gates every /api/admin route
@@ -104,6 +108,7 @@ function Shell() {
 
             {/* LEFT SIDE in RTL: user identity and session actions */}
             <div className="flex items-center gap-3">
+              <NotificationBell />
               <div className="text-left">
                 <p className="text-sm font-medium text-text">{user.displayName || user.username}</p>
                 {user.isSuperAdmin ? (
@@ -153,6 +158,7 @@ function Shell() {
               <Route path="/documents/:documentId" element={<DocumentDetail />} />
               <Route path="/search" element={<Search />} />
               <Route path="/recycle-bin" element={<RecycleBin />} />
+              <Route path="/my" element={<MyDocuments />} />
               <Route path="/admin" element={<Admin />} />
               <Route path="/password" element={<ChangePassword />} />
               <Route path="*" element={<Navigate to="/folders" replace />} />

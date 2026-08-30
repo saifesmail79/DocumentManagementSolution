@@ -28,7 +28,7 @@ import { buildRelativePath } from '../../storage/paths.js';
 import { config } from '../../config/index.js';
 import { normalizeArabic } from '../../lib/arabic.js';
 import { moduleLogger } from '../../lib/logger.js';
-import { PERM, permissionBits, has } from '../tree/service.js';
+import { PERM, permissionBits, has, describeBits } from '../tree/service.js';
 import { findDuplicates, duplicatePolicy } from './lifecycle.js';
 
 const log = moduleLogger('documents');
@@ -395,12 +395,16 @@ export async function getDocument({ userId, documentId }) {
   const result = await sql`
     SELECT d.document_id, d.folder_id, d.title, d.type_id, d.sensitivity_label_id,
            d.current_version, d.created_at, d.updated_at,
+           d.lifecycle_state, d.expires_at, d.legal_hold, d.legal_hold_reason,
+           d.locked_at,
            t.name AS type_name, s.name AS sensitivity_name,
+           locker.display_name AS locked_by,
            p.perm_bits
       FROM dbo.documents d
      CROSS APPLY dbo.fn_effective_permission(${userId}, d.folder_id) p
       LEFT JOIN dbo.document_types     t ON t.type_id  = d.type_id
       LEFT JOIN dbo.sensitivity_labels s ON s.label_id = d.sensitivity_label_id
+      LEFT JOIN dbo.principals    locker ON locker.principal_id = d.locked_by
      WHERE d.document_id = ${documentId}
        AND d.is_deleted = 0
        AND (p.perm_bits & ${PERM.BROWSE}) <> 0
@@ -448,6 +452,15 @@ export async function getDocument({ userId, documentId }) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     canRead,
+    // The state the side panels drive. Surfaced on the detail response rather
+    // than as a second request: it is all one row already.
+    lifecycleState: row.lifecycle_state,
+    expiresAt: row.expires_at,
+    legalHold: Number(row.legal_hold) === 1,
+    legalHoldReason: row.legal_hold_reason,
+    lockedBy: row.locked_by,
+    lockedAt: row.locked_at,
+    permissions: describeBits(Number(row.perm_bits)),
     versions,
   };
 }
