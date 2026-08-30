@@ -19,12 +19,16 @@ import { buildApp } from './app.js';
 import { storage } from './storage/index.js';
 import { startExtractionWorker } from './modules/extraction/worker.js';
 import { startMaintenance } from './modules/storage-maintenance/purge.js';
+import { startNotificationMailer } from './modules/notifications/service.js';
+import { startRenditionWorker } from './modules/renditions/service.js';
 
 const log = moduleLogger('server');
 
 let app;
 let extraction;
 let maintenance;
+let mailer;
+let renditions;
 
 async function start() {
   // Fail loudly here rather than on the first user request.
@@ -42,6 +46,8 @@ async function start() {
   // database that is not reachable just logs errors on a timer.
   extraction = startExtractionWorker();
   maintenance = startMaintenance();
+  mailer = startNotificationMailer();
+  renditions = startRenditionWorker();
 
   await app.listen({ host: config.server.host, port: config.server.port });
   log.info(
@@ -60,6 +66,8 @@ async function shutdown(signal) {
   try {
     extraction?.stop();
     maintenance?.stop();
+    mailer?.stop();
+    renditions?.stop();
     if (app) await app.close();
     await closeDatabase();
     process.exit(0);

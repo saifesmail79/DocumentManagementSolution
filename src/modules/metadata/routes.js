@@ -20,7 +20,13 @@ import {
   createLabel,
   updateDocumentMetadata,
 } from './service.js';
+import { listDefaults, setDefaults } from './defaults.js';
 import { record, ACTION } from '../audit/service.js';
+
+const parseFolderId = (value) => {
+  const text = String(value ?? '').trim();
+  return /^[0-9]{1,19}$/.test(text) ? text : null;
+};
 
 const STATUS = {
   invalid_name: 400,
@@ -33,6 +39,7 @@ const STATUS = {
   unknown_field: 400,
   choices_required: 400,
   name_taken: 409,
+  unsupported_field_type: 400,
   rank_taken: 409,
   forbidden: 403,
   not_found: 404,
@@ -59,6 +66,8 @@ export async function metadataRoutes(app) {
   }));
 
   app.get('/labels', async () => ({ labels: await listLabels() }));
+
+
 
   // Definitions are system-wide vocabulary, so changing them is super-admin.
   app.register(async (admin) => {
@@ -129,4 +138,33 @@ export async function documentMetadataRoutes(app) {
 
     return { ok: true };
   });
+}
+
+/**
+ * Folder defaults, mounted under /api/folders.
+ *
+ * They are metadata definitions, but they are addressed by folder and that is
+ * where a caller looks for them — a URL under /api/metadata would be a filing
+ * decision imposed on the API's users.
+ */
+export async function folderDefaultsRoutes(app) {
+  app.addHook('preHandler', app.requireAuth);
+
+  app.get('/:folderId/defaults', async (request, reply) =>
+    send(
+      reply,
+      await listDefaults({ userId: request.user.userId, folderId: parseFolderId(request.params.folderId) }),
+    ),
+  );
+
+  app.put('/:folderId/defaults', async (request, reply) =>
+    send(
+      reply,
+      await setDefaults({
+        userId: request.user.userId,
+        folderId: parseFolderId(request.params.folderId),
+        defaults: request.body?.defaults,
+      }),
+    ),
+  );
 }

@@ -238,6 +238,27 @@ export function startMaintenance() {
       // Regenerated after the purge so a manifest never lists a file the sweep
       // has just removed.
       if (config.storage.manifestsEnabled) await writeAllManifests();
+
+      // The periodic jobs the other modules own. Grouped here rather than each
+      // starting its own timer: four timers doing small amounts of work on the
+      // same disk and database is worse than one pass that does all of it.
+      const [{ notifyExpiring }, { escalateOverdue }, { purgeStaleSessions }, { purgeUnusedTags }, integration] =
+        await Promise.all([
+          import('../documents/state.js'),
+          import('../workflow/service.js'),
+          import('../uploads/resumable.js'),
+          import('../tags/service.js'),
+          import('../integration/service.js'),
+        ]);
+
+      await notifyExpiring();
+      await escalateOverdue();
+      await purgeStaleSessions();
+      await purgeUnusedTags();
+      await integration.deliverPending();
+
+      const { purgeResetTokens } = await import('../auth/reset.js');
+      await purgeResetTokens();
     } catch (error) {
       log.error({ err: error }, 'maintenance sweep failed');
     } finally {

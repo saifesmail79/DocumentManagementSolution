@@ -236,6 +236,17 @@ export const config = Object.freeze({
     from: optional('MAIL_FROM', 'DMS <no-reply@localhost>'),
   }),
 
+  renditions: Object.freeze({
+    /** Thumbnails and Office previews. Images work with no external tools. */
+    enabled: boolean('RENDITIONS_ENABLED', true),
+    pollMs: integer('RENDITIONS_POLL_MS', 20_000, { min: 1000 }),
+    /** LibreOffice headless converts Office files to PDF for preview. */
+    libreOfficePath: optional('RENDITIONS_LIBREOFFICE_PATH', 'soffice'),
+    /** Ghostscript rasterises the first PDF page for a thumbnail. */
+    ghostscriptPath: optional('RENDITIONS_GHOSTSCRIPT_PATH', 'gs'),
+    timeoutMs: integer('RENDITIONS_TIMEOUT_MS', 120_000, { min: 5000 }),
+  }),
+
   logging: Object.freeze({
     level: optional('LOG_LEVEL', 'info'),
     pretty: boolean('LOG_PRETTY', optional('NODE_ENV', 'development') !== 'production'),

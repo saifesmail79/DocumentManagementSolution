@@ -27,8 +27,14 @@ import { treeRoutes } from './modules/tree/routes.js';
 import { documentRoutes } from './modules/documents/routes.js';
 import { searchRoutes } from './modules/search/routes.js';
 import { adminRoutes } from './modules/admin/routes.js';
-import { metadataRoutes, documentMetadataRoutes } from './modules/metadata/routes.js';
+import {
+  metadataRoutes,
+  documentMetadataRoutes,
+  folderDefaultsRoutes,
+} from './modules/metadata/routes.js';
 import { settingsRoutes } from './modules/settings/routes.js';
+import { collaborationRoutes } from './modules/collaboration/routes.js';
+import { integrationRoutes, shareRoutes } from './modules/integration/routes.js';
 
 const log = moduleLogger('server');
 
@@ -63,6 +69,18 @@ export async function buildApp({ logger: withLogger = true } = {}) {
     limits: { fileSize: config.storage.maxUploadBytes, files: 1 },
   });
 
+  /**
+   * Raw binary bodies, for resumable upload chunks.
+   *
+   * The parser hands the stream through untouched rather than buffering it: a
+   * chunk can be several megabytes, and the point of chunked upload is to avoid
+   * holding a whole file in memory. Without this Fastify refuses the request
+   * with 415 before the handler ever runs.
+   */
+  app.addContentTypeParser('application/octet-stream', (request, payload, done) => {
+    done(null, payload);
+  });
+
   // Called with the root instance on purpose — see the note in modules/auth/routes.js.
   registerAuth(app);
 
@@ -71,8 +89,15 @@ export async function buildApp({ logger: withLogger = true } = {}) {
   await app.register(searchRoutes, { prefix: '/api/search' });
   await app.register(adminRoutes, { prefix: '/api/admin' });
   await app.register(metadataRoutes, { prefix: '/api/metadata' });
+  await app.register(folderDefaultsRoutes, { prefix: '/api/folders' });
   await app.register(documentMetadataRoutes, { prefix: '/api/documents' });
   await app.register(settingsRoutes, { prefix: '/api/settings' });
+  await app.register(collaborationRoutes, { prefix: '/api' });
+  await app.register(integrationRoutes, { prefix: '/api' });
+
+  // Public: the one route that serves document bytes without a session. It
+  // enforces its own expiry, password and download cap.
+  await app.register(shareRoutes, { prefix: '/api/share' });
 
   await registerClient(app);
 

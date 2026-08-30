@@ -151,6 +151,11 @@ export async function createDocument({
     return { ok: false, reason: has(bits, PERM.BROWSE) ? 'forbidden' : 'not_found' };
   }
 
+  // Folder defaults fill any field the uploader left blank, before the required
+  // check runs — a default that satisfies a required field should satisfy it.
+  const { applyDefaults } = await import('../metadata/defaults.js');
+  fields = await applyDefaults({ folderId, fields });
+
   // Required fields are checked before a byte is stored: a document filed
   // without the metadata its type demands is the thing picklists and required
   // flags exist to prevent, and rejecting after the upload wastes the transfer.
@@ -222,6 +227,9 @@ export async function createDocument({
       // Enqueued in the same transaction as the version. A queue row written
       // outside it could reference a document whose insert then rolled back.
       await enqueueExtraction(trx, documentId, 1);
+
+      const { enqueueRendition } = await import('../renditions/service.js');
+      await enqueueRendition(trx, documentId, 1, 'thumbnail');
 
       // Inside the transaction and after the rows: if this throws, the insert
       // rolls back and nothing references a file that was never put in place.
@@ -325,6 +333,9 @@ export async function addVersion({ userId, documentId, stream, filename, mimeTyp
       }
 
       await enqueueExtraction(trx, document.document_id, nextVersion);
+
+      const { enqueueRendition } = await import('../renditions/service.js');
+      await enqueueRendition(trx, document.document_id, nextVersion, 'thumbnail');
       await storage.promote(staging.staged.relativePath, relativePath);
     });
 

@@ -31,6 +31,9 @@ import { m0004Search } from './0004-search.js';
 import { m0005AuditAndReset } from './0005-audit-and-reset.js';
 import { m0006SettingsAndFieldTypes } from './0006-settings-and-field-types.js';
 import { m0007WidenDataType } from './0007-widen-data-type.js';
+import { m0008Collaboration } from './0008-collaboration.js';
+import { m0009Integration } from './0009-integration.js';
+import { m0010ExpandGroupMembers } from './0010-expand-group-members.js';
 
 /**
  * @typedef {object} Migration
@@ -49,4 +52,7 @@ export const MIGRATIONS = [
   m0005AuditAndReset,
   m0006SettingsAndFieldTypes,
   m0007WidenDataType,
+  m0008Collaboration,
+  m0009Integration,
+  m0010ExpandGroupMembers,
 ];

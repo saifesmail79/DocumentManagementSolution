@@ -56,6 +56,12 @@ export const ACTION = Object.freeze({
   DOCUMENT_PURGE_REQUESTED: 'document.purge_requested',
   DOCUMENT_METADATA_CHANGED: 'document.metadata_changed',
 
+  APPROVAL_REQUESTED: 'approval.requested',
+  APPROVAL_DECIDED: 'approval.decided',
+  VERSION_RESTORED: 'document.version_restored',
+  LEGAL_HOLD_CHANGED: 'document.legal_hold_changed',
+  SHARE_LINK_CREATED: 'share.link_created',
+
   BLOB_PURGED: 'storage.blob_purged',
   SETTING_CHANGED: 'settings.changed',
 });

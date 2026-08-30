@@ -8,6 +8,7 @@
  */
 
 import { search, advancedSearch, searchByField, contentSearchAvailable } from './service.js';
+import { facetsFor, snippetsFor } from './facets.js';
 
 export async function searchRoutes(app) {
   app.addHook('preHandler', app.requireAuth);
@@ -73,6 +74,29 @@ export async function searchRoutes(app) {
       limit: toNullableInt(limit) ?? 25,
     });
   });
+
+  /**
+   * Facet counts for the current query.
+   *
+   * Separate from the results so a client can render them independently and
+   * cache them across pages of the same search.
+   */
+  app.get('/facets', async (request) =>
+    facetsFor({
+      userId: request.user.userId,
+      query: request.query?.q ?? null,
+      folderId: parseId(request.query?.folderId),
+    }),
+  );
+
+  /** Highlighted excerpts for a page of results. */
+  app.post('/snippets', async (request) => ({
+    snippets: await snippetsFor({
+      userId: request.user.userId,
+      documentIds: request.body?.documentIds,
+      query: request.body?.q,
+    }),
+  }));
 
   /** Lets the UI explain why content search is unavailable rather than guessing. */
   app.get('/capabilities', async () => ({

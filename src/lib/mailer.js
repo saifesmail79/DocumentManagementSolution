@@ -7,10 +7,14 @@
  *
  * ─── Why this is deliberately small ─────────────────────────────────────────
  *
- * The only thing the system emails is a password reset link. That is a security
- * boundary, not a marketing channel: no HTML templating, no attachments, no
- * per-message transport options. Nodemailer's history of header-injection and
- * file-access advisories is almost entirely in the features this does not use.
+ * The system emails two things: a password reset link and a notification. No
+ * attachments, no per-message transport options, no message-level `raw` — those
+ * are where nodemailer's file-access and SSRF advisories live, and nothing here
+ * needs them.
+ *
+ * An HTML body is allowed because the blueprint asks for RTL templates, and a
+ * plain-text-only Arabic notice renders as an unstyled left-to-right block in
+ * most clients. Every message still carries a text alternative.
  */
 
 import { config } from '../config/index.js';
@@ -63,11 +67,11 @@ function assertHeaderSafe(value, field) {
 }
 
 /**
- * Sends one plain-text message.
+ * Sends one message.
  *
- * @param {{to: string, subject: string, text: string}} message
+ * @param {{to: string, subject: string, text: string, html?: string}} message
  */
-export async function sendMail({ to, subject, text }) {
+export async function sendMail({ to, subject, text, html }) {
   const recipient = assertHeaderSafe(to, 'recipient');
   const line = assertHeaderSafe(subject, 'subject');
 
@@ -81,9 +85,10 @@ export async function sendMail({ to, subject, text }) {
     from: config.mail.from,
     to: recipient,
     subject: line,
-    // Plain text only. An HTML body is a second parser and a second injection
-    // surface for a message that is one sentence and a link.
+    // The text part is always sent, HTML or not: a client that refuses HTML, a
+    // screen reader, and the audit copy in a mail archive all read this one.
     text,
+    ...(html ? { html } : {}),
   });
 
   log.info({ messageId: info.messageId, accepted: info.accepted?.length ?? 0 }, 'mail sent');

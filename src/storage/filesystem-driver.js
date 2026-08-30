@@ -283,6 +283,92 @@ export class FilesystemDriver {
     }
   }
 
+  /**
+   * Durably writes a buffer to a path.
+   *
+   * For derived artefacts — thumbnails, rendered previews — which are produced
+   * whole in memory rather than streamed. Same temp-fsync-rename sequence: a
+   * half-written thumbnail is a broken image in every folder listing.
+   */
+  async putBuffer(buffer, relativePath) {
+    const safeRelative = assertSafeRelativePath(relativePath);
+    const finalPath = this.absolute(safeRelative);
+    const tempPath = path.join(this.tempDir, `${randomUUID()}.buf`);
+
+    let handle;
+    try {
+      await mkdir(path.dirname(finalPath), { recursive: true });
+      handle = await open(tempPath, 'wx');
+      await handle.write(buffer, 0, buffer.length, 0);
+      await handle.sync();
+      await handle.close();
+      handle = undefined;
+
+      await rename(tempPath, finalPath);
+      return { relativePath: safeRelative, bytes: buffer.length };
+    } catch (error) {
+      if (handle) await handle.close().catch(() => {});
+      await unlink(tempPath).catch(() => {});
+      throw new StorageError(`Failed to write ${safeRelative}: ${error.message}`, {
+        code: 'storage_write_failed',
+        cause: error,
+      });
+    }
+  }
+
+  /**
+   * Durably copies a stored file to a new path.
+   *
+   * Used by version restore, which brings an older version forward as a new one
+   * rather than rewinding history. Goes through the same temp-fsync-rename
+   * sequence as put(): a copy that lands half-written is the same corruption as
+   * an upload that does, and the caller commits a row against it either way.
+   */
+  async copy(fromRelativePath, toRelativePath) {
+    const from = this.absolute(fromRelativePath);
+    const safeTo = assertSafeRelativePath(toRelativePath);
+    const to = this.absolute(safeTo);
+    const tempPath = path.join(this.tempDir, `${randomUUID()}.copy`);
+
+    let handle;
+    try {
+      await mkdir(path.dirname(to), { recursive: true });
+
+      const source = createReadStream(from);
+      handle = await open(tempPath, 'wx');
+
+      let bytes = 0;
+      for await (const chunk of source) {
+        bytes += chunk.length;
+        await handle.write(chunk);
+      }
+
+      await handle.sync();
+      await handle.close();
+      handle = undefined;
+
+      await rename(tempPath, to);
+
+      const written = await stat(to);
+      if (written.size !== bytes) {
+        throw new StorageError(
+          `Copy verification failed for ${safeTo}: expected ${bytes} bytes, found ${written.size}`,
+          { code: 'storage_verify_failed' },
+        );
+      }
+
+      return { relativePath: safeTo, bytes };
+    } catch (error) {
+      if (handle) await handle.close().catch(() => {});
+      await unlink(tempPath).catch(() => {});
+      if (error instanceof StorageError) throw error;
+      throw new StorageError(`Failed to copy ${fromRelativePath} to ${toRelativePath}: ${error.message}`, {
+        code: 'storage_copy_failed',
+        cause: error,
+      });
+    }
+  }
+
   async remove(relativePath) {
     const absolute = this.absolute(relativePath);
     await rm(absolute, { force: true });

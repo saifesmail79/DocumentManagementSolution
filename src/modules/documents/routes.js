@@ -19,6 +19,8 @@ import {
   deleteDocument,
 } from './service.js';
 import { record, ACTION } from '../audit/service.js';
+import { announceDocumentEvent } from './events.js';
+import { qrPng, stampPdf } from './qr.js';
 import { listRecycleBin, restoreDocument, purgeNow, findDuplicates } from './lifecycle.js';
 
 /** Maps a service failure to a status code. not_found covers "exists but invisible". */
@@ -91,6 +93,14 @@ export async function documentRoutes(app) {
       request,
     });
 
+    await announceDocumentEvent({
+      event: 'document.created',
+      actor: request.user,
+      documentId: result.documentId,
+      folderId,
+      title,
+    });
+
     return reply.code(201).send(result);
   });
 
@@ -122,6 +132,13 @@ export async function documentRoutes(app) {
       request,
     });
 
+    await announceDocumentEvent({
+      event: 'document.version_added',
+      actor: request.user,
+      documentId,
+      title: `إصدار ${result.version}`,
+    });
+
     return reply.code(201).send(result);
   });
 
@@ -150,6 +167,11 @@ export async function documentRoutes(app) {
     const found = await getVersionForRead({ userId: request.user.userId, documentId, version });
     if (!found) return reply.code(404).send({ error: 'not_found' });
 
+    // "Recently viewed" is the cheapest answer to "I can never find my documents
+    // again", which research named the most common reason people abandon a DMS.
+    const { recordView } = await import('../collaboration/service.js');
+    recordView({ userId: request.user.userId, documentId }).catch(() => {});
+
     // Recorded before streaming: who read what is the question an audit of a
     // document system is actually asked.
     await record({
@@ -173,6 +195,30 @@ export async function documentRoutes(app) {
     // shared proxy must never serve one user's document to another.
     reply.header('Cache-Control', 'private, max-age=31536000, immutable');
     reply.header('X-Content-Type-Options', 'nosniff');
+
+    /**
+     * ?stamp=qr overlays a QR code linking back to this document.
+     *
+     * Buffered rather than streamed, because stamping needs the whole file —
+     * and the range branch below is skipped for the same reason. That is the
+     * right trade for a print copy, which is a deliberate one-off action, and
+     * the wrong one for ordinary viewing, which is why it is opt-in.
+     */
+    if (request.query?.stamp === 'qr' && (found.mimeType || '').includes('pdf')) {
+      const chunks = [];
+      for await (const chunk of storage.createReadStream(found.storagePath)) chunks.push(chunk);
+
+      const stamped = await stampPdf(Buffer.concat(chunks), {
+        documentId,
+        title: found.title,
+      });
+
+      if (stamped) {
+        reply.header('Content-Length', stamped.length);
+        return reply.send(stamped);
+      }
+      // Stamping failed; fall through and serve the file unchanged.
+    }
 
     const rangeHeader = request.headers.range;
     if (rangeHeader) {
@@ -259,6 +305,25 @@ export async function documentRoutes(app) {
     return { ok: true };
   });
 
+  /**
+   * A QR code linking back to this document, for printing onto a copy.
+   *
+   * Requires READ, like the content itself: the code is a pointer to the
+   * document, and handing one out to someone who may only see the title lets
+   * them pass a link to it around.
+   */
+  app.get('/documents/:documentId/qr', async (request, reply) => {
+    const documentId = parseId(request.params.documentId);
+    if (documentId === null) return reply.code(400).send({ error: 'invalid_document_id' });
+
+    const found = await getVersionForRead({ userId: request.user.userId, documentId });
+    if (!found) return reply.code(404).send({ error: 'not_found' });
+
+    reply.header('Content-Type', 'image/png');
+    reply.header('Cache-Control', 'private, max-age=3600');
+    return reply.send(await qrPng(documentId, { size: request.query?.size }));
+  });
+
   app.delete('/documents/:documentId', async (request, reply) => {
     const documentId = parseId(request.params.documentId);
     if (documentId === null) return reply.code(400).send({ error: 'invalid_document_id' });
@@ -272,6 +337,13 @@ export async function documentRoutes(app) {
       targetType: 'document',
       targetId: documentId,
       request,
+    });
+
+    await announceDocumentEvent({
+      event: 'document.deleted',
+      actor: request.user,
+      documentId,
+      notifyWatchers: false,
     });
 
     return { ok: true };
