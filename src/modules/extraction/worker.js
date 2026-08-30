@@ -360,6 +360,15 @@ export async function queueStats() {
 }
 
 /**
+ * How old a claim must be before an explicit reindex will take it back.
+ *
+ * Far shorter than STALE_CLAIM_MS, because this is not the background loop
+ * guessing whether a worker died — it is an administrator saying so. A minute is
+ * enough to avoid interrupting a job that genuinely started moments ago.
+ */
+const STALE_RECLAIM_ON_REQUEST_MS = 60 * 1000;
+
+/**
  * Puts every unsearchable document back on the queue.
  *
  * ─── Why this has to exist ──────────────────────────────────────────────────
@@ -391,7 +400,19 @@ export async function requeueUnsearchable() {
       JOIN dbo.documents AS d ON d.document_id = q.document_id
      WHERE d.deleted_at IS NULL
        AND q.version_number = d.current_version
-       AND q.status IN (${QUEUE.FAILED}, ${QUEUE.SKIPPED})
+       AND (
+             q.status IN (${QUEUE.FAILED}, ${QUEUE.SKIPPED})
+             -- A row abandoned by a worker that died mid-job. Without this an
+             -- administrator clicking "reindex" sees nothing happen to exactly
+             -- the documents most obviously stuck, and waits out STALE_CLAIM_MS
+             -- with no indication why. A restart during a reindex produces this
+             -- immediately, which is how it was found.
+             OR (
+                  q.status = ${QUEUE.RUNNING}
+                  AND q.started_at IS NOT NULL
+                  AND DATEDIFF(second, q.started_at, SYSUTCDATETIME()) > ${Math.floor(STALE_RECLAIM_ON_REQUEST_MS / 1000)}
+                )
+           )
   `.execute(db);
 
   const requeued = Number(result.numAffectedRows ?? 0);

@@ -507,6 +507,59 @@ describe('text extraction', { skip: CONFIGURED ? false : target.reason }, () => 
     assert.equal(Number(row.extraction_status), worker.DOC_EXTRACTION.EXTRACTED);
   });
 
+  /**
+   * Restarting the server during a reindex leaves a row claimed by a process
+   * that no longer exists. That is the state most obviously in need of the
+   * button, and it was the one state the button ignored — the operator saw
+   * nothing happen and had no way to know they were waiting out a thirty-minute
+   * timer.
+   */
+  test('reindexing also takes back a claim abandoned by a dead worker', async () => {
+    const documentId = await upload(cookie, 'orphaned.txt', 'وثيقة يتيمة بلا عامل', 'text/plain');
+
+    await sql`
+      UPDATE dbo.extraction_queue
+         SET status = ${worker.QUEUE.RUNNING},
+             started_at = DATEADD(minute, -5, SYSUTCDATETIME()),
+             finished_at = NULL
+       WHERE document_id = ${documentId}
+    `.execute(db);
+
+    await worker.requeueUnsearchable();
+
+    const row = await sql`
+      SELECT status FROM dbo.extraction_queue WHERE document_id = ${documentId}
+    `.execute(db);
+    assert.equal(Number(row.rows[0].status), worker.QUEUE.PENDING, 'the abandoned claim was not released');
+
+    await worker.drainQueue();
+    assert.equal(
+      Number((await statusOf(documentId)).extraction_status),
+      worker.DOC_EXTRACTION.EXTRACTED,
+    );
+  });
+
+  test('reindexing does not interrupt a job that just started', async () => {
+    const documentId = await upload(cookie, 'just-started.txt', 'قيد التنفيذ فعلاً', 'text/plain');
+
+    await sql`
+      UPDATE dbo.extraction_queue
+         SET status = ${worker.QUEUE.RUNNING}, started_at = SYSUTCDATETIME(), finished_at = NULL
+       WHERE document_id = ${documentId}
+    `.execute(db);
+
+    await worker.requeueUnsearchable();
+
+    const row = await sql`
+      SELECT status FROM dbo.extraction_queue WHERE document_id = ${documentId}
+    `.execute(db);
+    assert.equal(
+      Number(row.rows[0].status),
+      worker.QUEUE.RUNNING,
+      'a live job was taken away from the worker running it',
+    );
+  });
+
   test('a job still running is left alone', async () => {
     const documentId = await upload(cookie, 'in-progress.txt', 'قيد المعالجة الآن', 'text/plain');
 
