@@ -49,9 +49,24 @@ export default function Browse() {
   const fileInput = useRef(null);
   const folderInput = useRef(null);
 
-  const load = useCallback(async () => {
+  /*
+   * `preserveMessages` exists because of a bug that made every upload failure
+   * invisible.
+   *
+   * Each action set its message and then refreshed the listing — and the refresh
+   * cleared the error on its way in, destroying the message before React ever
+   * painted it. A blocked duplicate, a rejected file type, a full disk: the
+   * server answered correctly every time and the user saw an unchanged screen.
+   *
+   * Clearing is right when the load is the point (arriving, or changing folder)
+   * and wrong when the load is a consequence of something the user just did.
+   */
+  const load = useCallback(async ({ preserveMessages = false } = {}) => {
     setLoading(true);
-    setError(null);
+    if (!preserveMessages) {
+      setError(null);
+      setNotice(null);
+    }
     try {
       if (folderId) {
         setData(await api.folder(folderId));
@@ -69,6 +84,12 @@ export default function Browse() {
       setLoading(false);
     }
   }, [folderId]);
+
+  /** Reloads after an action, keeping whatever the action just reported. */
+  const refresh = useCallback(
+    () => Promise.all([load({ preserveMessages: true }), reloadTree()]),
+    [load, reloadTree],
+  );
 
   useEffect(() => {
     load();
@@ -112,7 +133,7 @@ export default function Browse() {
       setNotice('تم الرفع. تجري فهرسة المحتوى في الخلفية — قد لا يظهر في البحث النصي فوراً.');
     }
 
-    await Promise.all([load(), reloadTree()]);
+    await refresh();
     setBusy(false);
   }
 
@@ -189,7 +210,7 @@ export default function Browse() {
       );
     }
 
-    await Promise.all([load(), reloadTree()]);
+    await refresh();
     setBusy(false);
   }
 
@@ -209,7 +230,7 @@ export default function Browse() {
       await api.createFolder(folderId ?? null, name.trim());
       // The panel shows folders and their document counts, so both a new folder
       // and a new document put it out of date.
-      await Promise.all([load(), reloadTree()]);
+      await refresh();
     } catch {
       setError('تعذر إنشاء المجلد.');
     } finally {
@@ -222,7 +243,7 @@ export default function Browse() {
     setBusy(true);
     try {
       await api.deleteDocument(documentId);
-      await Promise.all([load(), reloadTree()]);
+      await refresh();
     } catch {
       setError('تعذر حذف الوثيقة.');
     } finally {
@@ -348,7 +369,7 @@ export default function Browse() {
           onDone={async (message) => {
             setSelected(new Set());
             if (message) setNotice(message);
-            await Promise.all([load(), reloadTree()]);
+            await refresh();
           }}
           onError={setError}
         />
@@ -359,7 +380,7 @@ export default function Browse() {
           folderId={folderId}
           folderName={data?.folder?.name ?? ''}
           onClose={() => setShowPermissions(false)}
-          onChanged={() => Promise.all([load(), reloadTree()])}
+          onChanged={() => refresh()}
         />
       ) : null}
 
@@ -369,7 +390,7 @@ export default function Browse() {
       {folderId && permissions.upload ? (
         <ScanPanel
           folderId={folderId}
-          onUploaded={() => Promise.all([load(), reloadTree()])}
+          onUploaded={() => refresh()}
         />
       ) : null}
 

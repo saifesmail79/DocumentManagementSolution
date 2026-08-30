@@ -1,16 +1,58 @@
 /** Display helpers. Arabic-Indic digits are deliberately NOT used — the target
  *  users read Western digits for reference numbers and amounts. */
 
-const dateFormatter = new Intl.DateTimeFormat('ar-IQ-u-ca-gregory-nu-latn', {
+const LOCALE = 'ar-IQ-u-ca-gregory-nu-latn';
+
+/**
+ * ICU's Arabic date patterns wrap the separators in U+200F RIGHT-TO-LEFT MARK:
+ * `ar-IQ` formats 30 August 2026 as "30<RLM>/08<RLM>/2026", not "30/08/2026".
+ *
+ * Inside ordinary Arabic prose those marks are what keeps a date upright. Inside
+ * `.num` — which already pins `direction: ltr` — they do the opposite: each mark
+ * opens a right-to-left run, so the bidi algorithm reorders the fields and the
+ * cell renders as "302026/08/". That was the bug, and the marks are redundant
+ * here precisely because `.num` has already settled the direction, so they are
+ * removed rather than fought with.
+ *
+ * Stripped rather than rebuilt from `formatToParts` so the locale keeps its own
+ * field order — this removes formatting controls only, never digits. Written as
+ * escapes because every character in the class is invisible in an editor.
+ */
+const BIDI_CONTROLS = /[‎‏؜‪-‮⁦-⁩]/g;
+
+const dateFormatter = new Intl.DateTimeFormat(LOCALE, {
   year: 'numeric',
   month: '2-digit',
   day: '2-digit',
 });
 
-export function formatDate(value) {
-  if (!value) return '—';
+const dateTimeFormatter = new Intl.DateTimeFormat(LOCALE, {
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  // h23 rather than the locale default: a 12-hour clock in Arabic appends ص/م,
+  // a right-to-left word glued to an LTR number, which is the same fight again.
+  hourCycle: 'h23',
+});
+
+function toDate(value) {
+  if (!value) return null;
   const date = value instanceof Date ? value : new Date(value);
-  return Number.isNaN(date.getTime()) ? '—' : dateFormatter.format(date);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+/** `30/08/2026`, or an em dash when there is nothing to show. */
+export function formatDate(value) {
+  const date = toDate(value);
+  return date ? dateFormatter.format(date).replace(BIDI_CONTROLS, '') : '—';
+}
+
+/** `30/08/2026، 10:39` — for the tooltip, where the time matters but the column is narrow. */
+export function formatDateTime(value) {
+  const date = toDate(value);
+  return date ? dateTimeFormatter.format(date).replace(BIDI_CONTROLS, '') : '—';
 }
 
 export function formatBytes(bytes) {
