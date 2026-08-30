@@ -606,7 +606,14 @@ const SETTING_LABELS = {
   'extraction.enabled': 'استخراج نص الوثائق',
 };
 
-const POLICY_LABELS = { allow: 'السماح', warn: 'تنبيه', block: 'منع' };
+/** Option values are stored in English; these are what an operator reads. */
+const OPTION_LABELS = {
+  allow: 'السماح',
+  warn: 'تنبيه',
+  block: 'منع',
+  ar: 'العربية',
+  en: 'الإنجليزية',
+};
 
 function SettingsTab() {
   const [settings, setSettings] = useState(null);
@@ -695,19 +702,35 @@ function SettingsTab() {
 }
 
 function SettingRow({ setting, busy, onSave, onRevert }) {
-  const [draft, setDraft] = useState(
-    Array.isArray(setting.value) ? setting.value.join(', ') : String(setting.value),
-  );
+  /** The stored value as it would appear in a text box. */
+  const serialised = Array.isArray(setting.value) ? setting.value.join(', ') : String(setting.value);
 
-  const changed = draft !== (Array.isArray(setting.value) ? setting.value.join(', ') : String(setting.value));
+  // A dropdown saves the moment it changes. Only a free-text box has a draft
+  // the user might be part-way through typing, and so only it needs a Save
+  // button.
+  const isChoice = setting.type === 'bool' || Boolean(setting.options);
+
+  const [draft, setDraft] = useState(serialised);
+
+  // Re-seed whenever the stored value changes underneath — after a save, or
+  // after a revert to the environment default.
+  //
+  // Without this the draft held its original value for the life of the row. So
+  // choosing "enabled" in a dropdown left `changed` true, which put a Save
+  // button on the row still carrying the stale "false"; clicking it wrote that
+  // false straight back, and the setting looked like it refused to stay on. The
+  // audit trail showed the pair every time: ocr.enabled = true, then two seconds
+  // later ocr.enabled = false.
+  useEffect(() => {
+    setDraft(serialised);
+  }, [serialised]);
+
+  const changed = !isChoice && draft !== serialised;
 
   return (
     <tr className="hover:bg-surface-muted/30">
       <td className="px-4 py-3 text-right">
         <span className="font-medium text-text">{SETTING_LABELS[setting.key] ?? setting.key}</span>
-        <span className="block text-[11px] text-text-muted" dir="ltr">
-          {setting.key}
-        </span>
       </td>
       <td className="px-4 py-3 text-right">
         {setting.type === 'bool' ? (
@@ -729,7 +752,7 @@ function SettingRow({ setting, busy, onSave, onRevert }) {
           >
             {setting.options.map((option) => (
               <option key={option} value={option}>
-                {POLICY_LABELS[option] ?? option}
+                {OPTION_LABELS[option] ?? option}
               </option>
             ))}
           </select>

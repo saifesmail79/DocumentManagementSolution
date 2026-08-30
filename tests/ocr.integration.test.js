@@ -380,4 +380,64 @@ describe('OCR', { skip: CONFIGURED ? false : target.reason }, () => {
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'not_ocrable');
   });
+
+  /**
+   * The administration panel's OCR switch has to change what the system does.
+   *
+   * It did not. Every consumer read config.ocr.enabled — the environment
+   * variable — so the switch wrote a row nothing consulted: turning OCR off left
+   * it running, and turning it on achieved nothing. The environment stays the
+   * default, and the stored value overrides it.
+   */
+  test('the stored OCR switch overrides the environment', async () => {
+    const { setSetting, clearSetting, resetSettingsCache } = await import(
+      '../src/modules/settings/service.js'
+    );
+
+    // The environment says enabled throughout this file; the panel says no.
+    await setSetting({ key: 'ocr.enabled', value: 'false', actorId: id.scanner });
+    resetSettingsCache();
+
+    try {
+      const documentId = await upload(cookie, 'ignored-scan.png', STUB_SCAN);
+      await worker.drainQueue();
+
+      const row = await statusOf(documentId);
+      assert.notEqual(
+        Number(row.extraction_status),
+        worker.DOC_EXTRACTION.OCR_EXTRACTED,
+        'OCR ran even though the panel had switched it off',
+      );
+    } finally {
+      await clearSetting({ key: 'ocr.enabled' });
+      resetSettingsCache();
+    }
+
+    // And back on, so the switch is shown to work in both directions rather
+    // than merely to block.
+    const documentId = await upload(cookie, 'wanted-scan.png', STUB_SCAN);
+    await worker.drainQueue();
+
+    const row = await statusOf(documentId);
+    assert.equal(Number(row.extraction_status), worker.DOC_EXTRACTION.OCR_EXTRACTED);
+  });
+
+  test('the diagnostics screen reports the stored switch, not the environment', async () => {
+    const { setSetting, clearSetting, resetSettingsCache } = await import(
+      '../src/modules/settings/service.js'
+    );
+
+    await setSetting({ key: 'ocr.enabled', value: 'false', actorId: id.scanner });
+    resetSettingsCache();
+
+    try {
+      const status = await ocr.ocrStatus({
+        enabled: await (await import('../src/modules/settings/service.js')).getSetting('ocr.enabled'),
+      });
+      assert.equal(status.enabled, false, 'the screen showed the environment value, which nobody set');
+    } finally {
+      await clearSetting({ key: 'ocr.enabled' });
+      resetSettingsCache();
+    }
+  });
 });

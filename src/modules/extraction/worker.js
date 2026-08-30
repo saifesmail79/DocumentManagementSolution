@@ -31,6 +31,7 @@ import { normalizeArabic } from '../../lib/arabic.js';
 import { moduleLogger } from '../../lib/logger.js';
 import { extractText, OUTCOME } from './extractors.js';
 import { attemptOcr, ocrAvailable } from './ocr.js';
+import { getSetting } from '../settings/service.js';
 
 const log = moduleLogger('extraction');
 
@@ -158,10 +159,17 @@ export async function processOne({ maxAttempts = config.extraction.maxAttempts }
 
     // No text layer. This is the scan case, and the point at which OCR is the
     // only way the document becomes searchable.
-    if (await ocrAvailable()) {
+    // The administration panel's OCR switch is read here, per document, rather
+    // than at startup: an operator turning OCR on expects the next scan to be
+    // recognised, not to have to restart the server. getSetting caches for ten
+    // seconds and falls back to the environment, so this costs nothing per job.
+    const ocrEnabled = await getSetting('ocr.enabled');
+
+    if (await ocrAvailable({ enabled: ocrEnabled })) {
       const recognised = await attemptOcr(absolutePath, {
         filename: version.original_filename ?? path.basename(version.storage_path),
         mimeType: version.mime_type,
+        enabled: ocrEnabled,
       }).catch((error) => ({ ok: false, reason: 'ocr_failed', detail: error.message }));
 
       if (recognised.ok) {
@@ -244,6 +252,10 @@ export async function drainQueue({ max = 1000 } = {}) {
  * @returns {{stop: () => void}}
  */
 export function startExtractionWorker() {
+  // Deliberately not gated here on the stored setting. The environment switch
+  // decides whether this process runs a worker at all; the stored setting
+  // decides whether it does any work on a given tick, so an operator toggling it
+  // sees an effect without a restart.
   if (!config.extraction.enabled) {
     log.info('extraction worker disabled (EXTRACTION_ENABLED=false)');
     return { stop() {} };
@@ -255,6 +267,11 @@ export function startExtractionWorker() {
   const tick = async () => {
     if (stopped) return;
     try {
+      // Returning still runs the finally below, which schedules the next tick —
+      // so a paused worker keeps checking and resumes on its own when the
+      // setting comes back on.
+      if (!(await getSetting('extraction.enabled'))) return;
+
       const processed = await drainQueue({ max: config.extraction.batchSize });
       if (processed > 0) log.info({ processed }, 'extraction batch complete');
     } catch (error) {

@@ -149,9 +149,16 @@ export async function detectOcrTools({ force = false } = {}) {
   return detected;
 }
 
-/** True when anything can be OCR'd at all. */
-export async function ocrAvailable() {
-  if (!config.ocr.enabled) return false;
+/**
+ * True when anything can be OCR'd at all.
+ *
+ * `enabled` is a policy decision and arrives from the caller, defaulting to the
+ * environment. It is deliberately not read from the settings table here: this
+ * module is a thin adapter over two binaries, and giving it a database
+ * dependency would make it unusable from a context that has none.
+ */
+export async function ocrAvailable({ enabled = config.ocr.enabled } = {}) {
+  if (!enabled) return false;
   const tools = await detectOcrTools();
   return tools.tesseract.available;
 }
@@ -162,12 +169,12 @@ export async function ocrAvailable() {
  * Worth surfacing because "why is search not finding my scans" has exactly one
  * answer most of the time, and it is this.
  */
-export async function ocrStatus() {
+export async function ocrStatus({ enabled = config.ocr.enabled } = {}) {
   const tools = await detectOcrTools({ force: true });
   const languages = await installedLanguages();
 
   return {
-    enabled: config.ocr.enabled,
+    enabled,
     tesseract: tools.tesseract,
     ocrmypdf: tools.ocrmypdf,
     configuredLanguages: config.ocr.languages,
@@ -280,8 +287,8 @@ async function ocrPdf(absolutePath) {
  *
  * @returns {Promise<{ok: true, text: string, engine: string} | {ok: false, reason: string}>}
  */
-export async function attemptOcr(absolutePath, { filename, mimeType } = {}) {
-  if (!config.ocr.enabled) return { ok: false, reason: 'ocr_disabled' };
+export async function attemptOcr(absolutePath, { filename, mimeType, enabled = config.ocr.enabled } = {}) {
+  if (!enabled) return { ok: false, reason: 'ocr_disabled' };
 
   const tools = await detectOcrTools();
   if (!tools.tesseract.available) return { ok: false, reason: 'ocr_not_installed' };

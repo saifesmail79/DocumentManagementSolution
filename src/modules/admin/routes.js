@@ -38,6 +38,7 @@ import {
 } from './acl.js';
 import { queueStats, extractionStats } from '../extraction/worker.js';
 import { ocrStatus } from '../extraction/ocr.js';
+import { getSetting } from '../settings/service.js';
 import { verifyMail } from '../../lib/mailer.js';
 import { listAudit, auditActions, record, ACTION } from '../audit/service.js';
 import { purgeDeletedDocuments, purgeOrphanedUploads, findMissingBlobs } from '../storage-maintenance/purge.js';
@@ -163,7 +164,9 @@ export async function adminRoutes(app) {
       queue: await queueStats(),
       documents: await extractionStats(),
       // "Why can search not find my scans" almost always has this answer.
-      ocr: await ocrStatus(),
+      // The stored setting, not the environment variable: reporting the value
+      // the operator did not set is how a diagnostics screen becomes a liar.
+      ocr: await ocrStatus({ enabled: await getSetting('ocr.enabled') }),
     }));
 
     /** The audit trail. */
