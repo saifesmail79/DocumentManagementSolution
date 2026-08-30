@@ -154,9 +154,24 @@ export default function ScanPanel({ folderId, onUploaded }) {
   if (status === 'unavailable') {
     return (
       <Alert tone="info">
-        تعذّر الوصول إلى أداة Scan Bridge على هذا الجهاز — إمّا أنّها غير مثبّتة أو غير
-        مشغّلة، أو أنّ هذا الموقع غير مُصرّح له في إعداداتها. يمكنك رفع ملف من القرص
-        كالمعتاد.
+        <p>
+          تعذّر الوصول إلى أداة Scan Bridge على هذا الجهاز — إمّا أنّها غير مثبّتة أو غير
+          مشغّلة، أو أنّ هذا الموقع غير مُصرّح له في إعداداتها. يمكنك رفع ملف من القرص
+          كالمعتاد.
+        </p>
+        {/*
+          The allowlist is matched against this exact origin, so naming it turns
+          "it says not installed" into a report someone can act on. Without it,
+          diagnosing means guessing which of localhost, a LAN address and the
+          machine hostname the browser happened to use — they are different
+          origins and only the ones on the list are served.
+        */}
+        <p className="mt-1 text-xs">
+          العنوان الحالي:{' '}
+          <span dir="ltr" className="font-mono">
+            {window.location.origin}
+          </span>
+        </p>
       </Alert>
     );
   }
