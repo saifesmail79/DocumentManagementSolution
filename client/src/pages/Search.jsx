@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Search as SearchIcon, FileText, Folder, X, SlidersHorizontal, Bookmark, Star } from 'lucide-react';
+import { Search as SearchIcon, FileText, Folder, Layers, X, SlidersHorizontal, Bookmark, Star } from 'lucide-react';
 
 import { api } from '../api.js';
-import { formatDate } from '../format.js';
-import { Card, Spinner, EmptyState, Alert, ReadOnlyBadge } from '../components/ui.jsx';
+import { formatDate, formatBytes } from '../format.js';
+import { Button, Card, Spinner, EmptyState, Alert, ReadOnlyBadge } from '../components/ui.jsx';
 import SearchCriteria from '../components/SearchCriteria.jsx';
+import FilterBar from '../components/FilterBar.jsx';
+import { useDialogs } from '../components/DialogProvider.jsx';
 
 /**
  * Search results.
@@ -27,9 +29,14 @@ export default function Search() {
   const [error, setError] = useState(null);
   const [advanced, setAdvanced] = useState(false);
   const [criteria, setCriteria] = useState({ fields: [] });
+  // The shared parameter filters, identical in shape to the folder listing's.
+  const [filters, setFilters] = useState({});
+  const [sortBy, setSortBy] = useState('updated');
+  const [sortDir, setSortDir] = useState('desc');
   const [facets, setFacets] = useState(null);
   const [snippets, setSnippets] = useState({});
   const [saved, setSaved] = useState([]);
+  const { prompt } = useDialogs();
 
   useEffect(() => {
     setDraft(query);
@@ -91,11 +98,14 @@ export default function Search() {
     try {
       setResults(
         await api.advancedSearch({
+          // Null is fine, and is the point of the parameter mode: a document can
+          // be found by what it IS with no keyword involved at all.
           q: draft.trim() || null,
-          typeId: criteria.typeId || null,
-          labelId: criteria.labelId || null,
-          createdFrom: criteria.createdFrom || null,
-          createdTo: criteria.createdTo || null,
+          // Every parameter filter, in the shape the shared normaliser expects,
+          // so this page and the folder listing ask the same questions.
+          ...filters,
+          sortBy,
+          sortDir,
           // Rows with no field chosen are dropped rather than sent as empty
           // criteria that would narrow nothing and confuse the result count.
           fields: (criteria.fields ?? []).filter((c) => c.fieldId),
@@ -116,12 +126,23 @@ export default function Search() {
   }, []);
 
   async function persist() {
-    const name = window.prompt('اسم البحث المحفوظ');
+    const name = await prompt({
+      title: 'حفظ البحث',
+      message: 'يُحفظ نص البحث ومعاييره تحت اسم تختاره، ويمكن الرجوع إليه لاحقاً.',
+      label: 'اسم البحث',
+      placeholder: 'مثال: عقود لم تُعتمد بعد',
+      confirmLabel: 'حفظ',
+      required: true,
+    });
     if (!name?.trim()) return;
     try {
       await api.saveSearch({
         name: name.trim(),
-        criteria: { q: draft.trim() || null, ...criteria },
+        // Filters are saved alongside the field criteria, not folded into them:
+        // a saved search that quietly dropped "filed by Sara, larger than 10MB"
+        // would return a different result set every time it was reopened, which
+        // is the one thing a saved search must not do.
+        criteria: { q: draft.trim() || null, filters, sortBy, sortDir, ...criteria },
       });
       setSaved((await api.savedSearches()).searches);
     } catch {
@@ -162,19 +183,68 @@ export default function Search() {
         className="flex items-center gap-1.5 text-xs text-text-muted hover:text-primary"
       >
         <SlidersHorizontal size={13} />
-        {advanced ? 'إخفاء البحث المتقدّم' : 'بحث متقدّم'}
+        {advanced ? 'إخفاء البحث بالخصائص' : 'بحث بالخصائص (بدون كلمات)'}
       </button>
 
       {advanced ? (
-        <SearchCriteria
-          value={criteria}
-          onChange={setCriteria}
-          onSearch={runAdvanced}
-          onClear={() => {
-            setCriteria({ fields: [] });
-            setResults(null);
-          }}
-        />
+        <div className="space-y-3">
+          {/*
+            The same bar the folder listing uses, on the same filter shape. It
+            searches the whole tree here rather than one folder, which is the
+            only difference between the two — so no folderId is passed and the
+            offered vocabulary covers everything the user may browse.
+          */}
+          <FilterBar value={filters} onChange={setFilters} />
+
+          <SearchCriteria
+            value={criteria}
+            onChange={setCriteria}
+            // The type is chosen in the bar above; this panel needs it only to
+            // know which custom fields exist for it.
+            typeId={filters.typeId}
+            onSearch={runAdvanced}
+            onClear={() => {
+              setCriteria({ fields: [] });
+              setFilters({});
+              setResults(null);
+            }}
+          />
+
+          <div className="flex flex-wrap items-end gap-3">
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-text-muted">الترتيب حسب</span>
+              <select
+                value={sortBy}
+                onChange={(event) => setSortBy(event.target.value)}
+                className="rounded-lg border border-border bg-control px-3 py-2 text-sm text-text
+                  focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/30"
+              >
+                <option value="updated">آخر تعديل</option>
+                <option value="created">تاريخ الإضافة</option>
+                <option value="title">العنوان</option>
+                <option value="size">الحجم</option>
+              </select>
+            </label>
+
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-text-muted">الاتجاه</span>
+              <select
+                value={sortDir}
+                onChange={(event) => setSortDir(event.target.value)}
+                className="rounded-lg border border-border bg-control px-3 py-2 text-sm text-text
+                  focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/30"
+              >
+                <option value="desc">تنازلي</option>
+                <option value="asc">تصاعدي</option>
+              </select>
+            </label>
+
+            <Button onClick={runAdvanced}>
+              <SearchIcon size={15} />
+              بحث
+            </Button>
+          </div>
+        </div>
       ) : null}
 
       {saved.length > 0 ? (
@@ -184,7 +254,14 @@ export default function Search() {
             <span key={entry.searchId} className="flex items-center gap-1">
               <button
                 onClick={() => {
-                  setCriteria({ fields: [], ...entry.criteria });
+                  const { filters: savedFilters, sortBy: savedSortBy, sortDir: savedSortDir, ...rest } =
+                    entry.criteria ?? {};
+                  setCriteria({ fields: [], ...rest });
+                  // Searches saved before filters existed carry none, and an
+                  // undefined here would leave whatever was last on screen.
+                  setFilters(savedFilters ?? {});
+                  setSortBy(savedSortBy ?? 'updated');
+                  setSortDir(savedSortDir ?? 'desc');
                   setDraft(entry.criteria?.q ?? '');
                   setAdvanced(true);
                 }}
@@ -221,7 +298,13 @@ export default function Search() {
               <Star size={12} />
               حفظ البحث
             </button>
-            {!results.contentSearched ? (
+            {/*
+              Only when a keyword was actually given. A parameter search reads
+              no content by design, so showing "content not indexed yet" for one
+              would report a fault where there is none — and send the user
+              looking for a broken extraction queue.
+            */}
+            {draft.trim() && !results.contentSearched ? (
               <span className="rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-amber-600">
                 بحث في العناوين فقط — لم يُفهرس محتوى الوثائق بعد
               </span>
@@ -273,25 +356,51 @@ export default function Search() {
                           {snippets[item.documentId].text}
                         </p>
                       ) : null}
-                      <button
-                        onClick={() => navigate(`/folders/${item.folderId}`)}
-                        className="mt-0.5 flex items-center gap-1 text-xs text-text-muted hover:text-primary"
-                      >
-                        <Folder size={12} />
-                        {item.folderName}
-                      </button>
+                      <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+                        <button
+                          onClick={() => navigate(`/folders/${item.folderId}`)}
+                          className="flex items-center gap-1 text-xs text-text-muted hover:text-primary"
+                        >
+                          <Folder size={12} />
+                          {item.folderName}
+                        </button>
+                        {/*
+                          The parameters that were filtered on, shown on the row
+                          that matched them. A size filter whose results do not
+                          say how big anything is asks the user to take it on
+                          trust.
+                        */}
+                        {item.multiFile ? (
+                          <span className="num flex items-center gap-1 text-xs text-text-muted">
+                            <Layers size={12} />
+                            {item.fileCount} ملفات
+                          </span>
+                        ) : null}
+                        {item.bytes != null ? (
+                          <span className="num text-xs text-text-muted">{formatBytes(item.bytes)}</span>
+                        ) : null}
+                        {item.createdBy ? (
+                          <span className="text-xs text-text-muted">{item.createdBy}</span>
+                        ) : null}
+                      </div>
                     </div>
                     <span className="num shrink-0 text-xs text-text-muted">
                       {formatDate(item.updatedAt)}
                     </span>
                     {item.canRead ? (
                       <a
-                        href={api.contentUrl(item.documentId)}
+                        // A multi-file document has no single blob; the content
+                        // route refuses it, so the whole set is offered instead.
+                        href={
+                          item.multiFile
+                            ? api.filesZipUrl(item.documentId)
+                            : api.contentUrl(item.documentId)
+                        }
                         target="_blank"
                         rel="noreferrer"
                         className="shrink-0 text-xs text-primary hover:underline"
                       >
-                        فتح
+                        {item.multiFile ? 'تنزيل' : 'فتح'}
                       </a>
                     ) : null}
                   </li>

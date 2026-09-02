@@ -162,7 +162,7 @@ async function authRoutes(app) {
 
       if (!result.ok) {
         const status = result.reason === 'weak_password' ? 400 : 401;
-        return reply.code(status).send({ error: result.reason, problems: result.problems });
+        return reply.code(status).send({ error: result.reason, problems: result.problems, details: result.details });
       }
 
       await record({ actor: request.user, action: ACTION.PASSWORD_CHANGED, request });
@@ -198,7 +198,7 @@ async function authRoutes(app) {
 
     if (!result.ok) {
       const status = result.reason === 'weak_password' ? 400 : 400;
-      return reply.code(status).send({ error: result.reason, problems: result.problems });
+      return reply.code(status).send({ error: result.reason, problems: result.problems, details: result.details });
     }
 
     await record({ action: ACTION.PASSWORD_RESET_COMPLETED, request });

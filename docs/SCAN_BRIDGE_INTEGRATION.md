@@ -308,6 +308,7 @@ runtime error, and no retry will fix it.
 | `color_mode_not_configurable` | driver would not expose colour mode |
 | `vertical_dpi_not_applied` | horizontal DPI applied, vertical did not |
 | `extent_not_configurable` | scan area could not be set explicitly |
+| `scan_area_trimmed` | the device scanned a smaller area than it allocated; the unexposed remainder was cut away. **The page is complete, but `dpi` on each page is now the resolution actually achieved, which is lower than the one requested.** Size your PDF pages from `page.dpi`, never from the DPI you asked for |
 | `feeder_unavailable_using_flatbed` | asked for feeder, device has none |
 | `flatbed_unavailable_using_feeder` | asked for flatbed, device has none |
 

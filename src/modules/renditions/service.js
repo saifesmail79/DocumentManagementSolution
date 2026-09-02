@@ -44,7 +44,42 @@ const IMAGE = /\.(png|jpe?g|tiff?|bmp|webp|gif)$/i;
 const OFFICE = /\.(docx?|xlsx?|pptx?|odt|ods|odp|rtf)$/i;
 const PDF = /\.pdf$/i;
 
+/**
+ * Images every browser draws natively. For these the stored file is already its
+ * own best preview, so no rendition is made and the viewer is pointed at the
+ * content route instead — full resolution, and served from cache on a re-open.
+ *
+ * TIFF is the one that matters by its absence: it is what a scanner produces and
+ * what a large share of this system's documents are, and no browser has ever
+ * displayed it. Without a rendition, "preview the row" would work for everything
+ * except the format the system is mostly fed.
+ */
+const BROWSER_SAFE_IMAGE = /\.(png|jpe?g|gif|webp)$/i;
+
 const THUMBNAIL_WIDTH = 320;
+
+/**
+ * Wide enough that Arabic body text in a 300 dpi A4 scan stays legible when the
+ * preview pane is opened full width, and small enough that it is a fraction of
+ * the original — the point of a preview is not downloading the original.
+ */
+const PREVIEW_WIDTH = 1600;
+
+/**
+ * sharp's own guard against a decompression bomb, named once instead of repeated
+ * as a bare number at every call site.
+ */
+const SAFE_PIXELS = 268_402_689;
+
+/**
+ * How many pages of a scan the preview will build.
+ *
+ * A bound is needed — a thousand-page TIFF would exhaust the worker's memory and
+ * take the whole rendition queue with it — but it is set far above any real
+ * scanned document so that reaching it is a reportable event rather than a
+ * routine one.
+ */
+const MAX_PREVIEW_PAGES = 200;
 
 /**
  * The environment LibreOffice is given, which keeps it away from the printer.
@@ -201,11 +236,20 @@ export async function renditionStatus() {
     if (name) queue[name] = Number(row.total);
   }
 
+  /*
+   * Measured from when the job was CLAIMED, not when it was enqueued.
+   *
+   * `queued_at` counted a job that had merely waited a long time in the queue as
+   * stuck, and would have gone on counting it while it ran perfectly normally.
+   * The two states need different responses, so they need different clocks.
+   */
   const stuck = await sql`
     SELECT COUNT(*) AS n FROM dbo.rendition_queue
      WHERE status = ${QUEUE.RUNNING}
-       AND queued_at IS NOT NULL
-       AND DATEDIFF(minute, queued_at, SYSUTCDATETIME()) > 30
+       AND (
+             started_at IS NULL
+             OR DATEDIFF(second, started_at, SYSUTCDATETIME()) > ${Math.floor(STALE_CLAIM_MS / 1000)}
+           )
   `.execute(db);
 
   const recent = await sql`
@@ -239,30 +283,83 @@ export async function renditionStatus() {
   };
 }
 
-/** Queues a version for a rendition. Called after upload, alongside extraction. */
-export async function enqueueRendition(trx, documentId, versionNumber, kind = 'thumbnail') {
+/**
+ * Queues a rendition. Called after upload, alongside extraction.
+ *
+ * `fileId` names one constituent of a multi-file document; NULL means the
+ * document's own current version. Both live in this queue and are drained by
+ * the same worker — the only thing that differs is which row supplies the
+ * source path.
+ */
+export async function enqueueRendition(trx, documentId, versionNumber, kind = 'thumbnail', fileId = null) {
   await sql`
     MERGE dbo.rendition_queue WITH (HOLDLOCK) AS target
-    USING (SELECT ${documentId} AS document_id, ${versionNumber} AS version_number, ${kind} AS kind) AS source
+    USING (SELECT ${documentId} AS document_id, ${versionNumber} AS version_number,
+                  ${kind} AS kind, ${fileId} AS file_id) AS source
        ON target.document_id = source.document_id
       AND target.version_number = source.version_number
       AND target.kind = source.kind
+      -- Compared with an IS NULL pair rather than equality: SQL's NULL = NULL is
+      -- unknown, so an equality-only join would never match an existing
+      -- document-level row and every call would try to insert a duplicate.
+      AND (target.file_id = source.file_id
+           OR (target.file_id IS NULL AND source.file_id IS NULL))
     WHEN MATCHED THEN
       UPDATE SET status = 0, attempts = 0, last_error = NULL, queued_at = SYSUTCDATETIME(), finished_at = NULL
     WHEN NOT MATCHED THEN
-      INSERT (document_id, version_number, kind)
-      VALUES (source.document_id, source.version_number, source.kind);
+      INSERT (document_id, version_number, kind, file_id)
+      VALUES (source.document_id, source.version_number, source.kind, source.file_id);
   `.execute(trx);
 }
 
+/**
+ * How long a rendition may sit claimed before another worker may take it.
+ *
+ * Must exceed the slowest legitimate job, which here is a LibreOffice
+ * conversion of a large document — those are measured in tens of seconds, so
+ * fifteen minutes is far beyond any honest run.
+ */
+const STALE_CLAIM_MS = 15 * 60 * 1000;
+
+/**
+ * Atomically claims one job.
+ *
+ * ─── Why RUNNING is reclaimable ─────────────────────────────────────────────
+ *
+ * A worker that dies mid-job leaves its row in RUNNING, and this used to select
+ * only PENDING and RETRYABLE — so nothing ever moved that row again. The
+ * document kept its place in every listing and simply never got a thumbnail,
+ * with no error recorded and no sign of a problem. A routine server restart
+ * produced it, which is how three documents ended up stranded here.
+ *
+ * The extraction queue already worked this way; this is the same recovery,
+ * arriving late. `attempts` still increments, so a job that reliably kills its
+ * worker exhausts its retries and stops rather than looping forever.
+ *
+ * A NULL `started_at` on a RUNNING row means the row predates migration 0011 —
+ * it was stranded before the column existed, so it is exactly the kind of row
+ * this is meant to recover.
+ */
 async function claim(maxAttempts) {
   const result = await sql`
     UPDATE TOP (1) q
-       SET status = ${QUEUE.RUNNING}, attempts = q.attempts + 1
+       SET status = ${QUEUE.RUNNING},
+           started_at = SYSUTCDATETIME(),
+           attempts = q.attempts + 1
       OUTPUT INSERTED.queue_id, INSERTED.document_id, INSERTED.version_number,
-             INSERTED.kind, INSERTED.attempts
+             INSERTED.kind, INSERTED.attempts, INSERTED.file_id, INSERTED.file_id
       FROM dbo.rendition_queue AS q WITH (READPAST, UPDLOCK, ROWLOCK)
-     WHERE q.status IN (${QUEUE.PENDING}, ${QUEUE.RETRYABLE}) AND q.attempts < ${maxAttempts}
+     WHERE (
+             q.status IN (${QUEUE.PENDING}, ${QUEUE.RETRYABLE})
+             OR (
+               q.status = ${QUEUE.RUNNING}
+               AND (
+                     q.started_at IS NULL
+                     OR DATEDIFF(second, q.started_at, SYSUTCDATETIME()) > ${Math.floor(STALE_CLAIM_MS / 1000)}
+                   )
+             )
+           )
+       AND q.attempts < ${maxAttempts}
   `.execute(db);
 
   return result.rows[0] ?? null;
@@ -282,13 +379,46 @@ export async function processOne({ maxAttempts = 3 } = {}) {
   const job = await claim(maxAttempts);
   if (!job) return { claimed: false };
 
-  const { queue_id: queueId, document_id: documentId, version_number: versionNumber, kind } = job;
+  const {
+    queue_id: queueId,
+    document_id: documentId,
+    version_number: versionNumber,
+    kind,
+    file_id: fileId,
+  } = job;
 
   try {
-    const found = await sql`
-      SELECT storage_path, original_filename, mime_type FROM dbo.document_versions
-       WHERE document_id = ${documentId} AND version_number = ${versionNumber}
-    `.execute(db);
+    // Version 0 is the multi-file document's key — dbo.document_versions
+    // constrains version_number >= 1, so it can never collide with a real
+    // version. A thumbnail stands for the whole document in a listing, and the
+    // first constituent file is the one a reader would recognise it by, so that
+    // is what gets rendered. The other files are reachable from the document
+    // itself; a listing has room for one image.
+    /*
+     * Three sources, in order of specificity.
+     *
+     * A named file is rendered for itself — that is what makes previewing one
+     * constituent of a multi-file document possible at all. Without a file id,
+     * version 0 still means "the whole multi-file document", whose stand-in is
+     * its first constituent, and anything else is an ordinary version.
+     */
+    const found = fileId
+      ? await sql`
+          SELECT storage_path, original_filename, mime_type
+            FROM dbo.document_files
+           WHERE document_id = ${documentId} AND file_id = ${fileId}
+        `.execute(db)
+      : Number(versionNumber) === 0
+        ? await sql`
+            SELECT TOP (1) storage_path, original_filename, mime_type
+              FROM dbo.document_files
+             WHERE document_id = ${documentId}
+             ORDER BY sort_order ASC
+          `.execute(db)
+        : await sql`
+            SELECT storage_path, original_filename, mime_type FROM dbo.document_versions
+             WHERE document_id = ${documentId} AND version_number = ${versionNumber}
+          `.execute(db);
 
     const version = found.rows[0];
     if (!version) {
@@ -308,21 +438,28 @@ export async function processOne({ maxAttempts = 3 } = {}) {
       return { claimed: true, outcome: 'unsupported' };
     }
 
-    const relativePath = `renditions/${documentId}/${versionNumber}-${kind}.${produced.extension}`;
+    // The file id is part of the path as well as the key: two constituents of
+    // one document would otherwise write to the same name and the second would
+    // silently overwrite the first.
+    const scope = fileId ? `${versionNumber}-f${fileId}` : String(versionNumber);
+    const relativePath = `renditions/${documentId}/${scope}-${kind}.${produced.extension}`;
     await storage.putBuffer(produced.buffer, relativePath);
 
     await sql`
       MERGE dbo.document_renditions WITH (HOLDLOCK) AS target
-      USING (SELECT ${documentId} AS document_id, ${versionNumber} AS version_number, ${kind} AS kind) AS source
+      USING (SELECT ${documentId} AS document_id, ${versionNumber} AS version_number,
+                    ${kind} AS kind, ${fileId ?? null} AS file_id) AS source
          ON target.document_id = source.document_id
         AND target.version_number = source.version_number
         AND target.kind = source.kind
+        AND (target.file_id = source.file_id
+             OR (target.file_id IS NULL AND source.file_id IS NULL))
       WHEN MATCHED THEN
         UPDATE SET storage_path = ${relativePath}, mime_type = ${produced.mimeType},
                    bytes = ${produced.buffer.length}, created_at = SYSUTCDATETIME()
       WHEN NOT MATCHED THEN
-        INSERT (document_id, version_number, kind, storage_path, mime_type, bytes)
-        VALUES (source.document_id, source.version_number, source.kind,
+        INSERT (document_id, version_number, kind, file_id, storage_path, mime_type, bytes)
+        VALUES (source.document_id, source.version_number, source.kind, source.file_id,
                 ${relativePath}, ${produced.mimeType}, ${produced.buffer.length});
     `.execute(db);
 
@@ -341,7 +478,7 @@ async function buildThumbnail(absolutePath, filename) {
   const sharp = (await import('sharp')).default;
 
   if (IMAGE.test(filename)) {
-    const buffer = await sharp(absolutePath, { limitInputPixels: 268_402_689 })
+    const buffer = await sharp(absolutePath, { limitInputPixels: SAFE_PIXELS })
       .resize({ width: THUMBNAIL_WIDTH, withoutEnlargement: true })
       .webp({ quality: 78 })
       .toBuffer();
@@ -384,10 +521,93 @@ async function buildThumbnail(absolutePath, filename) {
 }
 
 /**
- * A browser-viewable rendition. For Office files that means a PDF, which the
- * existing iframe preview already knows how to display.
+ * Every page of a multi-page scan, assembled into one PDF.
+ *
+ * sharp decodes the pages and pdf-lib binds them; both are already dependencies,
+ * so this needs no external tool and cannot fail for the reason the Office path
+ * fails — a missing LibreOffice on the host.
+ *
+ * Each page becomes a JPEG rather than PNG: these are photographs of paper, and
+ * the lossless format triples the size of a rendition whose whole purpose is to
+ * be quick to open. The page box is set to the image's own pixel size so the
+ * viewer's "actual size" means what it says.
+ */
+async function scanToPdf(absolutePath, pages) {
+  const sharp = (await import('sharp')).default;
+  const { PDFDocument } = await import('pdf-lib');
+
+  const wanted = Math.min(pages, MAX_PREVIEW_PAGES);
+  if (pages > MAX_PREVIEW_PAGES) {
+    // Loud, because the alternative is the silent truncation this whole change
+    // exists to remove. The original is always downloadable in full.
+    log.warn(
+      { pages, rendered: wanted, limit: MAX_PREVIEW_PAGES },
+      'scan has more pages than the preview limit; the rest are not rendered',
+    );
+  }
+
+  const pdf = await PDFDocument.create();
+
+  for (let page = 0; page < wanted; page += 1) {
+    const jpeg = await sharp(absolutePath, { page, limitInputPixels: SAFE_PIXELS })
+      .resize({ width: PREVIEW_WIDTH, withoutEnlargement: true })
+      .jpeg({ quality: 82 })
+      .toBuffer();
+
+    const embedded = await pdf.embedJpg(jpeg);
+    const sheet = pdf.addPage([embedded.width, embedded.height]);
+    sheet.drawImage(embedded, { x: 0, y: 0, width: embedded.width, height: embedded.height });
+  }
+
+  return {
+    buffer: Buffer.from(await pdf.save()),
+    mimeType: 'application/pdf',
+    extension: 'pdf',
+  };
+}
+
+/**
+ * A browser-viewable rendition, chosen by what the file actually is.
+ *
+ * ─── Which form, and why ───────────────────────────────────────────────
+ *
+ *   Office             → PDF. The browser's own viewer then supplies zoom,
+ *                        rotate, page navigation and print, none of which this
+ *                        application would otherwise have to build.
+ *   multi-page scan    → PDF, for the same reason plus a larger one: it is the
+ *                        only form that can carry more than one page.
+ *   single-page scan   → WebP. One page needs no page navigation, and an image
+ *                        is a fraction of the bytes of a one-page PDF.
+ *   browser-native     → nothing. PNG, JPEG, GIF, WebP and PDF are served as
+ *                        themselves; a rendition would be a second, worse copy
+ *                        of a file already on disk.
+ *
+ * ─── Why multi-page TIFF stopped being an image ────────────────────────
+ *
+ * It used to become a single WebP of page one, because that is sharp's default
+ * for a multi-page input. Every page after the first was then unreachable
+ * anywhere in the application — not listed, not counted, not mentioned. A
+ * two-page decision looked exactly like a one-page decision, and the reader had
+ * no way to discover the difference existed. That is the worst kind of failure
+ * this system can have: not an error, but a document quietly shown incomplete.
  */
 async function buildPreview(absolutePath, filename) {
+  if (IMAGE.test(filename) && !BROWSER_SAFE_IMAGE.test(filename)) {
+    const sharp = (await import('sharp')).default;
+
+    const meta = await sharp(absolutePath, { limitInputPixels: SAFE_PIXELS }).metadata();
+    const pages = Number(meta.pages ?? 1);
+
+    if (pages > 1) return scanToPdf(absolutePath, pages);
+
+    const buffer = await sharp(absolutePath, { limitInputPixels: SAFE_PIXELS })
+      .resize({ width: PREVIEW_WIDTH, withoutEnlargement: true })
+      .webp({ quality: 82 })
+      .toBuffer();
+
+    return { buffer, mimeType: 'image/webp', extension: 'webp' };
+  }
+
   if (!OFFICE.test(filename)) return null;
 
   const pdf = await convertToPdf(absolutePath);
@@ -497,15 +717,76 @@ async function rasterisePdfFirstPage(pdfPath) {
   }
 }
 
+/**
+ * The queue entry for a version, if one was ever made.
+ *
+ * Exists so a caller can tell "not rendered yet" from "will never be rendered".
+ * Without it the only observable state is the absence of a rendition, and the
+ * only reasonable response to that is to queue the work — forever, for a file
+ * type that has no renderer, because `enqueueRendition` resets a SKIPPED row
+ * straight back to PENDING. One request an hour made that invisible; a preview
+ * pane that asks as the user moves down the list does not.
+ */
+export async function getRenditionJob({ documentId, versionNumber, kind, fileId = null }) {
+  const result = await sql`
+    SELECT status, attempts, last_error FROM dbo.rendition_queue
+     WHERE document_id = ${documentId} AND version_number = ${versionNumber} AND kind = ${kind}
+       AND (file_id = ${fileId} OR (file_id IS NULL AND ${fileId} IS NULL))
+  `.execute(db);
+
+  const row = result.rows[0];
+  return row
+    ? { status: Number(row.status), attempts: Number(row.attempts), lastError: row.last_error }
+    : null;
+}
+
 /** The stored rendition for a version, if one exists. */
-export async function getRendition({ documentId, versionNumber, kind }) {
+export async function getRendition({ documentId, versionNumber, kind, fileId = null }) {
   const result = await sql`
     SELECT storage_path, mime_type, bytes FROM dbo.document_renditions
      WHERE document_id = ${documentId} AND version_number = ${versionNumber} AND kind = ${kind}
+       AND (file_id = ${fileId} OR (file_id IS NULL AND ${fileId} IS NULL))
   `.execute(db);
 
   const row = result.rows[0];
   return row ? { storagePath: row.storage_path, mimeType: row.mime_type, bytes: Number(row.bytes) } : null;
+}
+
+/**
+ * Re-queues finished renditions so they are built again by the current rules.
+ *
+ * ─── Why this has to exist ────────────────────────────────────────────
+ *
+ * A rendition is derived data that is nevertheless stored, so it records not
+ * what the file is but what the renderer believed when it last ran. Change the
+ * rules — as making multi-page scans into PDFs did — and every document rendered
+ * under the old rules keeps showing the old answer for ever. Nothing expires
+ * them and nothing notices they are stale.
+ *
+ * That is how a fix ships and does not arrive: the code is right, the tests
+ * pass, and the one two-page document in the system still previews as one page
+ * because its rendition was built last month. Rebuilding is the step that lets a
+ * corrected renderer reach documents that already exist.
+ *
+ * Only the queue is touched. The existing rendition stays readable until its
+ * replacement has been built and written, so a rebuild that fails or is
+ * interrupted costs nothing.
+ */
+export async function rebuildRenditions({ kind = 'preview' } = {}) {
+  const result = await sql`
+    UPDATE q
+       SET status = ${QUEUE.PENDING}, attempts = 0, last_error = NULL,
+           queued_at = SYSUTCDATETIME(), finished_at = NULL
+      OUTPUT INSERTED.document_id
+      FROM dbo.rendition_queue q
+      JOIN dbo.documents d ON d.document_id = q.document_id
+     WHERE q.kind = ${kind}
+       AND d.is_deleted = 0
+  `.execute(db);
+
+  const queued = result.rows.length;
+  log.info({ kind, queued }, 'renditions queued for rebuild');
+  return { kind, queued };
 }
 
 export async function drainQueue({ max = 20 } = {}) {

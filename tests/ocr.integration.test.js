@@ -55,6 +55,31 @@ const RECOGNISED = 'هذا نصٌ مُستخرَج ضوئياً ويحتوي ك�
 /** A file that is an image by extension and a printing program by content. */
 const STUB_SCAN = `console.log(${JSON.stringify(RECOGNISED)});`;
 
+/** The page segmentation mode this invocation was asked for. */
+const STUB_READS_PSM = `
+  const i = process.argv.indexOf('--psm');
+  const psm = i >= 0 ? process.argv[i + 1] : 'none';
+`;
+
+/**
+ * A page the first segmentation mode abandons.
+ *
+ * Mode 1 runs orientation detection first, and when it cannot decide it gives
+ * up on the whole page and prints nothing — exit 0, no output, no warning. This
+ * stub reproduces that exactly, and answers a later mode normally.
+ */
+const STUB_ONLY_FALLBACK_READS = `
+  ${STUB_READS_PSM}
+  if (psm === '1') process.exit(0);
+  console.log(${JSON.stringify(RECOGNISED)});
+`;
+
+/** Announces which mode produced the text, so the order of attempts is observable. */
+const STUB_NAMES_ITS_MODE = `
+  ${STUB_READS_PSM}
+  console.log(${JSON.stringify(RECOGNISED)} + ' الوضع' + psm);
+`;
+
 async function makeUser(username) {
   const { hashPassword } = await import('../src/modules/auth/passwords.js');
   const hash = await hashPassword(PASSWORD);
@@ -379,6 +404,58 @@ describe('OCR', { skip: CONFIGURED ? false : target.reason }, () => {
     const reason = queued.rows[0].last_error ?? '';
     assert.match(reason, /ocr_failed/, 'the category is still recorded');
     assert.match(reason, /exited 3/, 'and so is what the engine actually reported');
+  });
+
+  /**
+   * A page the first segmentation mode gives up on is not a page with no text.
+   *
+   * ─── The failure this guards ────────────────────────────────────────────
+   *
+   * Mode 1 detects orientation before reading, which is what stops a scan fed
+   * upside down being indexed as mirrored nonsense. When it cannot decide an
+   * orientation it does not fall back — it abandons the page and prints nothing
+   * at all, exit code 0.
+   *
+   * Two photographs of an Iraqi residence card landed in exactly that hole.
+   * Both were perfectly legible to a person; both produced ZERO characters and
+   * were filed as `ocr_found_no_text`, which reads as "this image has no text
+   * on it" and is the opposite of what was true.
+   */
+  test('a page the first segmentation mode abandons is read by a later one', async () => {
+    const documentId = await upload(cookie, 'stubborn.png', STUB_ONLY_FALLBACK_READS);
+
+    await worker.drainQueue();
+
+    const row = await statusOf(documentId);
+    assert.equal(
+      Number(row.extraction_status),
+      worker.DOC_EXTRACTION.OCR_EXTRACTED,
+      'a page only a fallback mode can read was recorded as having no text',
+    );
+    assert.ok(row.content_normalized?.length > 0);
+  });
+
+  /**
+   * The other half: a page the first mode reads must cost exactly one pass.
+   *
+   * Falling through every mode on every document would multiply the cost of the
+   * slowest thing this system does, for no gain on the pages that already work.
+   */
+  test('a page the first segmentation mode reads is not run again', async () => {
+    const documentId = await upload(cookie, 'straightforward.png', STUB_NAMES_ITS_MODE);
+
+    await worker.drainQueue();
+
+    const row = await statusOf(documentId);
+    assert.match(
+      row.content_normalized,
+      /الوضع1/,
+      'the first mode succeeded, so its result must be the one kept',
+    );
+    assert.ok(
+      !/الوضع6|الوضع11/.test(row.content_normalized),
+      'a later mode ran even though the first had already read the page',
+    );
   });
 
   test('a filename with shell metacharacters is passed safely', async () => {

@@ -5,34 +5,34 @@ import { api } from '../api.js';
 import { Button, Card, TextField } from './ui.jsx';
 
 /**
- * The multi-criteria search form.
+ * Criteria against the admin-defined metadata fields.
  *
  * The field list comes from the server and changes with the selected type, so a
  * deployment that defines its own vocabulary gets its own form with no change
  * here. Each criterion carries the field's data type as `op`, because the server
  * uses it to pick which typed column to compare — a number filter must not
  * become a string comparison on the way through.
+ *
+ * ─── Scope ──────────────────────────────────────────────────────────────────
+ *
+ * Custom fields only. Type, label and the date ranges used to live here too and
+ * now belong to the filter bar, which asks the same questions on the folder
+ * listing. Keeping both would have meant two controls for one filter, on one
+ * screen, with only one of them reaching the server.
  */
-export default function SearchCriteria({ value, onChange, onSearch, onClear }) {
-  const [types, setTypes] = useState([]);
-  const [labels, setLabels] = useState([]);
+export default function SearchCriteria({ value, onChange, onSearch, onClear, typeId = null }) {
   const [fields, setFields] = useState([]);
 
-  useEffect(() => {
-    Promise.all([api.metadata.types(), api.metadata.labels()])
-      .then(([t, l]) => {
-        setTypes(t.types);
-        setLabels(l.labels);
-      })
-      .catch(() => {});
-  }, []);
-
+  // Which custom fields exist depends on the chosen document type, and the type
+  // is chosen in the filter bar — so it arrives as a prop rather than being
+  // asked for twice. Two controls for one question is how the two copies come
+  // to disagree, and only one of them can be the one the server is told about.
   useEffect(() => {
     api.metadata
-      .fields(value.typeId || undefined)
+      .fields(typeId || undefined)
       .then((result) => setFields(result.fields))
       .catch(() => setFields([]));
-  }, [value.typeId]);
+  }, [typeId]);
 
   const set = (patch) => onChange({ ...value, ...patch });
 
@@ -54,64 +54,8 @@ export default function SearchCriteria({ value, onChange, onSearch, onClear }) {
     <Card className="p-4">
       <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-text">
         <SlidersHorizontal size={15} className="text-primary" />
-        بحث متقدّم
+        قيود على الحقول الوصفية
       </h3>
-
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <label className="block">
-          <span className="mb-1.5 block text-sm font-medium text-text">النوع</span>
-          <select
-            value={value.typeId ?? ''}
-            onChange={(event) => set({ typeId: event.target.value, fields: [] })}
-            className={selectClass}
-          >
-            <option value="">أي نوع</option>
-            {types.map((type) => (
-              <option key={type.typeId} value={type.typeId}>
-                {type.name}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="block">
-          <span className="mb-1.5 block text-sm font-medium text-text">درجة السرية</span>
-          <select
-            value={value.labelId ?? ''}
-            onChange={(event) => set({ labelId: event.target.value })}
-            className={selectClass}
-          >
-            <option value="">أي درجة</option>
-            {labels.map((label) => (
-              <option key={label.labelId} value={label.labelId}>
-                {label.name}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="block">
-          <span className="mb-1.5 block text-sm font-medium text-text">من تاريخ</span>
-          <input
-            type="date"
-            dir="ltr"
-            value={value.createdFrom ?? ''}
-            onChange={(event) => set({ createdFrom: event.target.value })}
-            className={selectClass}
-          />
-        </label>
-
-        <label className="block">
-          <span className="mb-1.5 block text-sm font-medium text-text">إلى تاريخ</span>
-          <input
-            type="date"
-            dir="ltr"
-            value={value.createdTo ?? ''}
-            onChange={(event) => set({ createdTo: event.target.value })}
-            className={selectClass}
-          />
-        </label>
-      </div>
 
       {(value.fields ?? []).length > 0 ? (
         <div className="mt-3 space-y-2">

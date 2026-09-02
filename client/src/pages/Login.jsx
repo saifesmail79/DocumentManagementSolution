@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { LogIn, FileText } from 'lucide-react';
+import { useBranding } from '../branding.js';
 
 import { useAuth } from '../auth.jsx';
 import { ApiError } from '../api.js';
@@ -16,6 +17,7 @@ const MESSAGES = {
 };
 
 export default function Login() {
+  const brandName = useBranding();
   const { signIn } = useAuth();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -51,7 +53,7 @@ export default function Login() {
           <div className="rounded-xl bg-primary/10 p-3">
             <FileText size={24} className="text-primary" />
           </div>
-          <h1 className="text-lg font-semibold text-text">نظام إدارة الوثائق</h1>
+          <h1 className="text-lg font-semibold text-text">{brandName}</h1>
           <p className="text-xs text-text-muted">سجّل الدخول للمتابعة</p>
         </div>
 

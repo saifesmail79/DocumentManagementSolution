@@ -21,6 +21,8 @@ let db;
 let sql;
 let app;
 let PERM;
+let storage;
+let purgeDeletedDocuments;
 
 const PASSWORD = 'correct-horse-battery-staple';
 const id = {};
@@ -66,6 +68,32 @@ async function makeDocument(title, folderName, creator = 'reader') {
   return r.rows[0].did;
 }
 
+/**
+ * Gives a document a real version row, and the file on disk to match.
+ *
+ * A document with no version is not a lesser fixture, it is a different state:
+ * the product treats "nothing to restore" as content already purged, so a
+ * fixture without one cannot stand in for a restorable document.
+ */
+async function addVersion(documentId, { bytes = 'x' } = {}) {
+  const { createHash } = await import('node:crypto');
+  const body = Buffer.from(bytes);
+  const sha = createHash('sha256').update(body).digest('hex');
+  const storagePath = `test/${documentId}_v1.bin`;
+
+  await storage.putBuffer(body, storagePath);
+  await sql`
+    INSERT INTO dbo.document_versions
+      (document_id, version_number, storage_path, file_size_bytes, sha256, mime_type, uploaded_by)
+    VALUES (${documentId}, 1, ${storagePath}, ${body.length}, ${sha},
+            'application/octet-stream', ${id.reader})
+  `.execute(db);
+  await sql`
+    UPDATE dbo.documents SET current_version = 1 WHERE document_id = ${documentId}
+  `.execute(db);
+  return storagePath;
+}
+
 async function grant(folderName, principalId, allow, deny = 0) {
   await sql`
     INSERT INTO dbo.access_control_entries (folder_id, principal_id, allow_bits, deny_bits)
@@ -101,6 +129,12 @@ describe('filing tree routes', { skip: CONFIGURED ? false : target.reason }, () 
 
     const { buildApp } = await import('../src/app.js');
     app = await buildApp({ logger: false });
+
+    // The real sweep and the real driver: a folder that cannot be deleted after
+    // a purge is only visible if the purge that ran was the product's own.
+    ({ storage } = await import('../src/storage/index.js'));
+    await storage.init();
+    ({ purgeDeletedDocuments } = await import('../src/modules/storage-maintenance/purge.js'));
 
     await makeUser('reader');
     await makeUser('browser');
@@ -164,6 +198,61 @@ describe('filing tree routes', { skip: CONFIGURED ? false : target.reason }, () 
       assert.equal(doc.canRead, true);
     }
     assert.equal(body.folder.permissions.read, true);
+  });
+
+  /**
+   * The listing carries the current version's descriptor so the row preview can
+   * decide whether the browser draws the file itself or has to ask for a
+   * rendition — without a request per row to find out.
+   *
+   * That descriptor travels with `canRead`, not with the title, because it is
+   * content rather than existence. A filename is routinely the most revealing
+   * thing about a document: "استقالة المدير 2026.pdf" discloses precisely what a
+   * browse-only grant is meant to withhold, and its size and type narrow it
+   * further.
+   */
+  test('the file descriptor follows Read, not Browse', async () => {
+    // Given a version rather than a new document, so the counts the later
+    // deletion test asserts on stay what they were.
+    const found = await sql`
+      SELECT document_id FROM dbo.documents WHERE title = ${'عقد التوريد'}
+    `.execute(db);
+    const documentId = found.rows[0].document_id;
+
+    await sql`
+      INSERT INTO dbo.document_versions
+             (document_id, version_number, storage_path, original_filename,
+              file_size_bytes, sha256, mime_type, uploaded_by)
+      VALUES (${documentId}, 1, ${`descriptor/${documentId}.tiff`}, 'مسح ضوئي.tiff',
+              4096, ${'a'.repeat(64)}, 'image/tiff', ${id.reader})
+    `.execute(db);
+    // The join is on the current version, and a document starts at version 0.
+    await sql`
+      UPDATE dbo.documents SET current_version = 1 WHERE document_id = ${documentId}
+    `.execute(db);
+
+    const find = (body) => body.documents.find((d) => d.title === 'عقد التوريد');
+
+    const reader = find((await get(`/api/folders/${id.contracts}`, readerCookie)).json());
+    assert.equal(reader.mimeType, 'image/tiff');
+    assert.equal(reader.originalFilename, 'مسح ضوئي.tiff');
+    assert.equal(reader.bytes, 4096);
+
+    const browser = find((await get(`/api/folders/${id.contracts}`, browserCookie)).json());
+    assert.equal(browser.title, 'عقد التوريد', 'browse still sees that it exists');
+    assert.equal(browser.mimeType, null);
+    assert.equal(browser.originalFilename, null);
+    assert.equal(browser.bytes, null);
+  });
+
+  /** A document row can predate its first version; the join must not drop it. */
+  test('a document with no version yet still appears', async () => {
+    const body = (await get(`/api/folders/${id.contracts}`, readerCookie)).json();
+    const versionless = body.documents.find((d) => d.title === 'عقد الإيجار');
+
+    assert.ok(versionless, 'a versionless document must still be listed');
+    assert.equal(versionless.mimeType, null);
+    assert.equal(versionless.bytes, null);
   });
 
   // ── Absence, not refusal ───────────────────────────────────────────────
@@ -338,6 +427,223 @@ describe('filing tree routes', { skip: CONFIGURED ? false : target.reason }, () 
 
     const after = (await get(`/api/folders/${id.contracts}`, readerCookie)).json();
     assert.equal(after.documents.length, 2);
+  });
+
+  // ── Deleting folders ───────────────────────────────────────────────────
+
+  /**
+   * A folder that still holds anything is refused, with the count.
+   *
+   * The alternative — cascading — is the most destructive thing this system
+   * could offer and the one an accidental click can least afford. The counts
+   * travel with the refusal so the caller can say what is in the way rather
+   * than only that something is.
+   */
+  test('an empty folder can be deleted, a full one cannot', async () => {
+    const empty = await makeFolder('spare', 'cabinet');
+    await grant('spare', id.reader, PERM.BROWSE | PERM.READ | PERM.DELETE);
+
+    const gone = await app.inject({
+      method: 'DELETE',
+      url: `/api/folders/${empty}`,
+      headers: { cookie: readerCookie },
+    });
+    assert.equal(gone.statusCode, 204, gone.body);
+
+    const check = await sql`SELECT is_deleted FROM dbo.folders WHERE folder_id = ${empty}`.execute(db);
+    assert.equal(Number(check.rows[0].is_deleted), 1, 'the delete is soft, so the row survives');
+
+    // A folder the same user may delete, so the refusal is about emptiness and
+    // not about permission — the two checks are deliberately ordered, and this
+    // asserts the second one.
+    const stocked = await makeFolder('stocked', 'cabinet');
+    await grant('stocked', id.reader, PERM.BROWSE | PERM.READ | PERM.DELETE);
+    await makeDocument('ورقة', 'stocked');
+
+    const refused = await app.inject({
+      method: 'DELETE',
+      url: `/api/folders/${stocked}`,
+      headers: { cookie: readerCookie },
+    });
+    assert.equal(refused.statusCode, 409);
+    assert.equal(refused.json().error, 'not_empty');
+    assert.equal(refused.json().documents, 1, 'the refusal should count what is in the way');
+  });
+
+  /** Permission is checked before emptiness, so a refusal never leaks a count. */
+  test('someone without delete is refused before the contents are counted', async () => {
+    const stocked = await makeFolder('counted', 'cabinet');
+    await makeDocument('ورقة أخرى', 'counted');
+
+    // reader holds browse+read+upload on cabinet, inherited here — but no delete.
+    const response = await app.inject({
+      method: 'DELETE',
+      url: `/api/folders/${stocked}`,
+      headers: { cookie: readerCookie },
+    });
+
+    assert.equal(response.statusCode, 403);
+    assert.equal(response.json().documents, undefined, 'a forbidden answer must not carry a count');
+  });
+
+  /** A soft-deleted document still belongs to its folder and still blocks. */
+  test('a folder holding only a deleted document is still not empty', async () => {
+    const binned = await makeFolder('binned', 'cabinet');
+    await grant('binned', id.reader, PERM.BROWSE | PERM.READ | PERM.DELETE);
+    const documentId = await makeDocument('مسودة ملغاة', 'binned');
+    await addVersion(documentId);
+    await sql`
+      UPDATE dbo.documents SET is_deleted = 1, deleted_at = SYSUTCDATETIME()
+       WHERE document_id = ${documentId}
+    `.execute(db);
+
+    const response = await app.inject({
+      method: 'DELETE',
+      url: `/api/folders/${binned}`,
+      headers: { cookie: readerCookie },
+    });
+
+    // Removing the folder would strand the restore with nowhere to put it back.
+    assert.equal(response.statusCode, 409);
+    assert.equal(response.json().error, 'not_empty');
+
+    /*
+     * Counted as binned, not as a document.
+     *
+     * The folder listing shows live documents only, so a folder reading
+     * "0 وثيقة" that is refused for holding one reads as a contradiction. The
+     * two counts are separate so the refusal can say where the blocker actually
+     * is — and it is in the recycle bin, which is a different screen.
+     */
+    assert.equal(response.json().documents, 0, 'a binned document is not a live one');
+    assert.equal(response.json().binned, 1);
+  });
+
+  /**
+   * The whole loop, end to end: delete, purge, clean, then remove the folder.
+   *
+   * Every piece of this passed on its own while the sequence was impossible. The
+   * purge deliberately keeps the document row as a tombstone for the audit
+   * trail, folder deletion counted every soft-deleted row as a blocker, and the
+   * recycle bin has nothing left to offer once the content is gone — so the
+   * refusal named a document that could not be restored, could not be purged
+   * again, and could not be removed. The folder was undeletable forever.
+   *
+   * It is written as one test on purpose. Split into "purge works" and "delete
+   * works" it passes in both halves and the product still traps the user, which
+   * is exactly what happened.
+   */
+  test('a folder whose only document was purged can be deleted', async () => {
+    await makeFolder('spent', 'cabinet');
+    await grant('spent', id.reader, PERM.BROWSE | PERM.READ | PERM.DELETE);
+    const documentId = await makeDocument('عقد منتهٍ', 'spent');
+    const storagePath = await addVersion(documentId);
+
+    // 1. Into the recycle bin.
+    const binned = await app.inject({
+      method: 'DELETE',
+      url: `/api/documents/${documentId}`,
+      headers: { cookie: readerCookie },
+    });
+    assert.equal(binned.statusCode, 200, binned.body);
+
+    // While it is restorable, the folder is genuinely not empty.
+    const blocked = await app.inject({
+      method: 'DELETE',
+      url: `/api/folders/${id.spent}`,
+      headers: { cookie: readerCookie },
+    });
+    assert.equal(blocked.statusCode, 409);
+    assert.equal(blocked.json().binned, 1);
+
+    // 2. "Delete permanently" — which queues, and does not erase by itself.
+    const queued = await app.inject({
+      method: 'POST',
+      url: `/api/documents/${documentId}/purge`,
+      headers: { cookie: readerCookie },
+    });
+    assert.equal(queued.statusCode, 200, queued.body);
+    assert.ok(await storage.exists(storagePath), 'the sweep has not run yet');
+
+    // 3. The sweep the diagnostics button runs.
+    const swept = await purgeDeletedDocuments();
+    assert.ok(swept.purged >= 1, `the sweep should collect it: ${JSON.stringify(swept)}`);
+    assert.equal(swept.failed, 0);
+    assert.equal(await storage.exists(storagePath), false, 'the bytes are gone');
+
+    // The row survives — the audit trail refers to it and must keep resolving.
+    const tombstone = await sql`
+      SELECT is_deleted FROM dbo.documents WHERE document_id = ${documentId}
+    `.execute(db);
+    assert.equal(Number(tombstone.rows[0].is_deleted), 1, 'the tombstone is kept');
+
+    // 4. And now the folder goes, because nothing can come back to it.
+    const gone = await app.inject({
+      method: 'DELETE',
+      url: `/api/folders/${id.spent}`,
+      headers: { cookie: readerCookie },
+    });
+    assert.equal(gone.statusCode, 204, gone.body);
+  });
+
+  /**
+   * The tombstone keeps pointing at the folder that is now gone.
+   *
+   * Nothing nulls it, so the audit trail still resolves the name it refers to —
+   * the reason the row was kept in the first place.
+   */
+  test('a purged document still names its deleted folder', async () => {
+    const row = await sql`
+      SELECT d.title, f.name, f.is_deleted
+        FROM dbo.documents d JOIN dbo.folders f ON f.folder_id = d.folder_id
+       WHERE d.title = ${'عقد منتهٍ'}
+    `.execute(db);
+
+    assert.equal(row.rows.length, 1, 'the tombstone still joins to its folder');
+    assert.equal(row.rows[0].name, 'spent');
+    assert.equal(Number(row.rows[0].is_deleted), 1, 'and that folder is deleted');
+  });
+
+  /** A subfolder blocks it too, and a document count alone cannot see one. */
+  test('a folder holding only a subfolder is refused', async () => {
+    const outer = await makeFolder('outer', 'cabinet');
+    await makeFolder('inner', 'outer');
+    await grant('outer', id.reader, PERM.BROWSE | PERM.READ | PERM.DELETE);
+
+    const response = await app.inject({
+      method: 'DELETE',
+      url: `/api/folders/${outer}`,
+      headers: { cookie: readerCookie },
+    });
+
+    assert.equal(response.statusCode, 409);
+    assert.equal(response.json().subfolders, 1);
+  });
+
+  /** Deleting is a delete, so it takes that verb — browse alone is not enough. */
+  test('deleting a folder requires the delete permission', async () => {
+    const guarded = await makeFolder('guarded', 'cabinet');
+    await grant('guarded', id.browser, PERM.BROWSE);
+
+    const refused = await app.inject({
+      method: 'DELETE',
+      url: `/api/folders/${guarded}`,
+      headers: { cookie: browserCookie },
+    });
+    assert.equal(refused.statusCode, 403);
+
+    // Someone who cannot see it at all gets absence rather than a refusal,
+    // which would confirm that a folder they may not know about exists.
+    //
+    // A new root, not a child of `cabinet`: browse there is inherited, so a
+    // subfolder of it would be perfectly visible to this user.
+    const unseen = await makeFolder('unseen-by-browser');
+    const invisible = await app.inject({
+      method: 'DELETE',
+      url: `/api/folders/${unseen}`,
+      headers: { cookie: browserCookie },
+    });
+    assert.equal(invisible.statusCode, 404);
   });
 
   // ── Creating folders ───────────────────────────────────────────────────

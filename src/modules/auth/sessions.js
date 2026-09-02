@@ -29,10 +29,28 @@ function hashToken(token) {
  * @param {string} [args.ipAddress]
  * @param {string} [args.userAgent]
  */
+/**
+ * The session lifetime an administrator has actually set.
+ *
+ * Read here rather than from `config`, which is frozen at boot: the setting
+ * existed, accepted values, displayed them back — and every session was still
+ * cut to the environment's length. Existing sessions keep the expiry they were
+ * written with; the change applies from the next sign-in or renewal, which is
+ * also the only behaviour that does not involve editing rows under live users.
+ */
+async function sessionTtlHours() {
+  try {
+    const { getSetting } = await import('../settings/service.js');
+    return await getSetting('auth.session_ttl_hours');
+  } catch {
+    return config.auth.sessionTtlHours;
+  }
+}
+
 export async function createSession({ userId, ipAddress, userAgent }) {
   const token = randomBytes(TOKEN_BYTES).toString('base64url');
   const tokenHash = hashToken(token);
-  const expiresAt = new Date(Date.now() + config.auth.sessionTtlHours * 3_600_000);
+  const expiresAt = new Date(Date.now() + (await sessionTtlHours()) * 3_600_000);
 
   await sql`
     INSERT INTO dbo.user_sessions (token_hash, user_id, expires_at, ip_address, user_agent)
@@ -99,7 +117,7 @@ export async function resolveSession(token) {
 export async function touchSession(session) {
   const now = Date.now();
   const expiresAt = new Date(session.expiresAt).getTime();
-  const ttlMs = config.auth.sessionTtlHours * 3_600_000;
+  const ttlMs = (await sessionTtlHours()) * 3_600_000;
 
   if (expiresAt - now > ttlMs / 2) return null;
 

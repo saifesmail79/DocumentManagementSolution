@@ -13,11 +13,15 @@ import {
   listTypes,
   createType,
   setTypeActive,
+  updateType,
   listFields,
   createField,
   setFieldActive,
+  updateField,
   listLabels,
   createLabel,
+  updateLabel,
+  setLabelActive,
   updateDocumentMetadata,
 } from './service.js';
 import { listDefaults, setDefaults } from './defaults.js';
@@ -38,6 +42,7 @@ const STATUS = {
   required_field: 400,
   unknown_field: 400,
   choices_required: 400,
+  duplicate_choice: 400,
   name_taken: 409,
   unsupported_field_type: 400,
   rank_taken: 409,
@@ -65,7 +70,9 @@ export async function metadataRoutes(app) {
     }),
   }));
 
-  app.get('/labels', async () => ({ labels: await listLabels() }));
+  app.get('/labels', async (request) => ({
+    labels: await listLabels({ includeInactive: request.query?.inactive === 'true' }),
+  }));
 
 
 
@@ -75,37 +82,143 @@ export async function metadataRoutes(app) {
 
     admin.post('/types', async (request, reply) => {
       const result = await createType(request.body ?? {});
-      return result.ok ? reply.code(201).send(result) : send(reply, result);
+      if (!result.ok) return send(reply, result);
+      await record({
+        actor: request.user,
+        action: ACTION.METADATA_DEFINITION_CHANGED,
+        targetType: 'type',
+        targetId: result.typeId,
+        detail: `created ${String(request.body?.name ?? '').trim()}`,
+        request,
+      });
+      return reply.code(201).send(result);
     });
 
-    admin.post('/types/:typeId/active', async (request, reply) =>
-      send(
-        reply,
-        await setTypeActive({
-          typeId: Number(request.params.typeId),
-          active: request.body?.active !== false,
-        }),
-      ),
-    );
+    admin.patch('/types/:typeId', async (request, reply) => {
+      const typeId = Number(request.params.typeId);
+      // Spreading the whole body would let a typeId in the body retarget the update.
+      const { name, description, sortOrder } = request.body ?? {};
+      const result = await updateType({ typeId, name, description, sortOrder });
+      if (!result.ok) return send(reply, result);
+      await record({
+        actor: request.user,
+        action: ACTION.METADATA_DEFINITION_CHANGED,
+        targetType: 'type',
+        targetId: typeId,
+        detail: 'updated',
+        request,
+      });
+      return result;
+    });
+
+    admin.post('/types/:typeId/active', async (request, reply) => {
+      const typeId = Number(request.params.typeId);
+      const active = request.body?.active !== false;
+      const result = await setTypeActive({ typeId, active });
+      if (!result.ok) return send(reply, result);
+      await record({
+        actor: request.user,
+        action: ACTION.METADATA_DEFINITION_CHANGED,
+        targetType: 'type',
+        targetId: typeId,
+        detail: active ? 'activated' : 'deactivated',
+        request,
+      });
+      return result;
+    });
 
     admin.post('/fields', async (request, reply) => {
       const result = await createField(request.body ?? {});
-      return result.ok ? reply.code(201).send(result) : send(reply, result);
+      if (!result.ok) return send(reply, result);
+      await record({
+        actor: request.user,
+        action: ACTION.METADATA_DEFINITION_CHANGED,
+        targetType: 'field',
+        targetId: result.fieldId,
+        detail: `created ${String(request.body?.name ?? '').trim()}`,
+        request,
+      });
+      return reply.code(201).send(result);
     });
 
-    admin.post('/fields/:fieldId/active', async (request, reply) =>
-      send(
-        reply,
-        await setFieldActive({
-          fieldId: Number(request.params.fieldId),
-          active: request.body?.active !== false,
-        }),
-      ),
-    );
+    admin.patch('/fields/:fieldId', async (request, reply) => {
+      const fieldId = Number(request.params.fieldId);
+      // Same guard as /types — only the permitted update fields, never the id.
+      const { name, isRequired, isSearchable, sortOrder, choices } = request.body ?? {};
+      const result = await updateField({ fieldId, name, isRequired, isSearchable, sortOrder, choices });
+      if (!result.ok) return send(reply, result);
+      await record({
+        actor: request.user,
+        action: ACTION.METADATA_DEFINITION_CHANGED,
+        targetType: 'field',
+        targetId: fieldId,
+        detail: 'updated',
+        request,
+      });
+      return result;
+    });
+
+    admin.post('/fields/:fieldId/active', async (request, reply) => {
+      const fieldId = Number(request.params.fieldId);
+      const active = request.body?.active !== false;
+      const result = await setFieldActive({ fieldId, active });
+      if (!result.ok) return send(reply, result);
+      await record({
+        actor: request.user,
+        action: ACTION.METADATA_DEFINITION_CHANGED,
+        targetType: 'field',
+        targetId: fieldId,
+        detail: active ? 'activated' : 'deactivated',
+        request,
+      });
+      return result;
+    });
 
     admin.post('/labels', async (request, reply) => {
       const result = await createLabel(request.body ?? {});
-      return result.ok ? reply.code(201).send(result) : send(reply, result);
+      if (!result.ok) return send(reply, result);
+      await record({
+        actor: request.user,
+        action: ACTION.METADATA_DEFINITION_CHANGED,
+        targetType: 'label',
+        targetId: result.labelId,
+        detail: `created ${String(request.body?.name ?? '').trim()}`,
+        request,
+      });
+      return reply.code(201).send(result);
+    });
+
+    admin.patch('/labels/:labelId', async (request, reply) => {
+      const labelId = Number(request.params.labelId);
+      // Same guard — only the permitted update fields, never the id.
+      const { name, severityRank, colour } = request.body ?? {};
+      const result = await updateLabel({ labelId, name, severityRank, colour });
+      if (!result.ok) return send(reply, result);
+      await record({
+        actor: request.user,
+        action: ACTION.METADATA_DEFINITION_CHANGED,
+        targetType: 'label',
+        targetId: labelId,
+        detail: 'updated',
+        request,
+      });
+      return result;
+    });
+
+    admin.post('/labels/:labelId/active', async (request, reply) => {
+      const labelId = Number(request.params.labelId);
+      const active = request.body?.active !== false;
+      const result = await setLabelActive({ labelId, active });
+      if (!result.ok) return send(reply, result);
+      await record({
+        actor: request.user,
+        action: ACTION.METADATA_DEFINITION_CHANGED,
+        targetType: 'label',
+        targetId: labelId,
+        detail: active ? 'activated' : 'deactivated',
+        request,
+      });
+      return result;
     });
   });
 }

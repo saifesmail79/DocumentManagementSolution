@@ -28,6 +28,7 @@ import { storage } from '../../storage/index.js';
 import { config } from '../../config/index.js';
 import { moduleLogger } from '../../lib/logger.js';
 import { PERM, permissionBits, has } from '../tree/service.js';
+import { effectiveMaxBytes, extensionRefusal } from './policy.js';
 
 const log = moduleLogger('uploads');
 
@@ -37,7 +38,13 @@ const SESSION_DIR = '.resumable';
 export async function createSession({ userId, folderId, filename, totalBytes, mimeType, title, typeId, fields }) {
   const size = Number(totalBytes);
   if (!Number.isFinite(size) || size <= 0) return { ok: false, reason: 'invalid_size' };
-  if (size > config.storage.maxUploadBytes) return { ok: false, reason: 'too_large' };
+  // The limit and the extension policy as configured now, so a resumable upload
+  // obeys the same rules as a direct one — declared size first, and the final
+  // assembly is measured against the same limit again in case the declaration lied.
+  if (size > (await effectiveMaxBytes())) return { ok: false, reason: 'too_large' };
+
+  const refusedExtension = await extensionRefusal(filename);
+  if (refusedExtension) return { ok: false, ...refusedExtension };
 
   const bits = await permissionBits(userId, folderId);
   if (!has(bits, PERM.UPLOAD)) {

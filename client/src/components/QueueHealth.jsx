@@ -2,6 +2,7 @@ import { useNavigate } from 'react-router-dom';
 import { AlertTriangle, PauseCircle, RefreshCw } from 'lucide-react';
 
 import { Card, Alert } from './ui.jsx';
+import { formatDuration, formatDateTime } from '../format.js';
 
 /**
  * What the background queues are actually doing, and what is stuck.
@@ -46,6 +47,7 @@ export default function QueueHealth({
   stuckJobs,
   worker,
   failures,
+  waiting,
   onOpenDocument,
   live = false,
 }) {
@@ -53,7 +55,7 @@ export default function QueueHealth({
   const open = onOpenDocument ?? ((id) => navigate(`/documents/${id}`));
 
   const paused = worker && worker.running === false;
-  const waiting = (queue?.pending ?? 0) + (queue?.retryable ?? 0);
+  const waitingCount = (queue?.pending ?? 0) + (queue?.retryable ?? 0);
 
   return (
     <Card className="p-4">
@@ -81,7 +83,7 @@ export default function QueueHealth({
             {worker.enabledInEnvironment
               ? 'الاستخراج موقوف من الإعدادات — لن تُفهرس أي وثيقة حتى يُعاد تفعيله.'
               : 'الاستخراج موقوف في إعدادات الخادم (EXTRACTION_ENABLED) — يتطلب تعديل ملف الإعدادات وإعادة التشغيل.'}
-            {waiting > 0 ? ` هناك ${waiting} وثيقة في الانتظار.` : ''}
+            {waitingCount > 0 ? ` هناك ${waitingCount} وثيقة في الانتظار.` : ''}
           </span>
         </Alert>
       ) : null}
@@ -118,6 +120,52 @@ export default function QueueHealth({
           hint="ملفات لا تدعمها الأدوات المثبّتة حالياً — أعد الفهرسة بعد تثبيت الأداة المناسبة."
         />
       </div>
+
+      {/*
+        What has not been indexed *yet*, which is a different question from what
+        failed and was previously answered by nothing at all. The age is the
+        column that matters: two documents in the queue is normal, the same two
+        an hour later is not, and only "منذ متى" tells them apart.
+      */}
+      {waiting?.length ? (
+        <div className="mt-3">
+          <p className="mb-1 text-xs font-medium text-text-muted">
+            في انتظار الفهرسة ({waiting.length}):
+          </p>
+          <ul className="divide-y divide-border/50 rounded-lg border border-border">
+            {waiting.slice(0, 12).map((w) => (
+              <li
+                key={`${w.documentId}-${w.version}-waiting`}
+                className="flex items-center justify-between gap-2 px-3 py-2"
+              >
+                <button
+                  onClick={() => open(w.documentId)}
+                  className="min-w-0 flex-1 truncate text-right text-xs text-primary hover:underline"
+                >
+                  {w.title || w.filename}
+                  {w.folderName ? <span className="text-text-muted"> — {w.folderName}</span> : null}
+                </button>
+                <span
+                  className={`shrink-0 text-[11px] ${w.stale ? 'text-red-600' : 'text-text-muted'}`}
+                  title={formatDateTime(w.waitingSince)}
+                >
+                  {/*
+                    A stale claim says "قيد المعالجة" forever unless it is named.
+                    That is the state most likely to be mistaken for progress.
+                  */}
+                  {w.stale ? 'معلّقة منذ ' : 'منذ '}
+                  {formatDuration(w.waitingSince)}
+                </span>
+              </li>
+            ))}
+          </ul>
+          {waiting.length > 12 ? (
+            <p className="mt-1 text-[11px] text-text-muted">
+              و{waiting.length - 12} وثيقة أخرى.
+            </p>
+          ) : null}
+        </div>
+      ) : null}
 
       {failures?.length ? (
         <div className="mt-3">

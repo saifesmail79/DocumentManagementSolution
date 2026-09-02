@@ -90,16 +90,26 @@ const TRUNCATION_ORDER = [
   'watches',
   'recent_documents',
   'favourites',
+  // Referenced by users, so it must go before them like every other per-user
+  // table here. A table added to the schema and not to this list does not fail
+  // its own suite — it fails the reset of whichever suite runs next.
+  'user_preferences',
   'folder_field_defaults',
   'document_field_selections',
   'password_reset_tokens',
   'purged_blobs',
   'user_sessions',
+  // The recognition pilot's tables. Both reference documents only.
+  'classification_queue',
+  'classification_pages',
   'extraction_queue',
   'document_tags',
   'tags',
   'document_field_values',
   'document_versions',
+  // Constituent files of multi-file documents. Must precede `documents`, like
+  // document_versions, or the delete trips FK_document_files_document.
+  'document_files',
   'documents',
   'custom_field_choices',
   'custom_field_defs',

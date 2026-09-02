@@ -22,7 +22,13 @@ import {
   restoreVersion,
 } from '../documents/state.js';
 import { createSession, sessionStatus, appendChunk, completeSession, abortSession } from '../uploads/resumable.js';
-import { getRendition, renditionStatus, enqueueRendition } from '../renditions/service.js';
+import {
+  getRendition,
+  getRenditionJob,
+  renditionStatus,
+  enqueueRendition,
+  QUEUE,
+} from '../renditions/service.js';
 import {
   createApiKey,
   listApiKeys,
@@ -30,6 +36,8 @@ import {
   createWebhook,
   listWebhooks,
   deleteWebhook,
+  updateWebhook,
+  setWebhookActive,
   createShareLink,
   listShareLinks,
   revokeShareLink,
@@ -50,10 +58,15 @@ const STATUS = {
   not_your_lock: 403,
   already_current: 409,
   version_not_found: 404,
+  // The document exists and is readable; it just cannot be expressed as one
+  // versioned file. 409, not 404 — 404 would send the caller looking for a
+  // document that is right there.
+  multi_file_document: 409,
   invalid_state: 400,
   invalid_date: 400,
   invalid_size: 400,
   invalid_name: 400,
+  invalid_expiry: 400,
   invalid_url: 400,
   no_events: 400,
   unknown_user: 404,
@@ -269,20 +282,67 @@ export async function integrationRoutes(app) {
     const kind = String(request.params.kind);
     if (!['thumbnail', 'preview'].includes(kind)) return reply.code(400).send({ error: 'invalid_kind' });
 
-    const { getVersionForRead } = await import('../documents/service.js');
-    const version = await getVersionForRead({
-      userId: request.user.userId,
-      documentId,
-      version: request.query?.version ? Number(request.query.version) : undefined,
-    });
-    if (!version) return reply.code(404).send({ error: 'not_found' });
+    /*
+     * `?fileId=` addresses one constituent of a multi-file document.
+     *
+     * Such a document has no version row at all — migration 0012 keeps
+     * `current_version = 0` on purpose — so `getVersionForRead` cannot be the
+     * gate here. The per-file read check is, and it answers the same question
+     * about the same folder's permissions.
+     */
+    const fileId = request.query?.fileId ? parseId(request.query.fileId) : null;
 
-    const rendition = await getRendition({ documentId, versionNumber: version.versionNumber, kind });
+    let versionNumber;
+    if (fileId !== null) {
+      const { getConstituentForRead } = await import('../documents/service.js');
+      const file = await getConstituentForRead({ userId: request.user.userId, documentId, fileId });
+      if (!file.ok) return reply.code(file.reason === 'forbidden' ? 403 : 404).send({ error: file.reason });
+      // Version 0 is the multi-file document's key, matching what the worker and
+      // the thumbnail path already use.
+      versionNumber = 0;
+    } else {
+      const { getVersionForRead } = await import('../documents/service.js');
+      const version = await getVersionForRead({
+        userId: request.user.userId,
+        documentId,
+        version: request.query?.version ? Number(request.query.version) : undefined,
+      });
+      if (!version) return reply.code(404).send({ error: 'not_found' });
+      versionNumber = version.versionNumber;
+    }
+
+    const rendition = await getRendition({ documentId, versionNumber, kind, fileId });
 
     if (!rendition) {
+      const job = await getRenditionJob({ documentId, versionNumber, kind, fileId });
+
+      /*
+       * A missing rendition is three different situations, and answering all
+       * three with 202 was wrong in two of them.
+       *
+       * The worker records SKIPPED for a file type it has no renderer for and
+       * FAILED once the attempts are spent, and both are terminal — `claim`
+       * only ever picks up PENDING and RETRYABLE. But `enqueueRendition` resets
+       * whatever it matches back to PENDING, so re-queueing on every miss turned
+       * both terminal states into an endless render-fail-render loop, and the
+       * caller was told "queued" each time with nothing ever arriving. Saying so
+       * plainly lets the viewer offer a download instead of spinning.
+       */
+      if (job?.status === QUEUE.SKIPPED) {
+        return reply.code(415).send({ error: 'rendition_unsupported' });
+      }
+      if (job?.status === QUEUE.FAILED) {
+        return reply.code(422).send({ error: 'rendition_failed', reason: job.lastError });
+      }
+
       // Queued rather than 404'd for good: a missing rendition usually means the
-      // worker has not reached it, and asking is a reasonable trigger.
-      await enqueueRendition(db, documentId, version.versionNumber, kind).catch(() => {});
+      // worker has not reached it, and asking is a reasonable trigger. Only when
+      // nothing is already in flight — resetting a RUNNING job would hand the
+      // same file to a second worker.
+      if (!job || job.status === QUEUE.DONE) {
+        await enqueueRendition(db, documentId, versionNumber, kind, fileId).catch(() => {});
+      }
+
       return reply.code(202).send({ status: 'queued' });
     }
 
@@ -341,12 +401,38 @@ export async function integrationRoutes(app) {
         createdBy: request.user.userId,
         expiresAt: request.body?.expiresAt,
       });
-      return result.ok ? reply.code(201).send(result) : send(reply, result);
+      if (!result.ok) return send(reply, result);
+
+      await record({
+        actor: request.user,
+        action: ACTION.API_KEY_ISSUED,
+        targetType: 'api_key',
+        targetId: result.keyId,
+        // The key itself is a secret. Log only what it is called and whose account
+        // it acts as — enough to answer "what created that integration" without
+        // making the audit trail a source of working credentials.
+        detail: `name: ${request.body?.name ?? ''}, actsAs: ${parseId(request.body?.userId)}`,
+        request,
+      });
+
+      return reply.code(201).send(result);
     });
 
-    admin.delete('/api-keys/:keyId', async (request, reply) =>
-      send(reply, await revokeApiKey({ keyId: parseId(request.params.keyId) })),
-    );
+    admin.delete('/api-keys/:keyId', async (request, reply) => {
+      const keyId = parseId(request.params.keyId);
+      const result = await revokeApiKey({ keyId });
+      if (!result.ok) return send(reply, result);
+
+      await record({
+        actor: request.user,
+        action: ACTION.API_KEY_REVOKED,
+        targetType: 'api_key',
+        targetId: keyId,
+        request,
+      });
+
+      return result;
+    });
 
     admin.get('/webhooks', async () => ({ webhooks: await listWebhooks(), events: WEBHOOK_EVENTS }));
 
@@ -357,12 +443,78 @@ export async function integrationRoutes(app) {
         events: request.body?.events,
         createdBy: request.user.userId,
       });
-      return result.ok ? reply.code(201).send(result) : send(reply, result);
+      if (!result.ok) return send(reply, result);
+
+      await record({
+        actor: request.user,
+        action: ACTION.WEBHOOK_CHANGED,
+        targetType: 'webhook',
+        targetId: result.webhookId,
+        detail: `created ${request.body?.name ?? ''}`,
+        request,
+      });
+
+      return reply.code(201).send(result);
     });
 
-    admin.delete('/webhooks/:webhookId', async (request, reply) =>
-      send(reply, await deleteWebhook({ webhookId: parseId(request.params.webhookId) })),
-    );
+    admin.patch('/webhooks/:webhookId', async (request, reply) => {
+      const webhookId = parseId(request.params.webhookId);
+      const result = await updateWebhook({
+        webhookId,
+        name: request.body?.name,
+        url: request.body?.url,
+        events: request.body?.events,
+      });
+      if (!result.ok) return send(reply, result);
+
+      await record({
+        actor: request.user,
+        action: ACTION.WEBHOOK_CHANGED,
+        targetType: 'webhook',
+        targetId: webhookId,
+        detail: 'updated',
+        request,
+      });
+
+      return result;
+    });
+
+    admin.post('/webhooks/:webhookId/active', async (request, reply) => {
+      const webhookId = parseId(request.params.webhookId);
+      // Treat any body that is not explicitly false as an activation — a missing
+      // field from a form that forgot the value should not silently pause a hook.
+      const active = request.body?.active !== false;
+      const result = await setWebhookActive({ webhookId, active });
+      if (!result.ok) return send(reply, result);
+
+      await record({
+        actor: request.user,
+        action: ACTION.WEBHOOK_CHANGED,
+        targetType: 'webhook',
+        targetId: webhookId,
+        detail: active ? 'resumed' : 'paused',
+        request,
+      });
+
+      return result;
+    });
+
+    admin.delete('/webhooks/:webhookId', async (request, reply) => {
+      const webhookId = parseId(request.params.webhookId);
+      const result = await deleteWebhook({ webhookId });
+      if (!result.ok) return send(reply, result);
+
+      await record({
+        actor: request.user,
+        action: ACTION.WEBHOOK_CHANGED,
+        targetType: 'webhook',
+        targetId: webhookId,
+        detail: 'deleted',
+        request,
+      });
+
+      return result;
+    });
 
     admin.get('/reports/overview', async () => overview());
     admin.get('/reports/trend', async (request) => ({ trend: await uploadTrend({ days: request.query?.days }) }));

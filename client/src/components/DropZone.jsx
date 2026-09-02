@@ -1,8 +1,8 @@
 import { useCallback, useRef, useState } from 'react';
-import { UploadCloud, FolderTree } from 'lucide-react';
+import { UploadCloud, Files } from 'lucide-react';
 
 /**
- * Drag-and-drop upload target, including whole folders.
+ * Drag-and-drop upload target for files.
  *
  * ─── Why the counter ────────────────────────────────────────────────────────
  *
@@ -11,17 +11,19 @@ import { UploadCloud, FolderTree } from 'lucide-react';
  * inside the zone. Counting enters minus leaves is the standard fix and the
  * reason this is a component rather than four lines inline.
  *
- * ─── Reading a dropped folder ───────────────────────────────────────────────
+ * ─── Folders are refused, on purpose ────────────────────────────────────────
  *
- * A dropped directory only exists as a DataTransferItem entry, and those are
- * live for exactly one tick — the entry list has to be captured synchronously
- * in the drop handler, before any await. Walking it afterwards is fine; asking
- * for it afterwards returns nothing, which is the bug everyone writes first.
+ * This used to walk a dropped directory and recreate its structure. It was
+ * removed with the "رفع مجلد" button: selecting the files inside a folder does
+ * the same filing in one step, and the tree walk was a second upload path with
+ * its own limits, its own error handling and its own way of being wrong.
  *
- * The walk yields each file with its relative path, so the caller can recreate
- * the directory structure rather than flattening it into one folder.
+ * The entries are still read — but only to notice that a directory was dropped
+ * and say so, rather than accepting the drop and silently filing nothing. A
+ * dropped directory contributes no File to dataTransfer.files, so without this
+ * check the drop would look accepted and produce no document at all.
  */
-export default function DropZone({ onFiles, onTree, disabled, children }) {
+export default function DropZone({ onFiles, disabled, children }) {
   const [active, setActive] = useState(false);
   const [note, setNote] = useState(null);
   const depth = useRef(0);
@@ -83,26 +85,14 @@ export default function DropZone({ onFiles, onTree, disabled, children }) {
 
       const directories = entries.filter((entry) => entry.isDirectory);
 
-      if (directories.length > 0 && onTree) {
-        setNote('جارٍ قراءة محتويات المجلد…');
-        walkEntries(entries)
-          .then((walked) => {
-            setNote(null);
-            if (walked.length === 0) setNote('المجلد فارغ.');
-            else onTree(walked);
-          })
-          .catch(() => setNote('تعذرت قراءة محتويات المجلد.'));
-        return;
-      }
-
       if (directories.length > 0) {
-        setNote('لا يمكن رفع المجلدات هنا — اسحب الملفات مباشرة.');
+        setNote('لا يمكن رفع المجلدات — افتح المجلد واسحب ملفاته.');
       }
 
       const files = plainFiles.filter((file) => !(file.size === 0 && file.type === ''));
       if (files.length > 0) onFiles(files);
     },
-    [disabled, onFiles, onTree, reset],
+    [disabled, onFiles, reset],
   );
 
   return (
@@ -121,10 +111,10 @@ export default function DropZone({ onFiles, onTree, disabled, children }) {
             gap-2 rounded-xl border-2 border-dashed border-primary bg-primary/10 backdrop-blur-[1px]"
         >
           <UploadCloud size={28} className="text-primary" />
-          <p className="text-sm font-medium text-primary">أفلت الملفات أو المجلدات هنا</p>
+          <p className="text-sm font-medium text-primary">أفلت الملفات هنا</p>
           <p className="flex items-center gap-1 text-xs text-primary/80">
-            <FolderTree size={12} />
-            يُحافَظ على هيكل المجلدات
+            <Files size={12} />
+            عند إفلات أكثر من ملف يُسأل: وثائق منفصلة أم وثيقة واحدة
           </p>
         </div>
       ) : null}
@@ -138,43 +128,3 @@ export default function DropZone({ onFiles, onTree, disabled, children }) {
   );
 }
 
-/** Guards against a pathological drop and against a symlink loop. */
-const MAX_ENTRIES = 2000;
-const MAX_DEPTH = 12;
-
-/**
- * Walks dropped entries into a flat list of `{ file, path }`.
- *
- * `path` is the directory chain relative to the drop, so the caller can
- * recreate it. A file dropped on its own has an empty path.
- */
-async function walkEntries(entries) {
-  const collected = [];
-
-  async function visit(entry, prefix, level) {
-    if (collected.length >= MAX_ENTRIES || level > MAX_DEPTH) return;
-
-    if (entry.isFile) {
-      const file = await new Promise((resolve) => entry.file(resolve, () => resolve(null)));
-      if (file) collected.push({ file, path: prefix });
-      return;
-    }
-
-    if (!entry.isDirectory) return;
-
-    const reader = entry.createReader();
-    const nextPrefix = [...prefix, entry.name];
-
-    // readEntries returns at most 100 at a time and signals the end with an
-    // empty batch. Reading once — which the obvious implementation does —
-    // silently drops everything past the hundredth file.
-    for (;;) {
-      const batch = await new Promise((resolve) => reader.readEntries(resolve, () => resolve([])));
-      if (batch.length === 0) break;
-      for (const child of batch) await visit(child, nextPrefix, level + 1);
-    }
-  }
-
-  for (const entry of entries) await visit(entry, [], 0);
-  return collected;
-}

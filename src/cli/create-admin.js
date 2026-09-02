@@ -16,7 +16,7 @@
 import { randomBytes } from 'node:crypto';
 
 import { db, sql, closeDatabase } from '../db/index.js';
-import { hashPassword, validatePassword } from '../modules/auth/passwords.js';
+import { hashPassword, checkPassword } from '../modules/auth/passwords.js';
 import { logger } from '../lib/logger.js';
 
 const log = logger.child({ module: 'create-admin' });
@@ -61,7 +61,7 @@ async function main() {
   const generated = typeof args.password !== 'string';
   const password = generated ? generatePassword() : args.password;
 
-  const policy = validatePassword(password, { username });
+  const policy = await checkPassword(password, { username });
   if (!policy.ok) {
     console.error('Password rejected:');
     for (const problem of policy.problems) console.error(`  • ${problem}`);

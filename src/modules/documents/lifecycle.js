@@ -51,20 +51,32 @@ const log = moduleLogger('documents');
 export async function findDuplicates({ userId, sha256, folderId = null, excludeDocumentId = null }) {
   if (!sha256) return [];
 
+  // Both axes are searched. A constituent file is as much a copy of the bytes
+  // as a version is, so ignoring dbo.document_files would let the same scan be
+  // filed twice into one folder as long as one of the copies happened to be
+  // inside a multi-file document — which is exactly the case a scan batch
+  // creates. version_number is reported as 0 for a constituent, matching the
+  // parent document's current_version.
   const result = await sql`
     SELECT TOP (10)
            d.document_id, d.title, d.folder_id, f.name AS folder_name,
-           v.version_number, v.uploaded_at
-      FROM dbo.document_versions v
-      JOIN dbo.documents d ON d.document_id = v.document_id
+           c.version_number, c.uploaded_at
+      FROM (
+            SELECT document_id, version_number, uploaded_at, sha256
+              FROM dbo.document_versions
+             UNION ALL
+            SELECT document_id, 0 AS version_number, uploaded_at, sha256
+              FROM dbo.document_files
+           ) c
+      JOIN dbo.documents d ON d.document_id = c.document_id
       JOIN dbo.folders   f ON f.folder_id  = d.folder_id
      CROSS APPLY dbo.fn_effective_permission(${userId}, d.folder_id) p
-     WHERE v.sha256 = ${sha256}
+     WHERE c.sha256 = ${sha256}
        AND d.is_deleted = 0
        AND (p.perm_bits & ${PERM.BROWSE}) <> 0
        AND (${folderId} IS NULL OR d.folder_id = ${folderId})
        AND (${excludeDocumentId} IS NULL OR d.document_id <> ${excludeDocumentId})
-     ORDER BY v.uploaded_at DESC
+     ORDER BY c.uploaded_at DESC
   `.execute(db);
 
   return result.rows.map((row) => ({
@@ -100,8 +112,13 @@ export async function listRecycleBin({ userId, folderId = null, limit = 100 }) {
            d.document_id, d.title, d.folder_id, d.deleted_at, d.current_version,
            f.name AS folder_name,
            deleter.display_name AS deleted_by,
+           -- Either axis counts as content. A multi-file document has no
+           -- version row at all, so checking only document_versions reported it
+           -- as unrestorable while every one of its files was still on disk.
            CAST(CASE WHEN EXISTS (
                   SELECT 1 FROM dbo.document_versions v WHERE v.document_id = d.document_id
+                ) OR EXISTS (
+                  SELECT 1 FROM dbo.document_files df WHERE df.document_id = d.document_id
                 ) THEN 1 ELSE 0 END AS bit) AS has_content
       FROM dbo.documents d
       JOIN dbo.folders f ON f.folder_id = d.folder_id
@@ -131,7 +148,9 @@ export async function listRecycleBin({ userId, folderId = null, limit = 100 }) {
 export async function restoreDocument({ userId, documentId }) {
   const found = await sql`
     SELECT d.folder_id, d.title, d.is_deleted,
-           (SELECT COUNT(*) FROM dbo.document_versions v WHERE v.document_id = d.document_id) AS versions
+           (SELECT COUNT(*) FROM dbo.document_versions v WHERE v.document_id = d.document_id)
+             + (SELECT COUNT(*) FROM dbo.document_files df WHERE df.document_id = d.document_id)
+             AS versions
       FROM dbo.documents d
      WHERE d.document_id = ${documentId}
   `.execute(db);

@@ -5,7 +5,8 @@ import {
 } from 'lucide-react';
 
 import { api, ApiError } from '../api.js';
-import { formatDate } from '../format.js';
+import { formatDate, formatDuration } from '../format.js';
+import { useDialogs } from './DialogProvider.jsx';
 import { Button, Card, Alert, TextField, Spinner } from './ui.jsx';
 
 /**
@@ -23,7 +24,7 @@ import { Button, Card, Alert, TextField, Spinner } from './ui.jsx';
 
 // ── Tags ─────────────────────────────────────────────────────────────────
 
-export function TagPanel({ documentId, canEdit }) {
+export function TagPanel({ documentId, canEdit, onCount }) {
   const [tags, setTags] = useState([]);
   const [draft, setDraft] = useState('');
   const [suggestions, setSuggestions] = useState([]);
@@ -40,6 +41,21 @@ export function TagPanel({ documentId, canEdit }) {
   useEffect(() => {
     load();
   }, [load]);
+
+/*
+ * `onCount` — how many items this panel holds.
+ *
+ * The tab strip needs to show which sections have something in them without
+ * opening each one, and only the panel knows. Reported from an effect on the
+ * loaded state rather than from inside the fetch, so adding or removing an item
+ * updates the tab immediately instead of waiting for the next reload.
+ *
+ * The parent's callback is identity-stable and ignores an unchanged value, so
+ * this cannot drive a render loop.
+ */
+  useEffect(() => {
+    onCount?.(tags?.length ?? 0);
+  }, [tags, onCount]);
 
   async function commit(next) {
     setBusy(true);
@@ -137,7 +153,7 @@ export function TagPanel({ documentId, canEdit }) {
 
 // ── Comments ─────────────────────────────────────────────────────────────
 
-export function CommentPanel({ documentId, currentUserId, canRead }) {
+export function CommentPanel({ documentId, currentUserId, canRead, onCount }) {
   const [comments, setComments] = useState(null);
   const [draft, setDraft] = useState('');
   const [replyTo, setReplyTo] = useState(null);
@@ -155,6 +171,21 @@ export function CommentPanel({ documentId, currentUserId, canRead }) {
   useEffect(() => {
     load();
   }, [load]);
+
+/*
+ * `onCount` — how many items this panel holds.
+ *
+ * The tab strip needs to show which sections have something in them without
+ * opening each one, and only the panel knows. Reported from an effect on the
+ * loaded state rather than from inside the fetch, so adding or removing an item
+ * updates the tab immediately instead of waiting for the next reload.
+ *
+ * The parent's callback is identity-stable and ignores an unchanged value, so
+ * this cannot drive a render loop.
+ */
+  useEffect(() => {
+    onCount?.(comments?.length ?? 0);
+  }, [comments, onCount]);
 
   async function submit(event) {
     event.preventDefault();
@@ -291,7 +322,7 @@ const RELATION_LABELS = {
   reply_to: 'رد على',
 };
 
-export function RelationPanel({ documentId, onOpen }) {
+export function RelationPanel({ documentId, onOpen, onCount }) {
   const [relations, setRelations] = useState([]);
   const [adding, setAdding] = useState(false);
   const [query, setQuery] = useState('');
@@ -309,6 +340,21 @@ export function RelationPanel({ documentId, onOpen }) {
   useEffect(() => {
     load();
   }, [load]);
+
+/*
+ * `onCount` — how many items this panel holds.
+ *
+ * The tab strip needs to show which sections have something in them without
+ * opening each one, and only the panel knows. Reported from an effect on the
+ * loaded state rather than from inside the fetch, so adding or removing an item
+ * updates the tab immediately instead of waiting for the next reload.
+ *
+ * The parent's callback is identity-stable and ignores an unchanged value, so
+ * this cannot drive a render loop.
+ */
+  useEffect(() => {
+    onCount?.(relations?.length ?? 0);
+  }, [relations, onCount]);
 
   async function search(value) {
     setQuery(value);
@@ -418,6 +464,7 @@ export function StatePanel({ document, isSuperAdmin, onChanged }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [watching, setWatching] = useState(false);
+  const { confirm, prompt } = useDialogs();
 
   const documentId = document.documentId;
 
@@ -466,14 +513,23 @@ export function StatePanel({ document, isSuperAdmin, onChanged }) {
         </Alert>
       ) : null}
 
-      <div className="mt-2 space-y-2">
+      {/*
+        Sized to their content and set side by side.
+
+        Both were `w-full` because this panel used to live in a narrow side
+        column, which capped them. Once it became a full-width tab that cap was
+        gone and a four-option dropdown and a date stretched the width of the
+        page — a control that wide reads as a text field and gives no clue how
+        much input it expects.
+      */}
+      <div className="mt-2 flex flex-wrap items-end gap-3">
         <label className="block">
           <span className="mb-1 block text-xs text-text-muted">الحالة</span>
           <select
             value={document.lifecycleState ?? 'active'}
             disabled={busy}
             onChange={(event) => act(() => api.setLifecycle(documentId, event.target.value))}
-            className="w-full rounded-lg border border-border bg-control px-2 py-1.5 text-sm"
+            className="w-48 rounded-lg border border-border bg-control px-2 py-1.5 text-sm"
           >
             {Object.entries(LIFECYCLE_LABELS).map(([value, label]) => (
               <option key={value} value={value}>
@@ -491,11 +547,13 @@ export function StatePanel({ document, isSuperAdmin, onChanged }) {
             disabled={busy}
             defaultValue={document.expiresAt ? String(document.expiresAt).slice(0, 10) : ''}
             onChange={(event) => act(() => api.setExpiry(documentId, event.target.value || null))}
-            className="w-full rounded-lg border border-border bg-control px-2 py-1.5 text-sm"
+            className="w-44 rounded-lg border border-border bg-control px-2 py-1.5 text-sm"
           />
         </label>
 
-        <div className="flex flex-row flex-wrap gap-2 pt-1">
+      </div>
+
+      <div className="mt-3 flex flex-row flex-wrap gap-2">
           {document.lockedBy ? (
             <Button
               variant="secondary"
@@ -539,35 +597,51 @@ export function StatePanel({ document, isSuperAdmin, onChanged }) {
               variant={document.legalHold ? 'secondary' : 'danger'}
               icon={ShieldAlert}
               disabled={busy}
-              onClick={() =>
-                act(() =>
-                  api.setLegalHold(
-                    documentId,
-                    !document.legalHold,
-                    document.legalHold ? null : window.prompt('سبب الحجز القانوني') ?? '',
-                  ),
-                )
-              }
+              onClick={async () => {
+                if (document.legalHold) {
+                  const lifted = await confirm({
+                    title: 'رفع الحجز القانوني',
+                    message: 'سيعود حذف هذه الوثيقة ممكناً وفق صلاحيات المجلد.',
+                    confirmLabel: 'رفع الحجز',
+                    variant: 'warning',
+                  });
+                  if (lifted) act(() => api.setLegalHold(documentId, false, null));
+                  return;
+                }
+
+                // The reason is the whole value of the record — a hold with no
+                // stated cause cannot be reviewed later, so dismissing the
+                // dialog cancels the hold rather than placing an unexplained one.
+                const reason = await prompt({
+                  title: 'حجز قانوني',
+                  message: 'يمنع الحجز حذف الوثيقة نهائياً حتى يُرفع، ويتقدّم على دورة الحياة وتاريخ الانتهاء.',
+                  label: 'سبب الحجز',
+                  placeholder: 'مثال: قضية رقم ١٢٣ / ٢٠٢٦',
+                  confirmLabel: 'تطبيق الحجز',
+                  variant: 'warning',
+                  required: true,
+                });
+                if (reason) act(() => api.setLegalHold(documentId, true, reason));
+              }}
               className="!px-3 !py-1 text-xs"
             >
               {document.legalHold ? 'رفع الحجز' : 'حجز قانوني'}
             </Button>
-          ) : null}
-        </div>
-
-        {document.lockedBy ? (
-          <p className="text-xs text-amber-600">
-            محجوزة لدى {document.lockedBy} منذ {formatDate(document.lockedAt)}
-          </p>
         ) : null}
       </div>
+
+      {document.lockedBy ? (
+        <p className="mt-2 text-xs text-amber-600">
+          محجوزة لدى {document.lockedBy} منذ {formatDate(document.lockedAt)}
+        </p>
+      ) : null}
     </Card>
   );
 }
 
 // ── Sharing ──────────────────────────────────────────────────────────────
 
-export function SharePanel({ documentId, canRead }) {
+export function SharePanel({ documentId, canRead, onCount }) {
   const [links, setLinks] = useState([]);
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({ expiresInHours: 168, password: '', maxDownloads: '' });
@@ -586,6 +660,21 @@ export function SharePanel({ documentId, canRead }) {
   useEffect(() => {
     load();
   }, [load]);
+
+/*
+ * `onCount` — how many items this panel holds.
+ *
+ * The tab strip needs to show which sections have something in them without
+ * opening each one, and only the panel knows. Reported from an effect on the
+ * loaded state rather than from inside the fetch, so adding or removing an item
+ * updates the tab immediately instead of waiting for the next reload.
+ *
+ * The parent's callback is identity-stable and ignores an unchanged value, so
+ * this cannot drive a render loop.
+ */
+  useEffect(() => {
+    onCount?.(links?.length ?? 0);
+  }, [links, onCount]);
 
   if (!canRead) return null;
 
@@ -725,7 +814,98 @@ const APPROVAL_LABELS = {
   cancelled: 'ملغاة',
 };
 
-export function ApprovalPanel({ documentId, canRead, onChanged }) {
+/**
+ * One request, step by step: who is on each stage, what they decided, and how
+ * long it sat there.
+ *
+ * ─── Why this exists ────────────────────────────────────────────────────────
+ *
+ * The panel used to list decisions already taken and nothing else. Every
+ * question people actually ask of an approval — where is it now, who is holding
+ * it up, how long has it been there, how long did the earlier stages take — was
+ * unanswerable, even though the API had been returning `decidedAt`,
+ * `currentStep` and `completedAt` all along and the client was discarding them.
+ *
+ * ─── How a stage is timed ───────────────────────────────────────────────────
+ *
+ * A stage begins when the one before it ended, and the first begins when the
+ * request was raised. So its duration is its own decision time minus the
+ * previous one — and for the stage still open, it is the time since then,
+ * counted to now.
+ */
+function RequestTimeline({ request, steps }) {
+  // Latest decision per step: with `requireAll`, a step collects one row per
+  // group member, and the step is finished when the last of them lands.
+  const decisionFor = (order) =>
+    request.decisions.filter((d) => d.step === order).slice(-1)[0] ?? null;
+
+  let previousAt = request.requestedAt;
+
+  return (
+    <ol className="mt-2 space-y-1.5">
+      {steps.map((step) => {
+        const decision = decisionFor(step.order);
+        const isCurrent = request.status === 'pending' && request.currentStep === step.order;
+        const startedAt = previousAt;
+        if (decision) previousAt = decision.decidedAt;
+
+        // A stage after a rejection never ran, so it gets no duration at all —
+        // showing "0 دقيقة" would imply it was decided instantly.
+        const unreached = !decision && !isCurrent;
+
+        const tone = decision?.decision === 'rejected'
+          ? 'border-red-200 bg-red-50'
+          : decision
+            ? 'border-green-200 bg-green-50'
+            : isCurrent
+              ? 'border-primary/40 bg-primary/5'
+              : 'border-border bg-surface-muted/30';
+
+        return (
+          <li key={step.order} className={`rounded-lg border px-2 py-1.5 ${tone}`}>
+            <div className="flex items-center justify-between gap-2">
+              <span className="min-w-0 text-[11px]">
+                <span className="num text-text-muted">{step.order}.</span>{' '}
+                <span className="font-medium text-text">{step.approver}</span>
+                {step.requireAll ? (
+                  <span className="text-text-muted"> · موافقة الجميع</span>
+                ) : null}
+              </span>
+
+              <span className="shrink-0 text-[11px]">
+                {decision ? (
+                  <span className={decision.decision === 'rejected' ? 'text-red-600' : 'text-green-600'}>
+                    {decision.decision === 'rejected' ? 'رفض' : 'اعتمد'}
+                  </span>
+                ) : isCurrent ? (
+                  <span className="text-primary">بانتظار القرار</span>
+                ) : (
+                  <span className="text-text-muted">لم تبدأ</span>
+                )}
+              </span>
+            </div>
+
+            {!unreached ? (
+              <p className="mt-0.5 text-[11px] text-text-muted">
+                {decision ? `${decision.actor} · ` : ''}
+                {formatDuration(startedAt, decision?.decidedAt)}
+                {decision ? '' : ' حتى الآن'}
+                {/* The SLA is what turns a duration into a judgement. */}
+                {step.slaHours && !decision ? ` · المهلة ${step.slaHours} ساعة` : ''}
+              </p>
+            ) : null}
+
+            {decision?.note ? (
+              <p className="mt-0.5 text-[11px] text-text">{decision.note}</p>
+            ) : null}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+export function ApprovalPanel({ documentId, canRead, onChanged, onCount }) {
   const [requests, setRequests] = useState([]);
   const [templates, setTemplates] = useState([]);
   const [busy, setBusy] = useState(false);
@@ -748,6 +928,21 @@ export function ApprovalPanel({ documentId, canRead, onChanged }) {
   useEffect(() => {
     load();
   }, [load]);
+
+/*
+ * `onCount` — how many items this panel holds.
+ *
+ * The tab strip needs to show which sections have something in them without
+ * opening each one, and only the panel knows. Reported from an effect on the
+ * loaded state rather than from inside the fetch, so adding or removing an item
+ * updates the tab immediately instead of waiting for the next reload.
+ *
+ * The parent's callback is identity-stable and ignores an unchanged value, so
+ * this cannot drive a render loop.
+ */
+  useEffect(() => {
+    onCount?.(requests?.length ?? 0);
+  }, [requests, onCount]);
 
   if (!canRead) return null;
 
@@ -796,17 +991,35 @@ export function ApprovalPanel({ documentId, canRead, onChanged }) {
                 بطلب من {request.requestedBy}
                 {request.templateName ? ` · ${request.templateName}` : ''}
               </p>
-              {request.decisions.length > 0 ? (
-                <ul className="mt-1 space-y-0.5">
-                  {request.decisions.map((decision, index) => (
-                    <li key={index} className="text-[11px] text-text-muted">
-                      خطوة {decision.step}: {decision.decision === 'approved' ? 'اعتمد' : 'رفض'} —{' '}
-                      {decision.actor}
-                      {decision.note ? ` (${decision.note})` : ''}
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
+              {/* Total elapsed, so "how long has this taken" is answered without
+                  adding the stages up by hand. */}
+              <p className="mt-0.5 text-[11px] text-text-muted">
+                {request.status === 'pending' ? 'مضى ' : 'استغرق '}
+                {formatDuration(request.requestedAt, request.completedAt)}
+              </p>
+
+              {(() => {
+                const steps = templates.find(
+                  (t) => t.templateId === request.templateId,
+                )?.steps;
+
+                // The template is the only source of the stages still to come.
+                // Deleted since, or never linked: fall back to what was decided,
+                // which is at least the truth about what happened.
+                if (steps?.length) return <RequestTimeline request={request} steps={steps} />;
+
+                return request.decisions.length > 0 ? (
+                  <ul className="mt-1 space-y-0.5">
+                    {request.decisions.map((decision, index) => (
+                      <li key={index} className="text-[11px] text-text-muted">
+                        خطوة {decision.step}: {decision.decision === 'approved' ? 'اعتمد' : 'رفض'} —{' '}
+                        {decision.actor} · {formatDate(decision.decidedAt)}
+                        {decision.note ? ` (${decision.note})` : ''}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null;
+              })()}
               {request.status === 'pending' ? (
                 <button
                   onClick={async () => {
@@ -855,9 +1068,17 @@ export function ApprovalPanel({ documentId, canRead, onChanged }) {
 export function VersionPanel({ documentId, versions, canRestore, onChanged }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const { confirm } = useDialogs();
 
   async function restore(versionNumber) {
-    if (!window.confirm(`استعادة الإصدار ${versionNumber}؟ سيُنشأ إصدار جديد بمحتواه.`)) return;
+    const confirmed = await confirm({
+      title: 'استعادة إصدار سابق',
+      message: `سيُنشأ إصدار جديد يحمل محتوى الإصدار ${versionNumber}.`,
+      detail: 'لا يُحذف أي إصدار: التاريخ كله يبقى محفوظاً، وتضاف الاستعادة إليه.',
+      confirmLabel: 'استعادة',
+      variant: 'warning',
+    });
+    if (!confirmed) return;
     setBusy(true);
     setError(null);
     try {

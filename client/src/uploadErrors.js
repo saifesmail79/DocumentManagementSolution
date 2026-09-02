@@ -23,17 +23,35 @@ import { ApiError } from './api.js';
  * shown.
  */
 export function describeUploadFailure(caught, filename) {
-  const name = filename ? `${filename}: ` : '';
-
   if (!(caught instanceof ApiError)) {
     // A network failure, or the browser refusing the request. Not the server's
     // answer, so do not dress it up as one.
-    return `${name}تعذر الاتصال بالخادم`;
+    return `${filename ? `${filename}: ` : ''}تعذر الاتصال بالخادم`;
   }
 
-  const body = caught.body ?? {};
+  return describeUploadReason(
+    { reason: caught.code, ...(caught.body ?? {}) },
+    filename,
+  );
+}
 
-  switch (caught.code) {
+/**
+ * The same sentences, for a refusal that arrived inside a successful response.
+ *
+ * A batch upload answers 201 with a per-file outcome list, so a file refused as
+ * a duplicate never becomes an ApiError at all — it is one entry in `failed`.
+ * Routing both through this function is what stops the batch path growing its
+ * own, less complete, copy of these messages; that divergence is exactly what
+ * this module was written to end.
+ *
+ * @param {{reason?: string, error?: string, detail?: string, duplicates?: Array}} outcome
+ * @param {string} [filename]
+ */
+export function describeUploadReason(outcome, filename) {
+  const name = filename ? `${filename}: ` : '';
+  const body = outcome ?? {};
+
+  switch (body.reason ?? body.error) {
     case 'duplicate': {
       // The match is always in the destination folder now, so naming the folder
       // would only repeat where the user already is. Naming the document is the
@@ -73,9 +91,15 @@ export function describeUploadFailure(caught, filename) {
     case 'storage_unavailable':
       return `${name}تعذّر الكتابة إلى وحدة التخزين — راجع مدير النظام`;
 
+    case 'too_many_files':
+      return `${name}عدد الملفات في الدفعة الواحدة يتجاوز الحد المسموح`;
+
+    case 'multi_file_document':
+      return `${name}هذه وثيقة مكوّنة من عدة ملفات، ولا يمكن تنفيذ هذا الإجراء عليها`;
+
     default:
       // An unmapped code is still more use than nothing: it gives the
       // administrator something to search the logs for.
-      return `${name}${body.error ?? caught.code ?? 'فشل غير معروف'}`;
+      return `${name}${body.reason ?? body.error ?? 'فشل غير معروف'}`;
   }
 }

@@ -34,11 +34,18 @@ import {
   documentApprovals,
   listTemplates,
   createTemplate,
+  updateTemplate,
+  setTemplateActive,
   deleteTemplate,
 } from '../workflow/service.js';
+import { listPreferences, setPreference } from '../preferences/service.js';
 import { record, ACTION } from '../audit/service.js';
 
 const STATUS = {
+  unknown_preference: 404,
+  invalid_value: 400,
+  duplicate_entry: 400,
+  too_many_entries: 400,
   not_found: 404,
   forbidden: 403,
   invalid_body: 400,
@@ -69,6 +76,30 @@ const parseId = (value) => {
 
 export async function collaborationRoutes(app) {
   app.addHook('preHandler', app.requireAuth);
+
+  // ── Interface preferences ──────────────────────────────────────────────
+
+  /*
+   * Deliberately not audited.
+   *
+   * The audit trail exists to answer who did what to which document. The order
+   * somebody likes their tiles in is not that, and writing a row every time a
+   * tile is dragged would bury the entries that matter under the ones that do
+   * not.
+   */
+  app.get('/preferences', async (request) => ({
+    preferences: await listPreferences(request.user.userId),
+  }));
+
+  app.put('/preferences/:key', async (request, reply) =>
+    send(
+      reply,
+      await setPreference({
+        userId: request.user.userId,
+        key: String(request.params.key),
+        value: request.body?.value,
+      }),
+    ));
 
   // ── Favourites and recents ─────────────────────────────────────────────
 
@@ -326,11 +357,72 @@ export async function collaborationRoutes(app) {
 
     admin.post('/approval-templates', async (request, reply) => {
       const result = await createTemplate(request.body ?? {});
-      return result.ok ? reply.code(201).send(result) : send(reply, result);
+      if (!result.ok) return send(reply, result);
+      await record({
+        actor: request.user,
+        action: ACTION.APPROVAL_TEMPLATE_CHANGED,
+        targetType: 'approval_template',
+        targetId: String(result.templateId),
+        detail: `created ${request.body?.name ?? ''}`,
+        request,
+      });
+      return reply.code(201).send(result);
     });
 
-    admin.delete('/approval-templates/:templateId', async (request, reply) =>
-      send(reply, await deleteTemplate({ templateId: Number(request.params.templateId) })),
-    );
+    admin.patch('/approval-templates/:templateId', async (request, reply) => {
+      // Number('abc') === NaN and would reach SQL — use parseId which validates
+      // the format first, then convert the validated string.
+      const rawId = parseId(request.params.templateId);
+      if (rawId === null) return send(reply, { ok: false, reason: 'not_found' });
+      const templateId = Number(rawId);
+      const { name, typeId, steps } = request.body ?? {};
+      const result = await updateTemplate({ templateId, name, typeId, steps });
+      if (!result.ok) return send(reply, result);
+      await record({
+        actor: request.user,
+        action: ACTION.APPROVAL_TEMPLATE_CHANGED,
+        targetType: 'approval_template',
+        targetId: String(templateId),
+        detail: 'updated',
+        request,
+      });
+      return result;
+    });
+
+    admin.post('/approval-templates/:templateId/active', async (request, reply) => {
+      const rawId = parseId(request.params.templateId);
+      if (rawId === null) return send(reply, { ok: false, reason: 'not_found' });
+      const templateId = Number(rawId);
+      // Same reading as every other activate route: only an explicit false pauses.
+      const active = request.body?.active !== false;
+      const result = await setTemplateActive({ templateId, active });
+      if (!result.ok) return send(reply, result);
+      await record({
+        actor: request.user,
+        action: ACTION.APPROVAL_TEMPLATE_CHANGED,
+        targetType: 'approval_template',
+        targetId: String(templateId),
+        detail: active ? 'activated' : 'deactivated',
+        request,
+      });
+      return result;
+    });
+
+    admin.delete('/approval-templates/:templateId', async (request, reply) => {
+      const rawId = parseId(request.params.templateId);
+      if (rawId === null) return send(reply, { ok: false, reason: 'not_found' });
+      const templateId = Number(rawId);
+      const result = await deleteTemplate({ templateId });
+      if (!result.ok) return send(reply, result);
+      await record({
+        actor: request.user,
+        action: ACTION.APPROVAL_TEMPLATE_CHANGED,
+        targetType: 'approval_template',
+        targetId: String(templateId),
+        detail: 'deleted',
+        request,
+      });
+      return result;
+    });
   });
 }

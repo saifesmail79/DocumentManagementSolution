@@ -3,6 +3,7 @@ import { ScanLine, StopCircle, RefreshCw, Upload } from 'lucide-react';
 
 import { scanBridge, ScanBridgeError } from '../scanBridge.js';
 import { pagesToPdfFile } from '../scanToPdf.js';
+import { inspectScan } from '../scanCoverage.js';
 import { api } from '../api.js';
 import { describeUploadFailure } from '../uploadErrors.js';
 import { Button, TextField, Alert, Spinner } from './ui.jsx';
@@ -42,17 +43,38 @@ const WARNING_MESSAGES = {
   max_pages_reached: 'تم بلوغ الحد الأقصى للصفحات — قد تبقى أوراق في وحدة التغذية.',
   cancelled_partial: 'تم الإيقاف — الصفحات الظاهرة هي ما تم مسحه.',
   dpi_adjusted: 'تم ضبط الدقة إلى أقرب قيمة يدعمها الجهاز.',
+  // The device scanned a smaller area than it allocated, and the empty part was cut away.
+  // The page is now correct but at a lower resolution than was asked for, which matters for
+  // the text recogniser — so it is said plainly rather than left to be discovered.
+  scan_area_trimmed:
+    'مسح الجهاز بدقة أقل من المطلوبة، فحُذف الجزء الفارغ من الصورة. الصفحات كاملة لكن دقتها أقل — قد يضعف التعرف على النص.',
   dpi_not_configurable: 'الجهاز لا يسمح بضبط الدقة.',
   color_mode_not_configurable: 'الجهاز لا يسمح بضبط نمط الألوان.',
   feeder_unavailable_using_flatbed: 'لا توجد وحدة تغذية — تم استخدام السطح الزجاجي.',
   flatbed_unavailable_using_feeder: 'لا يوجد سطح زجاجي — تم استخدام وحدة التغذية.',
 };
 
+/**
+ * The resolution asked for when the scanner does not publish a list.
+ *
+ * 300 is the right default — it is what OCR wants, and below it Arabic accuracy
+ * falls off sharply — but it must not be the only option. A driver that will not
+ * honour it leaves the operator with nowhere to go, which is exactly the corner
+ * a Canon DR-M160 put someone in: it accepted 300, scanned at 96, and produced
+ * three pages that were two thirds black.
+ */
+const DEFAULT_DPI = 300;
+
+/** Offered when the driver will not say what it supports. Mirrors the bridge's own fallback. */
+const FALLBACK_DPI_OPTIONS = [150, 200, 300, 600];
+
 export default function ScanPanel({ folderId, onUploaded }) {
   const [status, setStatus] = useState('checking');
   const [scanners, setScanners] = useState([]);
   const [scannerId, setScannerId] = useState('');
   const [colorMode, setColorMode] = useState('gray');
+  const [dpi, setDpi] = useState(DEFAULT_DPI);
+  const [coverage, setCoverage] = useState(null);
   const [title, setTitle] = useState('');
   const [scanning, setScanning] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -82,22 +104,48 @@ export default function ScanPanel({ folderId, onUploaded }) {
     probe();
   }, [probe]);
 
+  /*
+   * The chosen scanner's own list, per the integration contract. Falling back to
+   * a fixed list rather than to nothing: a driver that will not enumerate its
+   * resolutions still generally accepts the common ones, and an empty dropdown
+   * would remove the only workaround available when a driver misbehaves.
+   */
+  const dpiOptions =
+    scanners.find((s) => s.id === scannerId)?.capabilities?.dpiOptions?.length
+      ? scanners.find((s) => s.id === scannerId).capabilities.dpiOptions
+      : FALLBACK_DPI_OPTIONS;
+
+  useEffect(() => {
+    // Switching scanners must not leave a resolution the new device cannot do.
+    // Nearest rather than first, so changing device keeps the intent.
+    if (dpiOptions.includes(dpi)) return;
+    const nearest = dpiOptions.reduce((best, option) =>
+      Math.abs(option - dpi) < Math.abs(best - dpi) ? option : best,
+    );
+    setDpi(nearest);
+  }, [dpiOptions, dpi]);
+
   async function startScan() {
     setScanning(true);
     setError(null);
     setWarnings([]);
+    setCoverage(null);
     try {
       // No timeout: a feeder run continues until the tray is empty.
       const result = await scanBridge.scan({
         scannerId: scannerId || undefined,
         colorMode,
-        dpi: 300,
+        dpi,
         source: 'auto',
       });
 
       setJobId(result.jobId);
       setPages(result.pages ?? []);
       setWarnings(result.warnings ?? []);
+
+      // Measured here rather than at upload: the pages are already decoded on
+      // screen, and a warning is only useful while the paper is still to hand.
+      setCoverage(await inspectScan(result.pages ?? []));
     } catch (caught) {
       if (caught instanceof ScanBridgeError) {
         const message = ERROR_MESSAGES[caught.code];
@@ -130,6 +178,7 @@ export default function ScanPanel({ folderId, onUploaded }) {
       await api.upload(folderId, file, { title: title.trim() || undefined });
       setPages([]);
       setWarnings([]);
+      setCoverage(null);
       setTitle('');
       onUploaded?.();
     } catch (caught) {
@@ -230,6 +279,28 @@ export default function ScanPanel({ folderId, onUploaded }) {
             <option value="bw">أبيض وأسود</option>
           </select>
         </label>
+
+        <label className="block">
+          <span className="mb-1.5 block text-sm font-medium text-text">الدقة</span>
+          <select
+            value={dpi}
+            onChange={(event) => setDpi(Number(event.target.value))}
+            className="w-full rounded-lg border border-border bg-control px-3 py-2 text-sm text-text
+              focus:outline-none focus:ring-2 focus:ring-primary/40"
+          >
+            {dpiOptions.map((option) => (
+              <option key={option} value={option}>
+                {option} نقطة/إنش{option === DEFAULT_DPI ? ' (موصى بها)' : ''}
+              </option>
+            ))}
+          </select>
+          {/* 300 is what the text recogniser wants; below it Arabic accuracy
+              drops sharply. Said here rather than left to be discovered from
+              search results that quietly get worse. */}
+          <span className="mt-1 block text-[11px] text-text-muted">
+            الدقة الأعلى تحسّن التعرف على النص العربي وتزيد حجم الملف.
+          </span>
+        </label>
       </div>
 
       <TextField
@@ -248,6 +319,31 @@ export default function ScanPanel({ folderId, onUploaded }) {
               <li key={warning}>{WARNING_MESSAGES[warning] ?? warning}</li>
             ))}
           </ul>
+        </Alert>
+      ) : null}
+
+      {/*
+        A scan whose image is larger than the area actually read. The pages look
+        valid, assemble into a valid PDF and upload without complaint — the only
+        thing wrong with them is that most of the sheet is black, which nothing
+        else in the chain is in a position to notice.
+      */}
+      {coverage?.truncated ? (
+        <Alert tone="error">
+          <p>
+            الصفحات الممسوحة أصغر من مساحة المسح — نحو{' '}
+            <span className="num">{Math.round(coverage.coverageX * 100)}%</span> عرضاً و
+            <span className="num">{Math.round(coverage.coverageY * 100)}%</span> ارتفاعاً فقط،
+            والباقي أسود. غالباً لم يطبّق الجهاز الدقة المطلوبة.
+          </p>
+          <p className="mt-1 text-xs">
+            جرّب دقة أخرى من قائمة «الدقة» ثم أعد المسح. يمكنك الرفع كما هو إن كان المحتوى
+            مقروءاً.
+          </p>
+        </Alert>
+      ) : coverage?.blank ? (
+        <Alert tone="warning">
+          الصفحات الممسوحة سوداء بالكامل — تحقق من وضع الورق وأن غطاء الماسح مغلق.
         </Alert>
       ) : null}
 

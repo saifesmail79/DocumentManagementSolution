@@ -29,6 +29,7 @@
 
 import { db, sql } from '../../db/index.js';
 import { normalizeArabic, buildContainsExpression } from '../../lib/arabic.js';
+import { filterPredicate, totalBytesExpression } from './filters.js';
 import { PERM } from '../tree/service.js';
 
 /**
@@ -98,6 +99,7 @@ export async function search({
      CROSS APPLY dbo.fn_effective_permission(${userId}, d.folder_id) p
       LEFT JOIN dbo.document_types     t ON t.type_id  = d.type_id
       LEFT JOIN dbo.sensitivity_labels s ON s.label_id = d.sensitivity_label_id
+      LEFT JOIN dbo.principals   creator ON creator.principal_id = d.created_by
      WHERE d.is_deleted = 0
        AND f.is_deleted = 0
        -- BROWSE, not READ: a user may find a document by title without being
@@ -155,6 +157,12 @@ export async function advancedSearch({
   tags = null,
   fields = [],
   includeContent = true,
+  // The shared parameter filters — creator, updated-date range, size, file
+  // type, extension, multi-file. Built by normaliseFilters() so this function
+  // and the folder listing ask the same questions the same way.
+  filters = null,
+  sortBy = 'updated',
+  sortDir = 'desc',
   limit = 25,
   offset = 0,
 }) {
@@ -203,12 +211,35 @@ export async function advancedSearch({
       : sql`AND d.title_normalized LIKE ${likePattern}`
     : sql``;
 
+  // The parameters this function did not previously cover. Composed from the
+  // shared builder rather than restated here, so Browse and Search cannot
+  // disagree about what "changed last week" or "larger than 10MB" means.
+  //
+  // typeId, labelId and the created-date range keep their own parameters above
+  // for callers that predate the filter bag; passing both simply ANDs them.
+  const parameterPredicate = filters ? filterPredicate(filters) : sql``;
+
+  const direction = String(sortDir).toLowerCase() === 'asc' ? sql`ASC` : sql`DESC`;
+  const sortColumn = {
+    updated: sql`d.updated_at`,
+    created: sql`d.created_at`,
+    // Ordered by the stored title, whose Arabic_CI_AI collation already sorts
+    // Arabic correctly — not by title_normalized, which strips the characters a
+    // reader expects to order by.
+    title: sql`d.title`,
+    size: totalBytesExpression,
+  }[String(sortBy)] ?? sql`d.updated_at`;
+
   const rows = await sql`
     SELECT d.document_id, d.title, d.folder_id, d.type_id, d.current_version,
            d.created_at, d.updated_at,
            f.name AS folder_name,
            t.name AS type_name,
            s.name AS sensitivity_name,
+           creator.display_name AS created_by_name,
+           ${totalBytesExpression} AS file_size_bytes,
+           (SELECT COUNT(*) FROM dbo.document_files df
+             WHERE df.document_id = d.document_id) AS file_count,
            CAST(CASE WHEN (p.perm_bits & ${PERM.READ}) <> 0 THEN 1 ELSE 0 END AS bit) AS can_read,
            COUNT(*) OVER () AS total_matches
       FROM dbo.documents d
@@ -216,6 +247,7 @@ export async function advancedSearch({
      CROSS APPLY dbo.fn_effective_permission(${userId}, d.folder_id) p
       LEFT JOIN dbo.document_types     t ON t.type_id  = d.type_id
       LEFT JOIN dbo.sensitivity_labels s ON s.label_id = d.sensitivity_label_id
+      LEFT JOIN dbo.principals   creator ON creator.principal_id = d.created_by
      WHERE d.is_deleted = 0
        AND f.is_deleted = 0
        AND (p.perm_bits & ${PERM.BROWSE}) <> 0
@@ -227,7 +259,10 @@ export async function advancedSearch({
        ${textPredicate}
        ${fieldPredicate}
        ${tagPredicate}
-     ORDER BY d.updated_at DESC, d.document_id DESC
+       ${parameterPredicate}
+     -- document_id breaks ties so a page boundary cannot drop or repeat a row
+     -- when many documents share a timestamp, title or size.
+     ORDER BY ${sortColumn} ${direction}, d.document_id DESC
      OFFSET ${skip} ROWS FETCH NEXT ${pageSize} ROWS ONLY
   `.execute(db);
 
@@ -243,6 +278,10 @@ export async function advancedSearch({
       currentVersion: Number(row.current_version),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+      createdBy: row.created_by_name,
+      bytes: row.file_size_bytes == null ? null : Number(row.file_size_bytes),
+      multiFile: Number(row.file_count) > 0,
+      fileCount: Number(row.file_count),
       canRead: Number(row.can_read) === 1,
     })),
     total: Number(rows.rows[0]?.total_matches ?? 0),

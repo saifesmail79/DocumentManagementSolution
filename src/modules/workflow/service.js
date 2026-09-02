@@ -33,7 +33,9 @@ const log = moduleLogger('workflow');
 
 export async function listTemplates() {
   const templates = await sql`
-    SELECT t.template_id, t.name, t.type_id, t.is_active, dt.name AS type_name
+    SELECT t.template_id, t.name, t.type_id, t.is_active, dt.name AS type_name,
+           (SELECT COUNT(*) FROM dbo.approval_requests ar
+             WHERE ar.template_id = t.template_id AND ar.status = 'pending') AS pending_count
       FROM dbo.approval_templates t
       LEFT JOIN dbo.document_types dt ON dt.type_id = t.type_id
      ORDER BY t.name
@@ -68,6 +70,7 @@ export async function listTemplates() {
     typeId: row.type_id === null ? null : Number(row.type_id),
     typeName: row.type_name,
     isActive: Number(row.is_active) === 1,
+    pendingRequests: Number(row.pending_count),
     steps: byTemplate.get(Number(row.template_id)) ?? [],
   }));
 }
@@ -131,6 +134,112 @@ export async function deleteTemplate({ templateId }) {
     `.execute(trx);
     await sql`DELETE FROM dbo.approval_templates WHERE template_id = ${templateId}`.execute(trx);
   });
+
+  return { ok: true };
+}
+
+/**
+ * Updates the name, linked type, and/or steps of an existing template.
+ *
+ * Steps are refused while any request is pending because a running request
+ * walks steps by order — replacing the list under it leaves the current_step
+ * pointing at whatever happened to land at that position, not the step the
+ * approver was invited to act on. Renaming the template (name only) is safe
+ * at any time because nothing in the decision chain references the name.
+ */
+export async function updateTemplate({ templateId, name, typeId, steps }) {
+  const existing = await sql`
+    SELECT template_id FROM dbo.approval_templates WHERE template_id = ${templateId}
+  `.execute(db);
+  if (!existing.rows[0]) return { ok: false, reason: 'not_found' };
+
+  let cleanName;
+  if (name !== undefined) {
+    cleanName = String(name).trim();
+    if (!cleanName || cleanName.length > 200) return { ok: false, reason: 'invalid_name' };
+  }
+
+  if (steps !== undefined) {
+    if (!Array.isArray(steps) || steps.length === 0) return { ok: false, reason: 'steps_required' };
+  }
+
+  try {
+    // Follows the same outcome-marker pattern as decide(): return a sentinel
+    // string from inside the transaction so the caller can turn it into a
+    // typed result without the try/catch needing to know about it.
+    const outcome = await db.transaction().execute(async (trx) => {
+      if (steps !== undefined) {
+        // UPDLOCK+HOLDLOCK takes a serializable range lock: a concurrent
+        // approval_request INSERT for this template waits until the step
+        // replacement commits, so current_step can never point into a list
+        // that no longer exists. Template edits are rare and short, so the
+        // cost is acceptable.
+        const live = await sql`
+          SELECT COUNT(*) AS n FROM dbo.approval_requests WITH (UPDLOCK, HOLDLOCK)
+           WHERE template_id = ${templateId} AND status = 'pending'
+        `.execute(trx);
+        if (Number(live.rows[0].n) > 0) return 'template_in_use';
+      }
+
+      if (cleanName !== undefined) {
+        await sql`
+          UPDATE dbo.approval_templates SET name = ${cleanName} WHERE template_id = ${templateId}
+        `.execute(trx);
+      }
+      // typeId: undefined → unchanged; null → clear the link; number → set it.
+      if (typeId !== undefined) {
+        await sql`
+          UPDATE dbo.approval_templates SET type_id = ${typeId} WHERE template_id = ${templateId}
+        `.execute(trx);
+      }
+      if (steps !== undefined) {
+        // approval_decisions reference step_order, not step_id, so completed
+        // requests keep their history even after the steps are replaced.
+        await sql`DELETE FROM dbo.approval_steps WHERE template_id = ${templateId}`.execute(trx);
+        let order = 1;
+        for (const step of steps) {
+          await sql`
+            INSERT INTO dbo.approval_steps (template_id, step_order, approver_id, require_all, sla_hours)
+            VALUES (${templateId}, ${order}, ${step.approverId}, ${step.requireAll ? 1 : 0},
+                    ${step.slaHours ? Number(step.slaHours) : null})
+          `.execute(trx);
+          order += 1;
+        }
+      }
+
+      return 'ok';
+    });
+
+    if (outcome === 'template_in_use') return { ok: false, reason: 'template_in_use' };
+    return { ok: true };
+  } catch (error) {
+    if (/UQ_approval_templates_name|duplicate key/i.test(error.message)) {
+      return { ok: false, reason: 'name_taken' };
+    }
+    if (/FK_approval_steps_approver/i.test(error.message)) {
+      return { ok: false, reason: 'unknown_approver' };
+    }
+    throw error;
+  }
+}
+
+/**
+ * Activates or deactivates a template without deleting it.
+ *
+ * templateForType() already ignores inactive templates, so deactivating is the
+ * right answer for a template that cannot be deleted while requests are open:
+ * new approvals stop being routed to it, existing ones finish normally.
+ */
+export async function setTemplateActive({ templateId, active }) {
+  const existing = await sql`
+    SELECT template_id FROM dbo.approval_templates WHERE template_id = ${templateId}
+  `.execute(db);
+  if (!existing.rows[0]) return { ok: false, reason: 'not_found' };
+
+  await sql`
+    UPDATE dbo.approval_templates SET is_active = ${active ? 1 : 0}
+     WHERE template_id = ${templateId}
+  `.execute(db);
 
   return { ok: true };
 }
@@ -350,7 +459,8 @@ export async function documentApprovals({ userId, documentId }) {
   if (bits === null || !has(bits, PERM.BROWSE)) return { ok: false, reason: 'not_found' };
 
   const requests = await sql`
-    SELECT r.request_id, r.status, r.current_step, r.requested_at, r.completed_at, r.note,
+    SELECT r.request_id, r.template_id, r.status, r.current_step, r.requested_at,
+           r.completed_at, r.note,
            p.display_name AS requested_by, t.name AS template_name
       FROM dbo.approval_requests r
       JOIN dbo.principals p ON p.principal_id = r.requested_by
@@ -387,6 +497,9 @@ export async function documentApprovals({ userId, documentId }) {
       requestId: String(row.request_id),
       status: row.status,
       currentStep: Number(row.current_step),
+      // The id as well as the name, so a viewer can line the decisions up
+      // against the template's steps and show what is still to come.
+      templateId: row.template_id === null ? null : Number(row.template_id),
       templateName: row.template_name,
       requestedBy: row.requested_by,
       requestedAt: row.requested_at,

@@ -27,7 +27,11 @@
  */
 
 import { db, sql } from '../../db/index.js';
+import { filterPredicate, totalBytesExpression } from '../search/filters.js';
 import { PERM } from '../../db/migrations/0001-identity-and-acl.js';
+import { moduleLogger } from '../../lib/logger.js';
+
+const log = moduleLogger('tree');
 
 // PERM is imported from the migration because that is where the bitmask is
 // defined and frozen. A second copy in application code is a copy that can drift
@@ -230,10 +234,15 @@ export async function listSubfolders(userId, parentId) {
  * tie-break branch, and documents sharing a millisecond were served twice. Style
  * 126 is ISO 8601 and parses exactly.
  */
-export async function listDocuments(userId, folderId, { limit = 50, cursor } = {}) {
+export async function listDocuments(userId, folderId, { limit = 50, cursor, filters = null } = {}) {
   const pageSize = Math.min(Math.max(Number(limit) || 50, 1), 200);
   const cursorIso = cursor?.createdAt ? new Date(cursor.createdAt).toISOString() : null;
   const cursorId = cursor?.documentId ?? null;
+
+  // Filters narrow, they never reorder: the keyset cursor is (created_at,
+  // document_id) and stays that way, so a filtered listing pages exactly as an
+  // unfiltered one does and an outstanding cursor remains valid.
+  const narrowing = filters ? filterPredicate(filters) : sql``;
 
   const result = await sql`
     SELECT TOP (${pageSize + 1})
@@ -241,11 +250,23 @@ export async function listDocuments(userId, folderId, { limit = 50, cursor } = {
            d.current_version, d.created_at, d.updated_at,
            t.name AS type_name,
            s.name AS sensitivity_name,
+           v.mime_type, v.original_filename,
+           -- Total size across whichever axis holds the files, so a multi-file
+           -- document reports what it actually occupies rather than NULL.
+           ${totalBytesExpression} AS file_size_bytes,
+           (SELECT COUNT(*) FROM dbo.document_files df
+             WHERE df.document_id = d.document_id) AS file_count,
            CAST(CASE WHEN (p.perm_bits & ${PERM.READ}) <> 0 THEN 1 ELSE 0 END AS bit) AS can_read
       FROM dbo.documents d
      CROSS APPLY dbo.fn_effective_permission(${userId}, d.folder_id) p
       LEFT JOIN dbo.document_types      t ON t.type_id  = d.type_id
       LEFT JOIN dbo.sensitivity_labels  s ON s.label_id = d.sensitivity_label_id
+      -- The current version, for the row preview: it decides whether the browser
+      -- can draw the file itself or has to ask for a rendition. LEFT because a
+      -- document row can exist before its first version does — and because a
+      -- multi-file document never has one.
+      LEFT JOIN dbo.document_versions   v ON v.document_id = d.document_id
+                                         AND v.version_number = d.current_version
      WHERE d.folder_id = ${folderId}
        AND d.is_deleted = 0
        AND (p.perm_bits & ${PERM.BROWSE}) <> 0
@@ -253,6 +274,7 @@ export async function listDocuments(userId, folderId, { limit = 50, cursor } = {
             OR d.created_at < CONVERT(datetime2(3), ${cursorIso}, 126)
             OR (d.created_at = CONVERT(datetime2(3), ${cursorIso}, 126)
                 AND d.document_id < CONVERT(bigint, ${cursorId})))
+       ${narrowing}
      ORDER BY d.created_at DESC, d.document_id DESC
   `.execute(db);
 
@@ -262,18 +284,35 @@ export async function listDocuments(userId, folderId, { limit = 50, cursor } = {
   const last = rows[rows.length - 1];
 
   return {
-    documents: rows.map((row) => ({
-      documentId: row.document_id,
-      title: row.title,
-      typeId: row.type_id,
-      typeName: row.type_name,
-      sensitivity: row.sensitivity_name,
-      currentVersion: Number(row.current_version),
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
+    documents: rows.map((row) => {
       // A hint for the UI. The content route checks READ for itself.
-      canRead: Number(row.can_read) === 1,
-    })),
+      const canRead = Number(row.can_read) === 1;
+
+      return {
+        documentId: row.document_id,
+        title: row.title,
+        typeId: row.type_id,
+        typeName: row.type_name,
+        sensitivity: row.sensitivity_name,
+        currentVersion: Number(row.current_version),
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        canRead,
+        // Withheld from a browse-only user on purpose. The requirement is that
+        // such a user learns a document exists and nothing more, and a filename
+        // is frequently the most revealing thing about a document — "استقالة
+        // 2026.pdf" discloses the content the permission was meant to withhold.
+        mimeType: canRead ? row.mime_type : null,
+        originalFilename: canRead ? row.original_filename : null,
+        bytes: canRead && row.file_size_bytes != null ? Number(row.file_size_bytes) : null,
+        // Stated rather than left for the client to infer from a null mimeType,
+        // which is also what an unreadable row looks like. Not gated on READ:
+        // that a document is made of several files is structure, not content,
+        // and the row has to render an icon either way.
+        multiFile: Number(row.file_count) > 0,
+        fileCount: Number(row.file_count),
+      };
+    }),
     nextCursor: hasMore && last ? { createdAt: last.created_at, documentId: String(last.document_id) } : null,
   };
 }
@@ -321,6 +360,94 @@ export async function createFolder(userId, { parentId, name }) {
   });
 
   return { ok: true, folderId };
+}
+
+/**
+ * Deletes a folder, but only one that holds nothing.
+ *
+ * ─── Why emptiness is required rather than cascaded ─────────────────────────
+ *
+ * A recursive delete of a filing tree is the single most destructive action this
+ * system could offer, and it is the one an accidental click can least afford. A
+ * folder that still holds documents or subfolders is refused, with a count of
+ * what is in the way, so the operator empties it deliberately and can see what
+ * they are emptying.
+ *
+ * ─── What counts as content ─────────────────────────────────────────────────
+ *
+ * A soft-deleted document still belongs to this folder and is still restorable
+ * to it, so it counts. Removing the folder from under it would strand the
+ * restore with nowhere to put the document back. Only a folder with no live
+ * subfolders and no documents at all — deleted or not — can go.
+ *
+ * The delete itself is soft, like a document's, so the row and its audit trail
+ * survive and the tree can be put back.
+ */
+export async function deleteFolder(userId, folderId) {
+  const found = await sql`
+    SELECT folder_id, name, parent_id FROM dbo.folders
+     WHERE folder_id = ${folderId} AND is_deleted = 0
+  `.execute(db);
+
+  const folder = found.rows[0];
+  if (!folder) return { ok: false, reason: 'not_found' };
+
+  // Deleting a folder is a delete, so it takes the delete verb on that folder.
+  // Absence rather than refusal for someone who cannot even see it.
+  const bits = await permissionBits(userId, folderId);
+  if (!has(bits, PERM.BROWSE)) return { ok: false, reason: 'not_found' };
+  if (!has(bits, PERM.DELETE)) return { ok: false, reason: 'forbidden' };
+
+  /*
+   * Live and binned documents counted separately — and a tombstone is neither.
+   *
+   * A binned document blocks because it is still restorable to this folder, and
+   * it gets its own number because the folder listing shows live documents only:
+   * a folder reading "0 وثيقة" refused for holding one is a flat
+   * contradiction unless the refusal says where that one is.
+   *
+   * But once the purge has taken its content, restoring it is impossible
+   * forever — `restore` refuses with `content_purged`, and no sweep will ever
+   * remove the row, because the tombstone is deliberately kept for the audit
+   * trail. Counting it here made such a folder permanently undeletable: the
+   * refusal named a document, the recycle bin offered nothing to do with it, and
+   * running the cleanup again found nothing left to purge. A closed loop with no
+   * exit anywhere in the product.
+   *
+   * So emptiness asks whether anything can still come back, not whether a row
+   * exists. A tombstone keeps its folder_id — the folder is soft-deleted too, so
+   * the audit trail still resolves the name it refers to.
+   */
+  const counts = await sql`
+    SELECT
+      (SELECT COUNT(*) FROM dbo.folders f
+        WHERE f.parent_id = ${folderId} AND f.is_deleted = 0) AS subfolders,
+      (SELECT COUNT(*) FROM dbo.documents d
+        WHERE d.folder_id = ${folderId} AND d.is_deleted = 0) AS documents,
+      (SELECT COUNT(*) FROM dbo.documents d
+        WHERE d.folder_id = ${folderId} AND d.is_deleted = 1
+          AND (EXISTS (SELECT 1 FROM dbo.document_versions v
+                        WHERE v.document_id = d.document_id)
+            OR EXISTS (SELECT 1 FROM dbo.document_files df
+                        WHERE df.document_id = d.document_id))) AS binned
+  `.execute(db);
+
+  const subfolders = Number(counts.rows[0].subfolders);
+  const documents = Number(counts.rows[0].documents);
+  const binned = Number(counts.rows[0].binned);
+
+  if (subfolders > 0 || documents > 0 || binned > 0) {
+    return { ok: false, reason: 'not_empty', subfolders, documents, binned };
+  }
+
+  await sql`
+    UPDATE dbo.folders
+       SET is_deleted = 1, deleted_at = SYSUTCDATETIME()
+     WHERE folder_id = ${folderId} AND is_deleted = 0
+  `.execute(db);
+
+  log.info({ folderId: String(folderId), userId: String(userId) }, 'folder deleted');
+  return { ok: true, name: folder.name, parentId: folder.parent_id };
 }
 
 /** Turns a bitmask into the shape the UI wants, so no client re-implements the masks. */

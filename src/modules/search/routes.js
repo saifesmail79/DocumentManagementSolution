@@ -8,7 +8,8 @@
  */
 
 import { search, advancedSearch, searchByField, contentSearchAvailable } from './service.js';
-import { facetsFor, snippetsFor } from './facets.js';
+import { facetsFor, snippetsFor, filterOptions } from './facets.js';
+import { normaliseFilters } from './filters.js';
 
 export async function searchRoutes(app) {
   app.addHook('preHandler', app.requireAuth);
@@ -40,24 +41,48 @@ export async function searchRoutes(app) {
    * handful of query-string values, and a saved search is something a client
    * will want to round-trip as JSON.
    */
-  app.post('/advanced', async (request) => {
+  app.post('/advanced', async (request, reply) => {
     const body = request.body ?? {};
+
+    // Every parameter filter goes through the shared normaliser, which is also
+    // what rejects a malformed date. Previously a bad date string reached
+    // `new Date(...).toISOString()` and threw a RangeError, so a mistyped filter
+    // came back as a 500 with no indication which field was wrong.
+    const { filters, problems } = normaliseFilters(body);
+    if (problems.length > 0) {
+      return reply.code(400).send({ error: 'invalid_filter', detail: problems.join(', ') });
+    }
 
     return advancedSearch({
       userId: request.user.userId,
+      // Null is a legitimate query here: this endpoint's whole purpose is that
+      // documents can be found by their parameters with no keyword at all.
       query: body.q ?? null,
       folderId: parseId(body.folderId),
-      typeId: toNullableInt(body.typeId),
-      labelId: toNullableInt(body.labelId),
-      createdFrom: body.createdFrom ? new Date(body.createdFrom).toISOString() : null,
-      createdTo: body.createdTo ? new Date(body.createdTo).toISOString() : null,
-      tags: Array.isArray(body.tags) ? body.tags : null,
       fields: Array.isArray(body.fields) ? body.fields : [],
-      includeContent: body.content !== false,
+      filters,
+      // Content is never consulted for a parameter search: the request is about
+      // what a document IS, not what it says.
+      includeContent: body.content !== false && Boolean(String(body.q ?? '').trim()),
+      sortBy: body.sortBy ?? 'updated',
+      sortDir: body.sortDir ?? 'desc',
       limit: toNullableInt(body.limit) ?? 25,
       offset: toNullableInt(body.offset) ?? 0,
     });
   });
+
+  /**
+   * The vocabulary a filter bar needs to render its controls.
+   *
+   * One request rather than four: a filter panel cannot show anything until it
+   * has all of these, so four round trips would only stagger its appearance.
+   * Scoped to what the caller can actually browse — offering a filter for a
+   * document type that exists only in a folder they cannot see both leaks the
+   * type list and returns nothing when chosen.
+   */
+  app.get('/filter-options', async (request) =>
+    filterOptions({ userId: request.user.userId, folderId: parseId(request.query?.folderId) }),
+  );
 
   /** Metadata-field search, where typed columns give correct range semantics. */
   app.get('/fields/:fieldId', async (request, reply) => {

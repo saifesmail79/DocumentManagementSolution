@@ -378,4 +378,126 @@ describe('authentication', { skip: CONFIGURED ? false : target.reason }, () => {
     assert.equal(status, 200);
     assert.equal(body.user.isSuperAdmin, true);
   });
+
+  // ── The password policy an administrator actually set ──────────────────
+
+  /**
+   * The minimum length is a setting, and settings are only settings if something
+   * reads them.
+   *
+   * This one was written to `dbo.app_settings`, displayed back as the current
+   * value, and marked as coming from the database — while every password went on
+   * being measured against the environment variable read at boot. Nothing
+   * failed. The screen agreed with itself, and the policy simply did not change.
+   *
+   * So the assertion is on the effect, not on the stored value: that a password
+   * which the new policy permits is accepted, and one it forbids is not.
+   */
+  test('the stored minimum length is what passwords are measured against', async () => {
+    const settings = await import('../src/modules/settings/service.js');
+    const { checkPassword } = await import('../src/modules/auth/passwords.js');
+
+    try {
+      await settings.setSetting({ key: 'auth.min_password_length', value: 4, actorId: null });
+      settings.resetSettingsCache();
+
+      const short = await checkPassword('x7k2', { username: 'someone' });
+      assert.equal(short.ok, true, `a 4-character password must pass a minimum of 4: ${short.problems}`);
+
+      const shorter = await checkPassword('x7k', { username: 'someone' });
+      assert.equal(shorter.ok, false, 'three characters must still fail a minimum of four');
+
+      // And raising it takes effect just as immediately.
+      await settings.setSetting({ key: 'auth.min_password_length', value: 16, actorId: null });
+      settings.resetSettingsCache();
+
+      const nowShort = await checkPassword('x7k2', { username: 'someone' });
+      assert.equal(nowShort.ok, false, 'raising the minimum must apply too');
+    } finally {
+      await settings.clearSetting({ key: 'auth.min_password_length' });
+      settings.resetSettingsCache();
+    }
+  });
+
+  /**
+   * The bound that remains is the one that cannot be satisfied.
+   *
+   * A minimum above the longest password the system will hash locks every
+   * account out of changing its own password — including the last
+   * administrator, which is unrecoverable through the interface.
+   */
+  test('the minimum may go down to 1, but never above the longest password', async () => {
+    const settings = await import('../src/modules/settings/service.js');
+    const { MAX_PASSWORD_LENGTH } = await import('../src/modules/auth/passwords.js');
+
+    try {
+      for (const value of [1, 4, MAX_PASSWORD_LENGTH]) {
+        const result = await settings.setSetting({
+          key: 'auth.min_password_length',
+          value,
+          actorId: null,
+        });
+        assert.equal(result.ok, true, `${value} should be accepted, got ${result.reason}`);
+      }
+
+      for (const value of [0, -1, MAX_PASSWORD_LENGTH + 1]) {
+        const result = await settings.setSetting({
+          key: 'auth.min_password_length',
+          value,
+          actorId: null,
+        });
+        assert.equal(result.ok, false, `${value} should be refused`);
+        assert.equal(result.reason, 'out_of_range');
+        // The bounds travel with the refusal, so the message can name them.
+        assert.equal(result.min, 1);
+        assert.equal(result.max, MAX_PASSWORD_LENGTH);
+      }
+    } finally {
+      await settings.clearSetting({ key: 'auth.min_password_length' });
+      settings.resetSettingsCache();
+    }
+  });
+
+  /** A one-character minimum is a real policy, and has to actually work. */
+  test('a minimum of 1 accepts a one-character password', async () => {
+    const settings = await import('../src/modules/settings/service.js');
+    const { checkPassword } = await import('../src/modules/auth/passwords.js');
+
+    try {
+      await settings.setSetting({ key: 'auth.min_password_length', value: 1, actorId: null });
+      settings.resetSettingsCache();
+
+      const result = await checkPassword('x', { username: 'someone' });
+      assert.equal(result.ok, true, `one character must pass a minimum of one: ${result.problems}`);
+    } finally {
+      await settings.clearSetting({ key: 'auth.min_password_length' });
+      settings.resetSettingsCache();
+    }
+  });
+
+  /**
+   * Length is not the only rule, and lowering it does not switch the others off.
+   *
+   * Recorded here because it is the next thing someone hits after setting the
+   * minimum to four and typing "1234": the refusal is real, it is a different
+   * rule, and its message says so.
+   */
+  test('short does not mean anything goes — predictable passwords are still refused', async () => {
+    const settings = await import('../src/modules/settings/service.js');
+    const { checkPassword } = await import('../src/modules/auth/passwords.js');
+
+    try {
+      await settings.setSetting({ key: 'auth.min_password_length', value: 4, actorId: null });
+      settings.resetSettingsCache();
+
+      for (const password of ['1234', 'aaaa']) {
+        const result = await checkPassword(password, { username: 'someone' });
+        assert.equal(result.ok, false, `${password} is predictable and should be refused`);
+        assert.match(result.problems.join(' '), /predictable/);
+      }
+    } finally {
+      await settings.clearSetting({ key: 'auth.min_password_length' });
+      settings.resetSettingsCache();
+    }
+  });
 });

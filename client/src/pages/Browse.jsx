@@ -9,21 +9,40 @@ import {
   Download,
   ChevronLeft,
   Home,
-  Shield,
   Move,
   Package,
   CheckSquare,
   Square,
+  Eye,
+  PanelRightClose,
+  PanelRightOpen,
+  Layers,
 } from 'lucide-react';
 
 import { api, ApiError } from '../api.js';
-import { describeUploadFailure } from '../uploadErrors.js';
-import { formatDate } from '../format.js';
-import { Button, IconButton, Card, Spinner, EmptyState, Alert, ReadOnlyBadge } from '../components/ui.jsx';
+import { describeUploadFailure, describeUploadReason } from '../uploadErrors.js';
+import { formatDate, formatDateTime } from '../format.js';
+import { Button, Card, Spinner, EmptyState, Alert, ReadOnlyBadge } from '../components/ui.jsx';
+import ExpandableActions from '../components/ExpandableActions.jsx';
+import DocumentPreview from '../components/DocumentPreview.jsx';
 import ScanPanel from '../components/ScanPanel.jsx';
 import { useTree } from '../TreeContext.jsx';
-import PermissionsPanel from '../components/PermissionsPanel.jsx';
 import DropZone from '../components/DropZone.jsx';
+import BatchFilePrompt from '../components/BatchFilePrompt.jsx';
+import FilterBar from '../components/FilterBar.jsx';
+import { useDialogs } from '../components/DialogProvider.jsx';
+
+/** Remembered per browser: a pane you have to re-open every visit is not an option, it is a chore. */
+const PREVIEW_PANE_KEY = 'dms.browse.previewPane';
+
+function readPreviewPreference() {
+  try {
+    return window.localStorage.getItem(PREVIEW_PANE_KEY) === 'on';
+  } catch {
+    // Private mode, or storage disabled by policy. The pane simply starts closed.
+    return false;
+  }
+}
 
 /**
  * Folder browser: subfolders and documents for one folder.
@@ -43,11 +62,24 @@ export default function Browse() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [showPermissions, setShowPermissions] = useState(false);
   const [notice, setNotice] = useState(null);
   const [selected, setSelected] = useState(() => new Set());
+  const [previewPane, setPreviewPane] = useState(readPreviewPreference);
+  // Which row the pane is showing. Separate from `selected`, which drives bulk
+  // actions — previewing one document is not the same as choosing it for a
+  // twenty-document move, and merging the two makes both surprising.
+  const [activeId, setActiveId] = useState(null);
+  // The selection waiting on the separate-or-one-entry question. Held here
+  // rather than inside the prompt so the files survive a failed answer and the
+  // user can choose again without picking them a second time.
+  const [pendingBatch, setPendingBatch] = useState(null);
+  // Parameter filters narrowing this folder's listing. Null means unfiltered,
+  // which is a different state from "every filter cleared" only in that it
+  // keeps the bar collapsed.
+  const [filters, setFilters] = useState({});
+  const { confirm, prompt } = useDialogs();
   const fileInput = useRef(null);
-  const folderInput = useRef(null);
+  const hoverTimer = useRef(null);
 
   /*
    * `preserveMessages` exists because of a bug that made every upload failure
@@ -69,7 +101,7 @@ export default function Browse() {
     }
     try {
       if (folderId) {
-        setData(await api.folder(folderId));
+        setData(await api.folder(folderId, { filters }));
       } else {
         const roots = await api.roots();
         setData({ folder: null, folders: roots.folders, documents: [] });
@@ -83,7 +115,10 @@ export default function Browse() {
     } finally {
       setLoading(false);
     }
-  }, [folderId]);
+    // `filters` is a dependency: changing a filter re-runs the listing query,
+    // which is the whole point of the bar. It is kept out of `refresh` below so
+    // an upload does not reset what the user has narrowed to.
+  }, [folderId, filters]);
 
   /** Reloads after an action, keeping whatever the action just reported. */
   const refresh = useCallback(
@@ -96,118 +131,171 @@ export default function Browse() {
     // Cleared on navigation: ids from the previous folder would otherwise stay
     // selected and a bulk action would act on documents no longer on screen.
     setSelected(new Set());
+    setActiveId(null);
   }, [load]);
 
+  // Filters are per folder. Carrying "filed by Sara" into the next folder would
+  // silently hide most of what is in it, and the emptiness would read as the
+  // folder being empty rather than as a filter still being on.
+  useEffect(() => {
+    setFilters({});
+  }, [folderId]);
+
   const permissions = data?.folder?.permissions ?? {};
+  const documents = data?.documents ?? [];
 
-  /** Uploads a list of files one at a time, reporting what happened to each. */
+  const activeIndex = documents.findIndex((document) => document.documentId === activeId);
+  const activeDocument = activeIndex >= 0 ? documents[activeIndex] : null;
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(PREVIEW_PANE_KEY, previewPane ? 'on' : 'off');
+    } catch {
+      // Not being able to remember the choice is not a reason to refuse it.
+    }
+  }, [previewPane]);
+
+  /** Opens the pane on a row, cancelling any hover that was about to fire. */
+  const activate = useCallback((documentId) => {
+    if (hoverTimer.current) {
+      clearTimeout(hoverTimer.current);
+      hoverTimer.current = null;
+    }
+    setActiveId(documentId);
+  }, []);
+
+  /**
+   * Hovering previews, but only after a pause.
+   *
+   * Without the delay, dragging the pointer down the list to reach the action
+   * menu fires a preview — and a network request — for every row it crosses.
+   */
+  const previewOnHover = useCallback(
+    (documentId) => {
+      if (!previewPane) return;
+      if (hoverTimer.current) clearTimeout(hoverTimer.current);
+      hoverTimer.current = setTimeout(() => setActiveId(documentId), 250);
+    },
+    [previewPane],
+  );
+
+  useEffect(() => () => {
+    if (hoverTimer.current) clearTimeout(hoverTimer.current);
+  }, []);
+
+  const step = useCallback(
+    (delta) => {
+      if (documents.length === 0) return;
+      const from = activeIndex >= 0 ? activeIndex : -1;
+      const next = Math.min(Math.max(from + delta, 0), documents.length - 1);
+      activate(documents[next].documentId);
+    },
+    [documents, activeIndex, activate],
+  );
+
+  /**
+   * Arrow keys walk the list while the pane is open.
+   *
+   * Bound to the window rather than to the rows, because the rows are not
+   * focusable and making a whole table row a tab stop would put a stop between
+   * every pair of real controls. Ignored whenever a field has focus, so typing a
+   * folder name never moves the preview.
+   */
+  useEffect(() => {
+    if (!previewPane || documents.length === 0) return undefined;
+
+    function onKeyDown(event) {
+      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+
+      const focused = window.document.activeElement;
+      const tag = focused?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || focused?.isContentEditable) return;
+
+      event.preventDefault();
+      step(event.key === 'ArrowDown' ? 1 : -1);
+    }
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [previewPane, documents.length, step]);
+  /**
+   * The entry point for every set of files a user hands over.
+   *
+   * One file is unambiguous and goes straight up. More than one is not — five
+   * files can be five documents or one document of five pages, and only the
+   * person who chose them knows which. So the count, and nothing else, decides
+   * whether to ask: `pendingBatch` holds the selection while the question is on
+   * screen, and `fileBatch` below does the work once it is answered.
+   */
   async function uploadFiles(files) {
-    if (!files?.length || !folderId) return;
+    const list = [...(files ?? [])];
+    if (list.length === 0 || !folderId) return;
 
-    setBusy(true);
+    if (list.length === 1) {
+      await fileBatch(list, { mode: 'separate' });
+      return;
+    }
+
     setError(null);
     setNotice(null);
-
-    const failed = [];
-    const duplicates = [];
-
-    for (const file of files) {
-      try {
-        const result = await api.upload(folderId, file);
-        if (result.duplicateOf?.length) duplicates.push(file.name);
-      } catch (caught) {
-        failed.push(describeUploadFailure(caught, file.name));
-      }
-    }
-
-    // Reported per file rather than as one pass/fail: dropping ten files and
-    // being told only that "something failed" is not actionable.
-    if (failed.length) setError(failed.join('\n'));
-    if (duplicates.length) {
-      setNotice(`رُفع الملف، مع وجود نسخة مطابقة في المجلد نفسه من: ${duplicates.join('، ')}`);
-    } else if (files.length > failed.length) {
-      // Indexing happens on a queue after the response, so a document is
-      // searchable by title immediately and by content a little later. Saying so
-      // once here prevents the far more alarming conclusion that search is
-      // broken.
-      setNotice('تم الرفع. تجري فهرسة المحتوى في الخلفية — قد لا يظهر في البحث النصي فوراً.');
-    }
-
-    await refresh();
-    setBusy(false);
+    setPendingBatch(list);
   }
 
   /**
-   * Uploads a dropped folder, recreating its structure.
+   * Sends a batch and reports what happened to each file.
    *
-   * Folders are created depth-first and cached by path, so a tree of two
-   * hundred files in twenty folders makes twenty folder calls rather than two
-   * hundred. A folder that already exists comes back as an error the cache
-   * absorbs — creating and looking up are the same operation here.
+   * One request rather than a request per file: the server needs the whole set
+   * at once to file it as a single document, and for separate documents it
+   * still reports per-file outcomes — so nothing is lost by using one path for
+   * both, and the two modes cannot drift apart.
    */
-  async function uploadTree(entries) {
-    if (!folderId || entries.length === 0) return;
-
+  async function fileBatch(files, { mode, title }) {
     setBusy(true);
     setError(null);
     setNotice(null);
 
-    const created = new Map([['', folderId]]);
-    const failed = [];
+    try {
+      const result = await api.uploadBatch(folderId, files, { mode, title });
+      const created = result.created ?? [];
+      const failed = result.failed ?? [];
 
-    /** Ensures every folder on a path exists, returning the deepest id. */
-    async function ensurePath(segments) {
-      let parentId = folderId;
-      let key = '';
-
-      for (const segment of segments) {
-        key = key ? `${key}/${segment}` : segment;
-        if (created.has(key)) {
-          parentId = created.get(key);
-          continue;
-        }
-
-        try {
-          const result = await api.createFolder(parentId, segment);
-          parentId = result.folderId;
-        } catch {
-          // Most likely it already exists from an earlier run. Find it rather
-          // than failing the whole tree.
-          const listing = await api.folder(parentId).catch(() => null);
-          const match = listing?.folders?.find((f) => f.name === segment);
-          if (!match) throw new Error(`could not create ${segment}`);
-          parentId = match.folderId;
-        }
-
-        created.set(key, parentId);
+      // Reported per file rather than as one pass/fail: dropping ten files and
+      // being told only that "something failed" is not actionable.
+      if (failed.length) {
+        setError(
+          failed
+            .map((entry) => describeUploadReason(entry, entry.filename))
+            .join('\n'),
+        );
       }
 
-      return parentId;
-    }
+      const duplicates = created.filter((entry) => entry.duplicateOf?.length);
 
-    for (const entry of entries) {
-      try {
-        const targetId = await ensurePath(entry.path);
-        await api.upload(targetId, entry.file);
-      } catch (caught) {
-        failed.push(describeUploadFailure(caught, [...entry.path, entry.file.name].join('/')));
+      if (duplicates.length) {
+        setNotice(
+          `رُفع الملف، مع وجود نسخة مطابقة في المجلد نفسه من: ${duplicates
+            .map((entry) => entry.filename ?? entry.title)
+            .join('، ')}`,
+        );
+      } else if (created.length) {
+        // Indexing happens on a queue after the response, so a document is
+        // searchable by title immediately and by content a little later. Saying
+        // so once here prevents the far more alarming conclusion that search is
+        // broken.
+        setNotice(
+          mode === 'single' && created[0]?.multiFile
+            ? `تم رفع ${created[0].fileCount} ملفات كوثيقة واحدة. تجري فهرسة المحتوى في الخلفية.`
+            : 'تم الرفع. تجري فهرسة المحتوى في الخلفية — قد لا يظهر في البحث النصي فوراً.',
+        );
       }
-    }
 
-    if (failed.length) {
-      const shown = failed.slice(0, 5).join('\n');
-      const rest = failed.length > 5 ? `\n(و${failed.length - 5} ملفاً آخر)` : '';
-      setError(shown + rest);
-    }
-
-    // Only when something actually landed. Announcing "0 of 1 uploaded" as a
-    // notice alongside an error reads as success to anyone skimming.
-    const succeeded = entries.length - failed.length;
-    if (succeeded > 0) {
-      setNotice(
-        `تم رفع ${succeeded} من ${entries.length} ملفاً مع الحفاظ على هيكل المجلدات.`
-          + ' تجري فهرسة المحتوى في الخلفية.',
-      );
+      setPendingBatch(null);
+    } catch (caught) {
+      // A whole-batch failure — refused before anything was filed. The
+      // selection stays on screen so the user can answer differently rather
+      // than having to find the files again.
+      setError(describeUploadFailure(caught, `${files.length} ملفات`));
     }
 
     await refresh();
@@ -221,8 +309,72 @@ export default function Browse() {
     await uploadFiles(files);
   }
 
+  /**
+   * Removes an empty folder.
+   *
+   * The server is the authority on emptiness — the card only knows the document
+   * count and cannot see subfolders — so a refusal is expected here and is
+   * reported with the counts it sends back rather than as a generic failure.
+   */
+  async function removeFolder(folder) {
+    const confirmed = await confirm({
+      title: 'حذف المجلد',
+      message: `سيُحذف المجلد "${folder.name}".`,
+      detail: 'لا يُحذف إلا مجلد فارغ تماماً — بلا وثائق ولا مجلدات فرعية، وبما في ذلك ما في سلة المحذوفات.',
+      confirmLabel: 'حذف',
+      variant: 'danger',
+    });
+    if (!confirmed) return;
+
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await api.deleteFolder(folder.folderId);
+      setNotice(`حُذف المجلد "${folder.name}".`);
+      await refresh();
+    } catch (caught) {
+      if (caught instanceof ApiError && caught.code === 'not_empty') {
+        /*
+         * Binned documents are named separately, and deliberately.
+         *
+         * The card counts live documents only, so a folder showing "0 وثيقة"
+         * refused for holding one is a contradiction the reader cannot resolve —
+         * and the fix is in a different screen: the recycle bin, not this one.
+         */
+        const parts = [
+          caught.body?.documents > 0 ? `${caught.body.documents} وثيقة` : null,
+          caught.body?.binned > 0 ? `${caught.body.binned} وثيقة في سلة المحذوفات` : null,
+          caught.body?.subfolders > 0 ? `${caught.body.subfolders} مجلداً فرعياً` : null,
+        ].filter(Boolean);
+
+        // The binned case needs the whole route out, not just the name of the
+        // blocker: "delete permanently" queues the erase rather than performing
+        // it, so someone who does only that comes straight back to this refusal.
+        const route = caught.body?.binned > 0
+          ? ' احذف ما في سلة المحذوفات نهائياً، ثم انتظر التنظيف التلقائي (كل ساعة)'
+            + ' أو شغّله فوراً من «الإدارة ← التشخيص ← التخزين».'
+          : ' أفرغه أولاً.';
+
+        setError(`المجلد ليس فارغاً — يحتوي ${parts.join('، و')}.${route}`);
+      } else if (caught instanceof ApiError && caught.code === 'forbidden') {
+        setError('لا تملك صلاحية حذف هذا المجلد.');
+      } else {
+        setError('تعذر حذف المجلد.');
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function createFolder() {
-    const name = window.prompt('اسم المجلد الجديد');
+    const name = await prompt({
+      title: 'مجلد جديد',
+      label: 'اسم المجلد',
+      placeholder: 'مثال: عقود ٢٠٢٦',
+      confirmLabel: 'إنشاء',
+      required: true,
+    });
     if (!name || !name.trim()) return;
 
     setBusy(true);
@@ -239,7 +391,14 @@ export default function Browse() {
   }
 
   async function remove(documentId, title) {
-    if (!window.confirm(`حذف ${title}؟`)) return;
+    const confirmed = await confirm({
+      title: 'حذف الوثيقة',
+      message: `سيُنقل "${title}" إلى سلة المحذوفات.`,
+      detail: 'يبقى قابلاً للاستعادة طوال مهلة السماح، ثم يُمحى محتواه نهائياً.',
+      confirmLabel: 'حذف',
+      variant: 'danger',
+    });
+    if (!confirmed) return;
     setBusy(true);
     try {
       await api.deleteDocument(documentId);
@@ -254,7 +413,7 @@ export default function Browse() {
   if (loading) return <Spinner label="جارٍ التحميل…" />;
 
   const folderCount = data?.folders?.length ?? 0;
-  const documentCount = data?.documents?.length ?? 0;
+  const documentCount = documents.length;
 
   return (
     <div className="space-y-4">
@@ -299,19 +458,27 @@ export default function Browse() {
 
         {/* RTL flex-row: buttons render right-to-left on screen in source order. */}
         <div className="flex flex-row items-center gap-2">
+          {documentCount > 0 ? (
+            <Button
+              variant="secondary"
+              icon={previewPane ? PanelRightClose : PanelRightOpen}
+              onClick={() => {
+                const next = !previewPane;
+                setPreviewPane(next);
+                // Opening onto an empty pane looks broken, so it lands on
+                // something — whatever is already active, else the first row.
+                if (next && !activeDocument && documents.length) activate(documents[0].documentId);
+              }}
+              aria-pressed={previewPane}
+              title="عرض الوثيقة المحددة بجانب القائمة دون فتحها"
+              className={previewPane ? '!border-primary !text-primary' : undefined}
+            >
+              لوحة المعاينة
+            </Button>
+          ) : null}
           {!folderId || permissions.upload ? (
             <Button variant="secondary" icon={FolderPlus} onClick={createFolder} disabled={busy}>
               مجلد جديد
-            </Button>
-          ) : null}
-          {folderId && permissions.managePerms ? (
-            <Button
-              variant="secondary"
-              icon={Shield}
-              onClick={() => setShowPermissions((v) => !v)}
-              disabled={busy}
-            >
-              الصلاحيات
             </Button>
           ) : null}
           {folderId && permissions.upload ? (
@@ -320,39 +487,6 @@ export default function Browse() {
                 {busy ? 'جارٍ الرفع…' : 'رفع وثيقة'}
               </Button>
               <input ref={fileInput} type="file" multiple className="hidden" onChange={upload} />
-              <Button
-                variant="secondary"
-                icon={FolderPlus}
-                onClick={() => folderInput.current?.click()}
-                disabled={busy}
-              >
-                رفع مجلد
-              </Button>
-              {/* webkitdirectory is the only way to pick a directory. React does
-                  not know the attribute, so it is set through a ref callback. */}
-              <input
-                ref={(node) => {
-                  folderInput.current = node;
-                  if (node) {
-                    node.setAttribute('webkitdirectory', '');
-                    node.setAttribute('directory', '');
-                  }
-                }}
-                type="file"
-                multiple
-                className="hidden"
-                onChange={(event) => {
-                  const picked = [...(event.target.files ?? [])].map((file) => ({
-                    file,
-                    // webkitRelativePath is "root/sub/file.pdf"; the file's own
-                    // name is dropped, and so is the outermost folder, which the
-                    // user chose and is already the destination.
-                    path: String(file.webkitRelativePath || '').split('/').slice(1, -1),
-                  }));
-                  event.target.value = '';
-                  if (picked.length) uploadTree(picked);
-                }}
-              />
             </>
           ) : null}
         </div>
@@ -375,15 +509,6 @@ export default function Browse() {
         />
       ) : null}
 
-      {showPermissions && folderId ? (
-        <PermissionsPanel
-          folderId={folderId}
-          folderName={data?.folder?.name ?? ''}
-          onClose={() => setShowPermissions(false)}
-          onChanged={() => refresh()}
-        />
-      ) : null}
-
       {/* Scanning sits beside the ordinary upload, never replacing it: without
           the bridge installed this renders a short note and the file picker
           above keeps working unchanged. */}
@@ -396,32 +521,88 @@ export default function Browse() {
 
       {folderCount > 0 ? (
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-          {data.folders.map((folder) => (
-            <button
-              key={folder.folderId}
-              onClick={() => navigate(`/folders/${folder.folderId}`)}
-              className="flex items-center gap-3 rounded-xl border border-border bg-surface p-3 text-right
-                transition-colors hover:border-border-strong hover:bg-surface-muted/40"
-            >
-              <div className="rounded-lg bg-primary/10 p-2">
-                <Folder size={18} className="text-primary" />
+          {data.folders.map((folder) => {
+            /*
+             * The folder's OWN permissions, not the parent's.
+             *
+             * `permissions` here is the folder being viewed, and at the root
+             * there is no such folder — so reading delete from it meant the
+             * button never appeared on a root folder at all. Every row of the
+             * listing already carries its own effective bits; that is the only
+             * correct source, and it works at every level.
+             */
+            const removable = folder.permissions?.delete && folder.documentCount === 0;
+
+            return (
+              <div
+                key={folder.folderId}
+                className="flex items-center gap-2 rounded-xl border border-border bg-surface p-3
+                  transition-colors hover:border-border-strong hover:bg-surface-muted/40"
+              >
+                <button
+                  onClick={() => navigate(`/folders/${folder.folderId}`)}
+                  className="flex min-w-0 flex-1 items-center gap-3 text-right"
+                >
+                  <div className="rounded-lg bg-primary/10 p-2">
+                    <Folder size={18} className="text-primary" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium text-text">{folder.name}</p>
+                    <p className="num text-xs text-text-muted">{folder.documentCount} وثيقة</p>
+                  </div>
+                  {/* RTL: ChevronLeft points forward on screen. */}
+                  <ChevronLeft size={16} className="shrink-0 text-text-muted" />
+                </button>
+
+                {removable ? (
+                  <button
+                    onClick={() => removeFolder(folder)}
+                    disabled={busy}
+                    title="حذف المجلد الفارغ"
+                    aria-label={`حذف المجلد ${folder.name}`}
+                    className="shrink-0 rounded-lg border border-border p-1.5 text-red-400
+                      transition-colors hover:bg-red-50 hover:text-red-600 disabled:opacity-40"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                ) : null}
               </div>
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium text-text">{folder.name}</p>
-                <p className="num text-xs text-text-muted">{folder.documentCount} وثيقة</p>
-              </div>
-              {/* RTL: ChevronLeft points forward on screen. */}
-              <ChevronLeft size={16} className="shrink-0 text-text-muted" />
-            </button>
-          ))}
+            );
+          })}
         </div>
+      ) : null}
+
+      {/* Asked purely on count: one file is unambiguous and never raises this. */}
+      {pendingBatch ? (
+        <BatchFilePrompt
+          files={pendingBatch}
+          busy={busy}
+          onCancel={() => setPendingBatch(null)}
+          onConfirm={({ mode, title }) => fileBatch(pendingBatch, { mode, title })}
+        />
+      ) : null}
+
+      {folderId ? (
+        <FilterBar value={filters} onChange={setFilters} folderId={folderId} />
       ) : null}
 
       {folderId ? (
         <DropZone
           onFiles={uploadFiles}
-          onTree={uploadTree}
           disabled={busy || !permissions.upload}
+        >
+        {/*
+          RTL grid: the first column in source order is the rightmost on screen,
+          so the table keeps the reading position and the pane sits beside it.
+          One column below xl — a preview squeezed next to a table on a laptop
+          leaves neither readable.
+        */}
+        <div
+          className={
+            previewPane && documentCount > 0
+              ? 'grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_26rem]'
+              : undefined
+          }
         >
         <Card className="overflow-hidden">
           {documentCount > 0 ? (
@@ -433,15 +614,15 @@ export default function Browse() {
                       <button
                         onClick={() =>
                           setSelected(
-                            selected.size === data.documents.length
+                            selected.size === documents.length
                               ? new Set()
-                              : new Set(data.documents.map((d) => d.documentId)),
+                              : new Set(documents.map((d) => d.documentId)),
                           )
                         }
                         aria-label="تحديد الكل"
                         className="text-text-muted hover:text-primary"
                       >
-                        {selected.size === data.documents.length && data.documents.length > 0 ? (
+                        {selected.size === documents.length && documents.length > 0 ? (
                           <CheckSquare size={15} />
                         ) : (
                           <Square size={15} />
@@ -453,12 +634,40 @@ export default function Browse() {
                     <th className="border-b border-border px-4 py-3 text-right font-semibold">النوع</th>
                     <th className="border-b border-border px-4 py-3 text-left font-semibold">الإصدار</th>
                     <th className="border-b border-border px-4 py-3 text-left font-semibold">التاريخ</th>
-                    <th className="border-b border-border px-4 py-3 text-center font-semibold">إجراءات</th>
+                    {/* Fixed width: the action menu opens over the row, not into
+                        the layout, and a column that resizes on hover is worse
+                        than the icon row it replaced. Wide enough, too, that the
+                        ring stays inside the card — this is the last column in
+                        source order, so in RTL it sits against the left edge and
+                        a narrower one would leave the ring hanging off it. */}
+                    <th className="w-32 border-b border-border px-4 py-3 text-center font-semibold">
+                      إجراءات
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border/50">
-                  {data.documents.map((doc, index) => (
-                    <tr key={doc.documentId} className="transition-colors hover:bg-surface-muted/30">
+                  {documents.map((doc, index) => (
+                    <tr
+                      key={doc.documentId}
+                      onMouseEnter={() => previewOnHover(doc.documentId)}
+                      // Clicking the row previews it; clicking the title still
+                      // opens it. The two intents stay separate controls.
+                      onClick={() => {
+                        if (previewPane) activate(doc.documentId);
+                      }}
+                      // aria-current, not aria-selected: the checkbox is what
+                      // "selected" means on this row, and it drives bulk actions.
+                      // This only marks which row the pane is showing.
+                      aria-current={previewPane && doc.documentId === activeId ? 'true' : undefined}
+                      // A background rather than a ring: Tailwind's preflight
+                      // sets border-collapse on tables, and Chrome does not paint
+                      // a box-shadow on a row of a collapsed table.
+                      className={`transition-colors ${
+                        previewPane && doc.documentId === activeId
+                          ? 'bg-primary/10'
+                          : 'hover:bg-surface-muted/30'
+                      }`}
+                    >
                       <td className="px-3 py-3 text-center">
                         <button
                           onClick={() => {
@@ -466,6 +675,9 @@ export default function Browse() {
                             if (next.has(doc.documentId)) next.delete(doc.documentId);
                             else next.add(doc.documentId);
                             setSelected(next);
+                            // Ticking a box is a statement about which document
+                            // you mean, so the pane follows it.
+                            if (next.has(doc.documentId)) activate(doc.documentId);
                           }}
                           aria-label={`تحديد ${doc.title}`}
                           className="text-text-muted hover:text-primary"
@@ -501,34 +713,70 @@ export default function Browse() {
                           >
                             {doc.title}
                           </button>
+                          {/* Said on the row, because a multi-file document
+                              behaves differently on the pages this one links
+                              to: it has no version history and downloads as an
+                              archive. Finding that out only after opening it is
+                              a surprise the listing can cheaply prevent. */}
+                          {doc.multiFile ? (
+                            <span
+                              title={`وثيقة مكوّنة من ${doc.fileCount} ملفات`}
+                              className="num flex shrink-0 items-center gap-1 rounded border border-border
+                                bg-surface-muted px-1.5 py-0.5 text-xs text-text-muted"
+                            >
+                              <Layers size={11} />
+                              {doc.fileCount}
+                            </span>
+                          ) : null}
                           {!doc.canRead ? <ReadOnlyBadge /> : null}
                         </div>
                       </td>
                       <td className="px-4 py-3 text-right text-text-muted">{doc.typeName ?? '—'}</td>
-                      <td className="num px-4 py-3 text-left text-text-muted">{doc.currentVersion}</td>
-                      <td className="num px-4 py-3 text-left text-text-muted">{formatDate(doc.createdAt)}</td>
+                      {/* A multi-file document has no version number — an em
+                          dash is honest where "0" would read as a fault. */}
+                      <td className="num px-4 py-3 text-left text-text-muted">
+                        {doc.multiFile ? '—' : doc.currentVersion}
+                      </td>
+                      {/* The column has room for the date only; the tooltip
+                          carries the time, which is what tells two same-day
+                          uploads apart. */}
+                      <td
+                        className="num px-4 py-3 text-left text-text-muted"
+                        title={formatDateTime(doc.createdAt)}
+                      >
+                        {formatDate(doc.createdAt)}
+                      </td>
                       <td className="px-4 py-3">
-                        <div className="flex items-center justify-center gap-1">
-                          {doc.canRead ? (
-                            <a
-                              href={api.contentUrl(doc.documentId)}
-                              target="_blank"
-                              rel="noreferrer"
-                              title="فتح"
-                              className="rounded-lg border border-border bg-surface p-2 text-text-muted
-                                transition-colors hover:bg-primary/10 hover:text-primary"
-                            >
-                              <Download size={16} />
-                            </a>
-                          ) : null}
-                          {permissions.delete ? (
-                            <IconButton
-                              icon={Trash2}
-                              label="حذف"
-                              onClick={() => remove(doc.documentId, doc.title)}
-                              className="hover:!bg-red-50 hover:!text-red-600"
-                            />
-                          ) : null}
+                        <div className="flex items-center justify-center">
+                          <ExpandableActions
+                            onView={doc.canRead ? () => navigate(`/documents/${doc.documentId}`) : undefined}
+                            onDelete={permissions.delete ? () => remove(doc.documentId, doc.title) : undefined}
+                            customActions={[
+                              {
+                                key: 'preview',
+                                icon: Eye,
+                                show: doc.canRead,
+                                title: 'معاينة',
+                                onClick: () => {
+                                  setPreviewPane(true);
+                                  activate(doc.documentId);
+                                },
+                                bgClass: 'bg-indigo-500/10',
+                                textClass: 'text-indigo-600',
+                                hoverClass: 'hover:bg-indigo-500/20',
+                              },
+                              {
+                                key: 'download',
+                                icon: Download,
+                                show: doc.canRead,
+                                title: 'تنزيل',
+                                href: api.contentUrl(doc.documentId),
+                                bgClass: 'bg-primary/10',
+                                textClass: 'text-primary',
+                                hoverClass: 'hover:bg-primary/20',
+                              },
+                            ]}
+                          />
                         </div>
                       </td>
                     </tr>
@@ -544,6 +792,18 @@ export default function Browse() {
             />
           )}
         </Card>
+
+        {previewPane && documentCount > 0 ? (
+          <DocumentPreview
+            document={activeDocument}
+            position={activeIndex >= 0 ? activeIndex + 1 : null}
+            total={documentCount}
+            onStep={step}
+            onOpen={(picked) => navigate(`/documents/${picked.documentId}`)}
+            onClose={() => setPreviewPane(false)}
+          />
+        ) : null}
+        </div>
         </DropZone>
       ) : null}
 
@@ -568,6 +828,7 @@ export default function Browse() {
 function BulkBar({ selected, permissions, onClear, onDone, onError }) {
   const [busy, setBusy] = useState(false);
   const { folders } = useTree();
+  const { confirm } = useDialogs();
   const ids = [...selected];
 
   async function run(fn, describe) {
@@ -646,8 +907,15 @@ function BulkBar({ selected, permissions, onClear, onDone, onError }) {
             variant="danger"
             icon={Trash2}
             disabled={busy}
-            onClick={() => {
-              if (window.confirm(`حذف ${selected.size} وثيقة؟`)) run(() => api.bulkDelete(ids), 'حذف');
+            onClick={async () => {
+              const confirmed = await confirm({
+                title: 'حذف الوثائق المحددة',
+                message: `سيُنقل ${selected.size} وثيقة إلى سلة المحذوفات.`,
+                detail: 'يُبلَّغ عن كل وثيقة على حدة — قد يمتد التحديد على مجلدات صلاحياتك فيها مختلفة.',
+                confirmLabel: 'حذف',
+                variant: 'danger',
+              });
+              if (confirmed) run(() => api.bulkDelete(ids), 'حذف');
             }}
             className="!px-3 !py-1 text-xs"
           >

@@ -493,4 +493,235 @@ describe('administration', { skip: CONFIGURED ? false : target.reason }, () => {
     assert.equal(typeof body.documents.unindexed, 'number');
     assert.equal(typeof body.ocr.enabled, 'boolean');
   });
+
+  /**
+   * The cleanup button, over HTTP, including the part that explains a zero.
+   *
+   * The sweep and the folder rule are tested against the database elsewhere;
+   * this covers the wire between them and the screen. A response of
+   * `purged: 0` on its own is indistinguishable from a broken button — the
+   * counts of what is still waiting are what make it readable, so they are part
+   * of the contract, not a nicety.
+   */
+  test('the storage sweep reports what it did and what is still waiting', async () => {
+    const dry = await call('POST', '/api/admin/storage/purge', bossCookie, { dryRun: true });
+    assert.equal(dry.statusCode, 200, dry.body);
+
+    const body = dry.json();
+    assert.equal(body.documents.dryRun, true, 'a dry run must say so');
+    assert.equal(typeof body.documents.purged, 'number');
+
+    // Present whether or not anything was purged: this is the answer to "why 0?".
+    assert.equal(typeof body.bin.waiting, 'number', 'still inside the grace period');
+    assert.equal(typeof body.bin.tombstones, 'number', 'content already gone');
+    assert.equal(typeof body.bin.graceDays, 'number');
+
+    const real = await call('POST', '/api/admin/storage/purge', bossCookie, { dryRun: false });
+    assert.equal(real.statusCode, 200, real.body);
+    assert.equal(real.json().documents.dryRun, false);
+    assert.equal(real.json().documents.failed, 0);
+  });
+
+  /** And it is an administrator's button, not everyone's. */
+  test('an ordinary user cannot run the storage sweep', async () => {
+    const response = await call('POST', '/api/admin/storage/purge', clerkCookie, { dryRun: false });
+    assert.equal(response.statusCode, 403);
+  });
+
+  // ── User editing ───────────────────────────────────────────────────────
+
+  test('creating a user with an email stores and returns it in the list', async () => {
+    const response = await call('POST', '/api/admin/users', bossCookie, {
+      username: 'emailuser',
+      displayName: 'موظف بريد',
+      email: 'emailuser@example.com',
+    });
+    assert.equal(response.statusCode, 201);
+
+    // The list must surface the email that was stored at creation time.
+    const list = await call('GET', '/api/admin/users', bossCookie);
+    const found = list.json().find((u) => u.username === 'emailuser');
+    assert.ok(found, 'user must appear in the list');
+    assert.equal(found.email, 'emailuser@example.com');
+  });
+
+  test('PATCH /users/:userId changes display name and email and the list reflects both', async () => {
+    await makeUser('editme');
+    const userId = String(id.editme);
+
+    const response = await call('PATCH', `/api/admin/users/${userId}`, bossCookie, {
+      displayName: 'اسم معدّل',
+      email: 'editme@example.com',
+    });
+    assert.equal(response.statusCode, 200);
+
+    const list = await call('GET', '/api/admin/users', bossCookie);
+    const found = list.json().find((u) => u.username === 'editme');
+    assert.equal(found.displayName, 'اسم معدّل', 'display name must be updated');
+    assert.equal(found.email, 'editme@example.com', 'email must be updated');
+  });
+
+  test('an invalid email in PATCH answers 400 invalid_email and changes nothing', async () => {
+    await makeUser('nochange');
+    const userId = String(id.nochange);
+
+    // First set a valid email so we can assert it is unchanged after the bad request.
+    await call('PATCH', `/api/admin/users/${userId}`, bossCookie, {
+      displayName: 'لا تغيير',
+      email: 'nochange@example.com',
+    });
+
+    const bad = await call('PATCH', `/api/admin/users/${userId}`, bossCookie, {
+      displayName: 'لا تغيير',
+      email: 'not-an-email',
+    });
+    assert.equal(bad.statusCode, 400);
+    assert.equal(bad.json().error, 'invalid_email');
+
+    // The stored email must be unchanged.
+    const list = await call('GET', '/api/admin/users', bossCookie);
+    const found = list.json().find((u) => u.username === 'nochange');
+    assert.equal(found.email, 'nochange@example.com', 'email must not have changed after a failed update');
+  });
+
+  test('PATCH /users/:userId with an unknown id answers 404', async () => {
+    const response = await call('PATCH', '/api/admin/users/999999999', bossCookie, {
+      displayName: 'لا أحد',
+    });
+    assert.equal(response.statusCode, 404);
+  });
+
+  test('PATCH /users/:userId with only email keeps the display name and stores the email', async () => {
+    await makeUser('emailonly');
+    const userId = String(id.emailonly);
+
+    // displayName is optional — sending only email must succeed.
+    const response = await call('PATCH', `/api/admin/users/${userId}`, bossCookie, {
+      email: 'only@example.test',
+    });
+    assert.equal(response.statusCode, 200, response.body);
+
+    const list = await call('GET', '/api/admin/users', bossCookie);
+    const found = list.json().find((u) => u.username === 'emailonly');
+    assert.ok(found, 'user must still appear in the list');
+    assert.equal(found.email, 'only@example.test', 'email must be stored');
+    // The display name comes from makeUser — it must be unchanged.
+    assert.ok(found.displayName, 'display name must be preserved');
+  });
+
+  // ── Group editing and activation ───────────────────────────────────────
+
+  test('PATCH /groups/:groupId renames the group and the name appears in both the groups list and the principals picker', async () => {
+    const created = await call('POST', '/api/admin/groups', bossCookie, { name: 'مجموعة قديمة' });
+    assert.equal(created.statusCode, 201);
+    const groupId = created.json().groupId;
+
+    const renamed = await call('PATCH', `/api/admin/groups/${groupId}`, bossCookie, {
+      name: 'مجموعة محدّثة',
+    });
+    assert.equal(renamed.statusCode, 200);
+
+    // Both the groups list and the principals picker must reflect the new name.
+    const groups = (await call('GET', '/api/admin/groups', bossCookie)).json().groups;
+    assert.ok(
+      groups.some((g) => g.groupId === groupId && g.name === 'مجموعة محدّثة'),
+      'renamed group must appear in GET /groups',
+    );
+
+    const principals = (await call('GET', '/api/admin/principals?q=مجموعة محدّثة', bossCookie)).json().principals;
+    assert.ok(
+      principals.some((p) => p.principalId === groupId),
+      'renamed group must appear in the principals picker under the new name',
+    );
+  });
+
+  test('renaming a group to an already-taken name answers 409 name_taken', async () => {
+    await call('POST', '/api/admin/groups', bossCookie, { name: 'اسم مأخوذ' });
+    const second = await call('POST', '/api/admin/groups', bossCookie, { name: 'مجموعة ثانية' });
+    const groupId = second.json().groupId;
+
+    const response = await call('PATCH', `/api/admin/groups/${groupId}`, bossCookie, { name: 'اسم مأخوذ' });
+    assert.equal(response.statusCode, 409);
+    assert.equal(response.json().error, 'name_taken');
+  });
+
+  /**
+   * Deactivating a group must withdraw every permission it conveyed in the same
+   * transaction. Reactivating must restore them without any manual step.
+   */
+  test('deactivating a group bumps the epoch, drops member permissions, and reactivating restores them', async () => {
+    await makeUser('grpmember');
+
+    // Create a group, give it an ACE on cabinet, add the member.
+    const groupRes = await call('POST', '/api/admin/groups', bossCookie, { name: 'مجموعة مؤقتة' });
+    assert.equal(groupRes.statusCode, 201);
+    const groupId = groupRes.json().groupId;
+
+    await sql`
+      INSERT INTO dbo.access_control_entries (folder_id, principal_id, allow_bits, deny_bits)
+      VALUES (${id.cabinet}, ${groupId}, ${PERM.BROWSE | PERM.READ}, 0)
+    `.execute(db);
+
+    await call('POST', `/api/admin/groups/${groupId}/members`, bossCookie, {
+      principalId: String(id.grpmember),
+    });
+
+    // The member must now have access.
+    assert.ok((await permsOf(id.grpmember, id.cabinet)) > 0, 'member must have permission via the group');
+
+    const before = await epoch();
+
+    const deactivated = await call('POST', `/api/admin/groups/${groupId}/active`, bossCookie, { active: false });
+    assert.equal(deactivated.statusCode, 200);
+
+    // Epoch must have been bumped inside the same transaction.
+    assert.ok((await epoch()) > before, 'deactivation must bump the ACL epoch');
+
+    // The member must have lost access.
+    assert.equal(await permsOf(id.grpmember, id.cabinet), 0, 'member must lose permission when group is deactivated');
+
+    // The list must report the group as inactive.
+    const groups = (await call('GET', '/api/admin/groups', bossCookie)).json().groups;
+    const found = groups.find((g) => g.groupId === groupId);
+    assert.equal(found.isActive, false, 'GET groups must show isActive false');
+
+    // Reactivating must restore access without any manual intervention.
+    await call('POST', `/api/admin/groups/${groupId}/active`, bossCookie, { active: true });
+    assert.ok((await permsOf(id.grpmember, id.cabinet)) > 0, 'reactivation must restore the permission');
+  });
+
+  // ── Audit trail ────────────────────────────────────────────────────────
+
+  /**
+   * The audit tests run after all the mutation tests above so they can assert
+   * that every expected action was recorded. They query the table directly
+   * rather than through the API because the API paginates and filters — querying
+   * the table is the only way to be certain a row is actually there.
+   */
+  test('audit log contains expected entries for identity and permission mutations by boss', async () => {
+    const rows = await sql`
+      SELECT action FROM dbo.audit_log WHERE actor_username = 'boss'
+    `.execute(db);
+
+    const actions = rows.rows.map((r) => r.action);
+
+    // user.created: every POST /users call above writes this.
+    assert.ok(actions.includes('user.created'), 'user.created must be in the audit log');
+
+    // user.updated: PATCH /users/:userId above writes this.
+    assert.ok(actions.includes('user.updated'), 'user.updated must be in the audit log');
+
+    // group.updated: PATCH /groups/:groupId above writes this.
+    assert.ok(actions.includes('group.updated'), 'group.updated must be in the audit log');
+
+    // group.deactivated: POST /groups/:groupId/active with active false above writes this.
+    assert.ok(actions.includes('group.deactivated'), 'group.deactivated must be in the audit log');
+
+    // group.activated: the group is reactivated later in the same deactivation test.
+    assert.ok(actions.includes('group.activated'), 'group.activated must be in the audit log');
+
+    // acl.entry_set: PUT /folders/:folderId/acl/:principalId is called in several
+    // tests above (e.g. "DENY is storable" and "a role is a template").
+    assert.ok(actions.includes('acl.entry_set'), 'acl.entry_set must be in the audit log');
+  });
 });

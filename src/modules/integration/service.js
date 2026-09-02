@@ -62,7 +62,16 @@ export async function createApiKey({ name, userId, createdBy, expiresAt = null }
   const secret = randomBytes(32).toString('base64url');
   const key = `${prefix}.${secret}`;
 
-  const iso = expiresAt ? new Date(expiresAt).toISOString() : null;
+  let iso = null;
+  if (expiresAt) {
+    const parsed = new Date(expiresAt);
+    // An unparseable string yields NaN; a past date creates a key that is
+    // already expired — both are caller errors, not server errors.
+    if (isNaN(parsed.getTime()) || parsed <= new Date()) {
+      return { ok: false, reason: 'invalid_expiry' };
+    }
+    iso = parsed.toISOString();
+  }
 
   const result = await sql`
     INSERT INTO dbo.api_keys (name, key_hash, key_prefix, user_id, created_by, expires_at)
@@ -149,20 +158,32 @@ export async function resolveApiKey(presented) {
 
 // ── Webhooks ─────────────────────────────────────────────────────────────
 
-export async function createWebhook({ name, url, events, createdBy }) {
+/**
+ * Validates the three mutable webhook fields so createWebhook and updateWebhook
+ * cannot drift out of sync. Returns { ok: false, reason } on the first problem,
+ * or { ok: true, clean, parsedUrl, selected } on success.
+ */
+function validateWebhook({ name, url, events }) {
   const clean = String(name ?? '').trim();
   if (!clean) return { ok: false, reason: 'invalid_name' };
 
-  let parsed;
+  let parsedUrl;
   try {
-    parsed = new URL(String(url));
+    parsedUrl = new URL(String(url));
   } catch {
     return { ok: false, reason: 'invalid_url' };
   }
-  if (!['http:', 'https:'].includes(parsed.protocol)) return { ok: false, reason: 'invalid_url' };
+  if (!['http:', 'https:'].includes(parsedUrl.protocol)) return { ok: false, reason: 'invalid_url' };
 
   const selected = (Array.isArray(events) ? events : []).filter((e) => WEBHOOK_EVENTS.includes(e));
   if (selected.length === 0) return { ok: false, reason: 'no_events' };
+
+  return { ok: true, clean, parsedUrl, selected };
+}
+
+export async function createWebhook({ name, url, events, createdBy }) {
+  const v = validateWebhook({ name, url, events });
+  if (!v.ok) return v;
 
   // Returned once. The receiver uses it to verify the HMAC on every delivery.
   const secret = randomBytes(24).toString('base64url');
@@ -170,10 +191,44 @@ export async function createWebhook({ name, url, events, createdBy }) {
   const result = await sql`
     INSERT INTO dbo.webhooks (name, url, events, secret_hash, created_by)
     OUTPUT INSERTED.webhook_id AS wid
-    VALUES (${clean}, ${parsed.toString()}, ${selected.join(',')}, ${hash(secret)}, ${createdBy})
+    VALUES (${v.clean}, ${v.parsedUrl.toString()}, ${v.selected.join(',')}, ${hash(secret)}, ${createdBy})
   `.execute(db);
 
   return { ok: true, webhookId: String(result.rows[0].wid), secret };
+}
+
+/**
+ * Updates the three mutable webhook fields (name, url, events). The secret_hash
+ * is deliberately left untouched — the receiver keeps verifying with the secret
+ * it already has, and rotating it would silently break every running consumer.
+ */
+export async function updateWebhook({ webhookId, name, url, events }) {
+  const v = validateWebhook({ name, url, events });
+  if (!v.ok) return v;
+
+  const result = await sql`
+    UPDATE dbo.webhooks
+       SET name   = ${v.clean},
+           url    = ${v.parsedUrl.toString()},
+           events = ${v.selected.join(',')}
+     WHERE webhook_id = ${webhookId}
+  `.execute(db);
+
+  return Number(result.numAffectedRows ?? 0) > 0 ? { ok: true } : { ok: false, reason: 'not_found' };
+}
+
+/**
+ * Pauses or resumes a webhook. emitEvent and deliverPending already filter on
+ * is_active, so pausing stops new deliveries from being queued and halts the
+ * retry loop for ones already queued. Deleting would lose the secret, breaking
+ * the receiver's signature verification on any reactivation.
+ */
+export async function setWebhookActive({ webhookId, active }) {
+  const result = await sql`
+    UPDATE dbo.webhooks SET is_active = ${active ? 1 : 0} WHERE webhook_id = ${webhookId}
+  `.execute(db);
+
+  return Number(result.numAffectedRows ?? 0) > 0 ? { ok: true } : { ok: false, reason: 'not_found' };
 }
 
 export async function listWebhooks() {
@@ -321,6 +376,16 @@ export async function createShareLink({
   // let someone who can only see a title hand out its contents.
   const bits = await documentPermission(userId, documentId);
   if (bits === null || !has(bits, PERM.READ)) return { ok: false, reason: 'not_found' };
+
+  // A share link delivers one file by version number, and a multi-file document
+  // has no version to point at. Left unchecked, the link would resolve to
+  // version 0, find nothing, and hand the recipient a broken page — while the
+  // sharer's own UI showed a link that looked fine. Refused at creation, where
+  // the person can still be told why.
+  const { isMultiFileDocument } = await import('../documents/service.js');
+  if (await isMultiFileDocument(documentId)) {
+    return { ok: false, reason: 'multi_file_document' };
+  }
 
   const hours = Math.min(Math.max(Number(expiresInHours) || 168, 1), 24 * 90);
   const token = randomBytes(32).toString('base64url');

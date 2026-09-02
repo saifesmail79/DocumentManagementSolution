@@ -141,6 +141,16 @@ export const config = Object.freeze({
     maxTitleLength: integer('STORAGE_MAX_TITLE_LENGTH', 120, { min: 20, max: 200 }),
     /** Largest accepted upload. 200MB covers a long colour scan batch. */
     maxUploadBytes: integer('STORAGE_MAX_UPLOAD_BYTES', 200 * 1024 * 1024, { min: 1024 }),
+    /**
+     * Most files one batch upload may carry.
+     *
+     * This is the cap for both batch modes — N separate documents and one
+     * document of N constituent files. It is enforced twice: @fastify/multipart
+     * refuses to yield more parts than this, and the handler counts as it goes,
+     * because the plugin's limit produces a truncated request rather than an
+     * error the user can read.
+     */
+    maxFilesPerUpload: integer('STORAGE_MAX_FILES_PER_UPLOAD', 50, { min: 1, max: 500 }),
     /** Verify SHA-256 on read for files at or below this size; larger files stream-verify. */
     verifyOnReadMaxBytes: integer('STORAGE_VERIFY_ON_READ_MAX_BYTES', 4 * 1024 * 1024, { min: 0 }),
     /** Days a soft-deleted file survives before the sweep removes it from disk. */
@@ -173,8 +183,16 @@ export const config = Object.freeze({
     /**
      * Minimum password length. NIST 800-63B: length beats composition rules, and
      * forced rotation makes passwords worse, so neither is imposed here.
+     *
+     * 12 is the default and the recommendation. It is not a floor: the bound
+     * below matches the one on the corresponding setting, because a limit
+     * enforced here and not there — or the reverse — means the same policy is
+     * accepted from one direction and refused from the other.
+     *
+     * The ceiling of 200 is the longest password `validatePassword` accepts. A
+     * minimum above it is unsatisfiable rather than merely lax.
      */
-    minPasswordLength: integer('AUTH_MIN_PASSWORD_LENGTH', 12, { min: 8, max: 128 }),
+    minPasswordLength: integer('AUTH_MIN_PASSWORD_LENGTH', 12, { min: 1, max: 200 }),
     /** Cookie name for the session token. */
     cookieName: optional('AUTH_COOKIE_NAME', 'dms_session'),
     /**
@@ -259,6 +277,25 @@ export const config = Object.freeze({
     /** Below this many characters, OCR is treated as having found nothing. */
     minCharacters: integer('OCR_MIN_CHARACTERS', 24, { min: 1 }),
     maxChars: integer('OCR_MAX_CHARS', 2_000_000, { min: 1000 }),
+  }),
+
+  classification: Object.freeze({
+    /**
+     * The document-recognition pilot. OFF by default: it costs a Ghostscript
+     * and a Tesseract pass per document and exists to be measured before
+     * anything routes on it. The stored setting `classification.enabled`
+     * overrides this at runtime, so a pilot machine switches it on from the
+     * administration screen and a production install never notices it.
+     */
+    enabled: boolean('CLASSIFICATION_ENABLED', false),
+    pollMs: integer('CLASSIFICATION_POLL_MS', 15_000, { min: 1000 }),
+    /** Jobs per polling pass. Each is an OCR pass, so this bounds how long a tick can run. */
+    batchSize: integer('CLASSIFICATION_BATCH_SIZE', 10, { min: 1, max: 500 }),
+    maxAttempts: integer('CLASSIFICATION_MAX_ATTEMPTS', 3, { min: 1, max: 20 }),
+    /** Hard kill for one rasterise-and-recognise run of a single page. */
+    timeoutMs: integer('CLASSIFICATION_TIMEOUT_MS', 180_000, { min: 10_000 }),
+    /** Resolution page one is rasterised at. 300 is what Tesseract's documentation asks for. */
+    dpi: integer('CLASSIFICATION_DPI', 300, { min: 72, max: 600 }),
   }),
 
   mail: Object.freeze({

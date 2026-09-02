@@ -35,6 +35,7 @@ import {
 import { settingsRoutes } from './modules/settings/routes.js';
 import { collaborationRoutes } from './modules/collaboration/routes.js';
 import { integrationRoutes, shareRoutes } from './modules/integration/routes.js';
+import { classificationRoutes, classificationAdminRoutes } from './modules/classification/routes.js';
 
 const log = moduleLogger('server');
 
@@ -42,6 +43,9 @@ const log = moduleLogger('server');
  * @param {{logger?: boolean}} [options]
  * @returns {Promise<import('fastify').FastifyInstance>}
  */
+/** 4 GiB. See the multipart `fileSize` note below. */
+const UPLOAD_HARD_CEILING = 4 * 1024 * 1024 * 1024;
+
 export async function buildApp({ logger: withLogger = true } = {}) {
   const app = Fastify({
     // Reuse the application pino instance so request logs carry the same
@@ -65,8 +69,30 @@ export async function buildApp({ logger: withLogger = true } = {}) {
 
   // Uploads stream to storage rather than buffering: a 200MB scan batch held in
   // memory is 200MB of heap per concurrent upload.
+  //
+  // `files` is the batch cap, not one: selecting several documents at once and
+  // being asked whether they are one entry or many is the ordinary filing
+  // action here. At files:1 the plugin silently stops yielding after the first
+  // part, so a batch would have been truncated rather than refused — the
+  // handler counts parts itself for exactly that reason.
   await app.register(multipart, {
-    limits: { fileSize: config.storage.maxUploadBytes, files: 1 },
+    // One over the batch cap, deliberately: the plugin's own limit produces a
+    // truncated request rather than a message anyone can read, so the extra slot
+    // lets the handler's counter see the overflow and refuse it by name.
+    limits: {
+      /*
+       * A hard ceiling, not the working limit.
+       *
+       * The working limit is the upload.max_bytes *setting*, enforced when each
+       * upload is staged — this value is fixed when the process starts and
+       * cannot follow the setting up or down. So it is set well above any
+       * reasonable working limit and serves one purpose: an absolute bound on
+       * what a single request may stream at the server, whatever the settings
+       * table says or fails to say.
+       */
+      fileSize: UPLOAD_HARD_CEILING,
+      files: config.storage.maxFilesPerUpload + 1,
+    },
   });
 
   /**
@@ -94,6 +120,11 @@ export async function buildApp({ logger: withLogger = true } = {}) {
   await app.register(settingsRoutes, { prefix: '/api/settings' });
   await app.register(collaborationRoutes, { prefix: '/api' });
   await app.register(integrationRoutes, { prefix: '/api' });
+
+  // The recognition pilot. Both scopes answer "disabled" while its switch is
+  // off, so registering them on a production install changes nothing there.
+  await app.register(classificationRoutes, { prefix: '/api' });
+  await app.register(classificationAdminRoutes, { prefix: '/api/admin/classification' });
 
   // Public: the one route that serves document bytes without a session. It
   // enforces its own expiry, password and download cap.

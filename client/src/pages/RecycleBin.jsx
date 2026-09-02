@@ -6,6 +6,7 @@ import { api } from '../api.js';
 import { formatDate } from '../format.js';
 import { Button, Card, Spinner, EmptyState, Alert } from '../components/ui.jsx';
 import { useTree } from '../TreeContext.jsx';
+import { useDialogs } from '../components/DialogProvider.jsx';
 
 /**
  * The recycle bin.
@@ -22,6 +23,7 @@ export default function RecycleBin() {
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
   const [busy, setBusy] = useState(false);
+  const { confirm } = useDialogs();
 
   const load = useCallback(async () => {
     setError(null);
@@ -56,19 +58,26 @@ export default function RecycleBin() {
   }
 
   async function purge(document) {
-    // No undo at all past this point, so the confirmation names the document.
-    if (
-      !window.confirm(
-        `حذف "${document.title}" نهائياً؟ لا يمكن التراجع، وسيُمحى الملف من القرص.`,
-      )
-    ) {
-      return;
-    }
+    // No undo at all past this point, so the confirmation names the document
+    // and states the consequence separately from the question.
+    const confirmed = await confirm({
+      title: 'حذف نهائي',
+      message: `سيُحذف "${document.title}" نهائياً.`,
+      detail: 'لا يمكن التراجع عن هذا الإجراء، ويُمحى الملف من القرص.',
+      confirmLabel: 'حذف نهائياً',
+      variant: 'danger',
+    });
+    if (!confirmed) return;
 
     setBusy(true);
     try {
       await api.purgeDocument(document.documentId);
-      setNotice(`سيُمحى "${document.title}" نهائياً عند التنظيف القادم.`);
+      // Says when and where, because "the next cleanup" on its own is not
+      // something anyone can act on or wait for with any confidence.
+      setNotice(
+        `سيُمحى "${document.title}" نهائياً عند التنظيف القادم — يجري تلقائياً كل ساعة، `
+        + 'أو شغّله فوراً من «الإدارة ← التشخيص ← التخزين».',
+      );
       await load();
     } catch {
       setError('تعذر الحذف النهائي.');

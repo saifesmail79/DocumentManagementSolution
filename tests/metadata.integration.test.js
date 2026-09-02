@@ -451,4 +451,180 @@ describe('metadata', { skip: CONFIGURED ? false : target.reason }, () => {
     assert.equal(entries.rows.length, 1);
     assert.equal(entries.rows[0].actor_username, 'editor');
   });
+
+  // ── Definition mutations (PATCH / active toggle) ───────────────────────
+
+  test('renaming a type shows in the list; a name clash answers 409 name_taken', async () => {
+    // Create a second type so we have something to clash with.
+    const second = await call('POST', '/api/metadata/types', bossCookie, { name: 'مراسلات' });
+    assert.equal(second.statusCode, 201);
+
+    // Rename the main type.
+    const renamed = await call('PATCH', `/api/metadata/types/${typeId}`, bossCookie, {
+      name: 'عقود محدَّثة',
+    });
+    assert.equal(renamed.statusCode, 200);
+
+    const list = (await call('GET', '/api/metadata/types', editorCookie)).json();
+    assert.ok(list.types.some((t) => t.name === 'عقود محدَّثة'), 'new name appears in list');
+    assert.ok(!list.types.some((t) => t.name === 'عقد'), 'old name is gone');
+
+    // Restore the original name so later tests keep working.
+    await call('PATCH', `/api/metadata/types/${typeId}`, bossCookie, { name: 'عقد' });
+
+    // Clash with the second type's name.
+    const clash = await call('PATCH', `/api/metadata/types/${typeId}`, bossCookie, {
+      name: 'مراسلات',
+    });
+    assert.equal(clash.statusCode, 409);
+    assert.equal(clash.json().error, 'name_taken');
+  });
+
+  test('editing a field flips isRequired/isSearchable and renames it; reading reflects all three', async () => {
+    const created = await call('POST', '/api/metadata/fields', bossCookie, {
+      name: 'حقل للتعديل',
+      dataType: 'text',
+      isRequired: false,
+      isSearchable: true,
+    });
+    assert.equal(created.statusCode, 201);
+    const fieldId = created.json().fieldId;
+
+    const patched = await call('PATCH', `/api/metadata/fields/${fieldId}`, bossCookie, {
+      name: 'حقل معدَّل',
+      isRequired: true,
+      isSearchable: false,
+    });
+    assert.equal(patched.statusCode, 200);
+
+    const fields = (await call('GET', '/api/metadata/fields', editorCookie)).json().fields;
+    const field = fields.find((f) => f.fieldId === fieldId);
+    assert.ok(field, 'edited field should appear in the list');
+    assert.equal(field.name, 'حقل معدَّل', 'name updated');
+    assert.equal(field.isRequired, true, 'isRequired flipped');
+    assert.equal(field.isSearchable, false, 'isSearchable flipped');
+  });
+
+  test('choices survive an edit: kept option keeps its choiceId, dropped one is deactivated, new one appears, document still reads the kept value', async () => {
+    // Create a choice field with three options.
+    const created = await call('POST', '/api/metadata/fields', bossCookie, {
+      name: 'تصنيف الوثيقة',
+      dataType: 'choice',
+      choices: ['الأول', 'الثاني', 'الثالث'],
+    });
+    assert.equal(created.statusCode, 201);
+    const fieldId = created.json().fieldId;
+
+    const fields = (await call('GET', '/api/metadata/fields', editorCookie)).json().fields;
+    const field = fields.find((f) => f.fieldId === fieldId);
+    assert.equal(field.choices.length, 3);
+    const keptChoice = field.choices.find((c) => c.label === 'الأول');
+    const droppedChoice = field.choices.find((c) => c.label === 'الثاني');
+    const droppedChoice2 = field.choices.find((c) => c.label === 'الثالث');
+    assert.ok(keptChoice);
+    assert.ok(droppedChoice);
+    assert.ok(droppedChoice2);
+
+    // Set the first choice on a document so we can verify it survives.
+    const documentId = await makeDocument(editorCookie, 'وثيقة باختيار');
+    await call('PATCH', `/api/documents/${documentId}/metadata`, editorCookie, {
+      fields: [{ fieldId, value: keptChoice.choiceId }],
+    });
+
+    // PATCH: keep 'الأول', drop 'الثاني' and 'الثالث', add 'الرابع'.
+    const patched = await call('PATCH', `/api/metadata/fields/${fieldId}`, bossCookie, {
+      choices: ['الأول', 'الرابع'],
+    });
+    assert.equal(patched.statusCode, 200);
+
+    const afterFields = (await call('GET', '/api/metadata/fields', editorCookie)).json().fields;
+    const afterField = afterFields.find((f) => f.fieldId === fieldId);
+
+    // Kept option preserves its choice_id.
+    const afterKept = afterField.choices.find((c) => c.label === 'الأول');
+    assert.ok(afterKept, 'kept choice still appears');
+    assert.equal(afterKept.choiceId, keptChoice.choiceId, 'kept choice preserves its id');
+
+    // New option appears.
+    assert.ok(afterField.choices.find((c) => c.label === 'الرابع'), 'new choice appears');
+
+    // Both dropped choices are deactivated in the DB (not deleted — FK references must stay valid).
+    const droppedRow = await sql`
+      SELECT is_active FROM dbo.custom_field_choices WHERE choice_id = ${droppedChoice.choiceId}
+    `.execute(db);
+    assert.equal(Number(droppedRow.rows[0].is_active), 0, 'dropped choice الثاني is_active = 0');
+
+    const droppedRow2 = await sql`
+      SELECT is_active FROM dbo.custom_field_choices WHERE choice_id = ${droppedChoice2.choiceId}
+    `.execute(db);
+    assert.equal(Number(droppedRow2.rows[0].is_active), 0, 'dropped choice الثالث is_active = 0');
+
+    // Neither dropped choice appears in GET /api/metadata/fields.
+    assert.ok(!afterField.choices.find((c) => c.label === 'الثاني'), 'dropped choice الثاني hidden from list');
+    assert.ok(!afterField.choices.find((c) => c.label === 'الثالث'), 'dropped choice الثالث hidden from list');
+
+    // The document still reads back the kept choice value.
+    const document = (await call('GET', `/api/documents/${documentId}`, editorCookie)).json();
+    const fieldValue = document.fields.find((f) => f.fieldId === fieldId);
+    assert.ok(fieldValue, 'document still carries the field value');
+    assert.equal(fieldValue.choiceLabel, 'الأول', 'document reads back the kept choice label');
+  });
+
+  test('label edit changes name/rank/colour; deactivate hides it; ?inactive=true lists it; reactivate restores it; rank clash answers 409', async () => {
+    const created = await call('POST', '/api/metadata/labels', bossCookie, {
+      name: 'تجريبي',
+      severityRank: 10,
+    });
+    assert.equal(created.statusCode, 201);
+    const labelId = created.json().labelId;
+
+    // Edit name and colour.
+    const patched = await call('PATCH', `/api/metadata/labels/${labelId}`, bossCookie, {
+      name: 'تجريبي معدَّل',
+      colour: '#FF5733',
+    });
+    assert.equal(patched.statusCode, 200);
+
+    const labels = (await call('GET', '/api/metadata/labels', editorCookie)).json().labels;
+    const label = labels.find((l) => l.labelId === labelId);
+    assert.ok(label, 'updated label appears');
+    assert.equal(label.name, 'تجريبي معدَّل', 'name updated');
+    assert.equal(label.colour, '#FF5733', 'colour updated');
+
+    // Deactivate: should vanish from the default listing.
+    const deactivated = await call('POST', `/api/metadata/labels/${labelId}/active`, bossCookie, {
+      active: false,
+    });
+    assert.equal(deactivated.statusCode, 200);
+
+    const hidden = (await call('GET', '/api/metadata/labels', editorCookie)).json().labels;
+    assert.ok(!hidden.find((l) => l.labelId === labelId), 'deactivated label not in default list');
+
+    // ?inactive=true still lists it with isActive = false.
+    const all = (await call('GET', '/api/metadata/labels?inactive=true', editorCookie)).json().labels;
+    const inactiveLabel = all.find((l) => l.labelId === labelId);
+    assert.ok(inactiveLabel, 'deactivated label in ?inactive=true list');
+    assert.equal(inactiveLabel.isActive, false, 'isActive is false');
+
+    // Reactivating brings it back to the default listing.
+    await call('POST', `/api/metadata/labels/${labelId}/active`, bossCookie, { active: true });
+    const restored = (await call('GET', '/api/metadata/labels', editorCookie)).json().labels;
+    assert.ok(restored.find((l) => l.labelId === labelId), 'reactivated label reappears');
+
+    // Rank clash: 'عام' already occupies rank 1.
+    const rankClash = await call('PATCH', `/api/metadata/labels/${labelId}`, bossCookie, {
+      severityRank: 1,
+    });
+    assert.equal(rankClash.statusCode, 409);
+    assert.equal(rankClash.json().error, 'rank_taken');
+  });
+
+  test('dbo.audit_log has metadata.definition_changed rows for boss after definition mutations', async () => {
+    const entries = await sql`
+      SELECT action, actor_username FROM dbo.audit_log
+       WHERE action = 'metadata.definition_changed' AND actor_username = 'boss'
+    `.execute(db);
+
+    assert.ok(entries.rows.length > 0, 'audit trail carries metadata.definition_changed rows from boss');
+  });
 });

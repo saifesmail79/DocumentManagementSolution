@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { KeyRound } from 'lucide-react';
+import { passwordProblemMessages } from '../passwordProblems.js';
 
 import { useAuth } from '../auth.jsx';
 import { api, ApiError } from '../api.js';
@@ -39,7 +40,9 @@ export default function ChangePassword({ forced = false }) {
       if (caught instanceof ApiError && caught.code === 'weak_password') {
         // The server sends the specific reasons; echoing them beats a generic
         // "password not strong enough" the user cannot act on.
-        setProblems(caught.problems ?? []);
+        // Rendered from the codes, so the list reads in the language of the
+        // form around it rather than in the server's.
+        setProblems(passwordProblemMessages(caught.body ?? caught));
       } else if (caught instanceof ApiError && caught.code === 'invalid_credentials') {
         setError('كلمة المرور الحالية غير صحيحة.');
       } else {

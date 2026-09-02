@@ -72,6 +72,15 @@ export const DOC_EXTRACTION = Object.freeze({
 const STALE_CLAIM_MS = 30 * 60 * 1000;
 
 /**
+ * Placed between the text of one constituent file and the next.
+ *
+ * A blank line, so the full-text word breaker cannot form a phrase across a
+ * boundary that exists in no file — searching for the last word of page one
+ * followed by the first word of page two should not match.
+ */
+const FILE_TEXT_SEPARATOR = '\n\n';
+
+/**
  * Atomically claims one job.
  *
  * READPAST makes a second worker skip a row another has locked rather than wait
@@ -136,116 +145,158 @@ export async function processOne({ maxAttempts = config.extraction.maxAttempts }
   const { queue_id: queueId, document_id: documentId, version_number: versionNumber } = job;
 
   try {
-    const found = await sql`
-      SELECT v.storage_path, v.mime_type, v.original_filename, v.file_size_bytes
-        FROM dbo.document_versions v
-       WHERE v.document_id = ${documentId} AND v.version_number = ${versionNumber}
-    `.execute(db);
+    // One job covers every blob the document is made of. A multi-file document
+    // is queued once, at version 0, and NOT once per file: this worker writes
+    // documents.content_normalized for the whole document, so N jobs would each
+    // overwrite the last and the document would end up searchable only by
+    // whichever file happened to finish last.
+    const blobs = await resolveBlobs(documentId, versionNumber);
 
-    const version = found.rows[0];
-    if (!version) {
+    if (blobs.length === 0) {
       // The document was hard-deleted between enqueue and now. Nothing to do,
       // and retrying will not bring it back.
       await finishJob(queueId, QUEUE.SKIPPED, 'version no longer exists');
       return { claimed: true, outcome: 'missing', documentId: String(documentId) };
     }
 
-    if (Number(version.file_size_bytes) > config.extraction.maxBytes) {
+    // Measured across the whole document. For a single-file document this is
+    // that file's size, so the limit behaves exactly as it always has.
+    const totalBytes = blobs.reduce((sum, blob) => sum + Number(blob.file_size_bytes), 0);
+    if (totalBytes > config.extraction.maxBytes) {
       await markDocument(documentId, DOC_EXTRACTION.UNSUPPORTED);
       await finishJob(queueId, QUEUE.SKIPPED, `file larger than the extraction limit`);
       return { claimed: true, outcome: 'too_large', documentId: String(documentId) };
     }
 
-    const absolutePath = storage.absolute(version.storage_path);
+    // Read lazily and once: consulting the OCR switch costs a cached lookup,
+    // but only a document with no text layer has any reason to ask.
+    let ocrDecision = null;
+    const ocrSettings = async () => {
+      if (!ocrDecision) {
+        const enabled = await getSetting('ocr.enabled');
+        ocrDecision = { enabled, available: await ocrAvailable({ enabled }) };
+      }
+      return ocrDecision;
+    };
 
-    const result = await extractText(absolutePath, {
-      filename: version.original_filename ?? path.basename(version.storage_path),
-      mimeType: version.mime_type,
-      maxChars: config.extraction.maxChars,
-    });
+    const texts = [];
+    let usedOcr = false;
+    let lastFailure = null;
 
-    if (result.outcome === OUTCOME.EXTRACTED) {
+    for (const blob of blobs) {
+      const absolutePath = storage.absolute(blob.storage_path);
+      const filename = blob.original_filename ?? path.basename(blob.storage_path);
+
+      const result = await extractText(absolutePath, {
+        filename,
+        mimeType: blob.mime_type,
+        maxChars: config.extraction.maxChars,
+      });
+
+      if (result.outcome === OUTCOME.EXTRACTED) {
+        texts.push(result.text);
+        continue;
+      }
+
+      // No text layer. This is the scan case, and the point at which OCR is the
+      // only way the document becomes searchable.
+      // The administration panel's OCR switch is read here, per document, rather
+      // than at startup: an operator turning OCR on expects the next scan to be
+      // recognised, not to have to restart the server. getSetting caches for ten
+      // seconds and falls back to the environment, so this costs nothing per job.
+      const ocr = await ocrSettings();
+
+      if (ocr.available) {
+        const recognised = await attemptOcr(absolutePath, {
+          filename,
+          mimeType: blob.mime_type,
+          enabled: ocr.enabled,
+        }).catch((error) => ({ ok: false, reason: 'ocr_failed', detail: error.message }));
+
+        if (recognised.ok) {
+          texts.push(recognised.text);
+          usedOcr = true;
+          continue;
+        }
+
+        // OCR was available and did not help. Recorded with its reason so the
+        // difference between "no OCR installed" and "OCR found nothing" is
+        // visible, rather than both looking like an unreadable document.
+        //
+        // `detail` is kept, not dropped. The reason alone is a category, and the
+        // categories are wide: `ocr_failed` covered both a crashed engine and
+        // Tesseract being unable to open an Arabic path, and only the message it
+        // printed distinguished them. That message existed, was caught, and was
+        // thrown away one line before it would have been useful — leaving a
+        // diagnostics screen that said an image was unreadable when what had
+        // actually happened was that the engine never opened it.
+        lastFailure = {
+          note: [`${result.outcome}; ${recognised.reason}`, recognised.detail]
+            .filter(Boolean)
+            .join(': '),
+          outcome: recognised.reason,
+        };
+        continue;
+      }
+
+      lastFailure = {
+        note: `${result.outcome}: ${result.detail ?? ''}`.trim(),
+        outcome: result.outcome,
+      };
+    }
+
+    if (texts.length > 0) {
+      // Joined in reading order, with a blank line between files so a phrase
+      // cannot be formed across a boundary that does not exist in any file.
       // Normalised on the way in, exactly as the title is. The full-text index
       // is built over the normalised column, so text stored raw here would be
       // unfindable by a normalised query.
+      const combined = normalizeArabic(texts.join(FILE_TEXT_SEPARATOR));
+      const status = usedOcr ? DOC_EXTRACTION.OCR_EXTRACTED : DOC_EXTRACTION.EXTRACTED;
+
       await sql`
         UPDATE dbo.documents
-           SET content_normalized = ${normalizeArabic(result.text)},
-               extraction_status = ${DOC_EXTRACTION.EXTRACTED},
+           SET content_normalized = ${combined},
+               extraction_status = ${status},
                extracted_at = SYSUTCDATETIME()
          WHERE document_id = ${documentId}
       `.execute(db);
 
-      await finishJob(queueId, QUEUE.DONE, null);
+      // A document whose files were partly readable is indexed on what could be
+      // read, and still reports the part that could not — silently indexing
+      // three of five pages is how a search comes back empty for a document the
+      // user can see.
+      await finishJob(queueId, QUEUE.DONE, usedOcr ? 'ocr' : null);
+
       log.info(
-        { documentId: String(documentId), version: versionNumber, characters: result.text.length },
-        'text extracted',
+        {
+          documentId: String(documentId),
+          version: versionNumber,
+          files: blobs.length,
+          indexed: texts.length,
+          characters: combined.length,
+          ocr: usedOcr,
+        },
+        usedOcr ? 'text recovered by OCR' : 'text extracted',
       );
-      return { claimed: true, outcome: OUTCOME.EXTRACTED, documentId: String(documentId) };
-    }
 
-    // No text layer. This is the scan case, and the point at which OCR is the
-    // only way the document becomes searchable.
-    // The administration panel's OCR switch is read here, per document, rather
-    // than at startup: an operator turning OCR on expects the next scan to be
-    // recognised, not to have to restart the server. getSetting caches for ten
-    // seconds and falls back to the environment, so this costs nothing per job.
-    const ocrEnabled = await getSetting('ocr.enabled');
-
-    if (await ocrAvailable({ enabled: ocrEnabled })) {
-      const recognised = await attemptOcr(absolutePath, {
-        filename: version.original_filename ?? path.basename(version.storage_path),
-        mimeType: version.mime_type,
-        enabled: ocrEnabled,
-      }).catch((error) => ({ ok: false, reason: 'ocr_failed', detail: error.message }));
-
-      if (recognised.ok) {
-        await sql`
-          UPDATE dbo.documents
-             SET content_normalized = ${normalizeArabic(recognised.text)},
-                 extraction_status = ${DOC_EXTRACTION.OCR_EXTRACTED},
-                 extracted_at = SYSUTCDATETIME()
-           WHERE document_id = ${documentId}
-        `.execute(db);
-
-        await finishJob(queueId, QUEUE.DONE, `ocr:${recognised.engine}`);
-        log.info(
-          { documentId: String(documentId), engine: recognised.engine, characters: recognised.text.length },
-          'text recovered by OCR',
-        );
-        return { claimed: true, outcome: 'ocr', documentId: String(documentId) };
-      }
-
-      // OCR was available and did not help. Recorded with its reason so the
-      // difference between "no OCR installed" and "OCR found nothing" is
-      // visible, rather than both looking like an unreadable document.
-      //
-      // `detail` is kept, not dropped. The reason alone is a category, and the
-      // categories are wide: `ocr_failed` covered both a crashed engine and
-      // Tesseract being unable to open an Arabic path, and only the message it
-      // printed distinguished them. That message existed, was caught, and was
-      // thrown away one line before it would have been useful — leaving a
-      // diagnostics screen that said an image was unreadable when what had
-      // actually happened was that the engine never opened it.
-      await markDocument(documentId, DOC_EXTRACTION.UNSUPPORTED);
-      await finishJob(
-        queueId,
-        QUEUE.SKIPPED,
-        [`${result.outcome}; ${recognised.reason}`, recognised.detail].filter(Boolean).join(': '),
-      );
-      return { claimed: true, outcome: recognised.reason, documentId: String(documentId) };
+      return {
+        claimed: true,
+        outcome: usedOcr ? 'ocr' : OUTCOME.EXTRACTED,
+        documentId: String(documentId),
+      };
     }
 
     // no_text_layer and unsupported are both "there is nothing to index", not
     // failures. Recording which is which is what makes the OCR work list.
     await markDocument(documentId, DOC_EXTRACTION.UNSUPPORTED);
-    await finishJob(queueId, QUEUE.SKIPPED, `${result.outcome}: ${result.detail ?? ''}`.trim());
+    await finishJob(queueId, QUEUE.SKIPPED, lastFailure?.note ?? 'nothing to index');
 
     log.info(
-      { documentId: String(documentId), outcome: result.outcome, detail: result.detail },
+      { documentId: String(documentId), outcome: lastFailure?.outcome, files: blobs.length },
       'nothing to index for this document',
     );
-    return { claimed: true, outcome: result.outcome, documentId: String(documentId) };
+    return { claimed: true, outcome: lastFailure?.outcome, documentId: String(documentId) };
   } catch (error) {
     const attempts = Number(job.attempts);
     const exhausted = attempts >= maxAttempts;
@@ -260,6 +311,32 @@ export async function processOne({ maxAttempts = config.extraction.maxAttempts }
 
     return { claimed: true, outcome: 'error', documentId: String(documentId) };
   }
+}
+
+/**
+ * The blobs one queue row stands for, in reading order.
+ *
+ * Version 0 is the multi-file document's key. It cannot collide with a real
+ * version: dbo.document_versions constrains version_number >= 1, so a job at
+ * version 0 unambiguously means "this document's constituent files".
+ */
+async function resolveBlobs(documentId, versionNumber) {
+  if (Number(versionNumber) === 0) {
+    const found = await sql`
+      SELECT storage_path, mime_type, original_filename, file_size_bytes
+        FROM dbo.document_files
+       WHERE document_id = ${documentId}
+       ORDER BY sort_order ASC
+    `.execute(db);
+    return found.rows;
+  }
+
+  const found = await sql`
+    SELECT v.storage_path, v.mime_type, v.original_filename, v.file_size_bytes
+      FROM dbo.document_versions v
+     WHERE v.document_id = ${documentId} AND v.version_number = ${versionNumber}
+  `.execute(db);
+  return found.rows;
 }
 
 async function markDocument(documentId, status) {
@@ -451,7 +528,19 @@ export async function listUnsearchable({ limit = 50 } = {}) {
     SELECT TOP (${pageSize})
            q.document_id, q.version_number, q.status, q.attempts, q.last_error, q.finished_at,
            d.title, d.folder_id, d.extraction_status,
-           v.original_filename, v.mime_type,
+           -- A multi-file document has no version row, so the LEFT JOIN above
+           -- yields NULL for both of these and the diagnostics list would show a
+           -- nameless, typeless entry. Falling back to the first constituent
+           -- gives the operator something to recognise it by.
+           COALESCE(v.original_filename, (
+             SELECT TOP (1) df.original_filename FROM dbo.document_files df
+              WHERE df.document_id = q.document_id ORDER BY df.sort_order
+           )) AS original_filename,
+           COALESCE(v.mime_type, (
+             SELECT TOP (1) df.mime_type FROM dbo.document_files df
+              WHERE df.document_id = q.document_id ORDER BY df.sort_order
+           )) AS mime_type,
+           (SELECT COUNT(*) FROM dbo.document_files df WHERE df.document_id = q.document_id) AS file_count,
            f.name AS folder_name
       FROM dbo.extraction_queue q
       JOIN dbo.documents d ON d.document_id = q.document_id
@@ -474,10 +563,95 @@ export async function listUnsearchable({ limit = 50 } = {}) {
     folderName: row.folder_name,
     filename: row.original_filename,
     mimeType: row.mime_type,
+    // 0 for an ordinary document; N tells the operator this entry is one
+    // document made of N files, so a missing thumbnail or a slow OCR pass has
+    // an obvious explanation.
+    fileCount: Number(row.file_count ?? 0),
     status: Number(row.status),
     attempts: Number(row.attempts),
     reason: row.last_error,
     finishedAt: row.finished_at,
+  }));
+}
+
+/**
+ * The documents queued for indexing that have not finished yet, oldest first.
+ *
+ * ─── Why a count was not enough ─────────────────────────────────────────────
+ *
+ * `listUnsearchable` answers "what failed", and until now nothing answered
+ * "what has not happened yet". Those are different states with different
+ * remedies, and a document in the second one appeared in no list at all: it was
+ * a number in a tile, indistinguishable from every other number. Someone who
+ * had just filed a document and wanted to know whether it was searchable had to
+ * infer it from a count going down.
+ *
+ * `waitingSince` is the whole point. A queue with two documents in it is
+ * healthy; the same two documents still in it an hour later are not, and only
+ * the age distinguishes them.
+ *
+ * RETRYABLE rows that still have attempts left belong here rather than with the
+ * failures — they are going to be tried again, so they are waiting, not lost.
+ */
+export async function listWaiting({ limit = 50 } = {}) {
+  const pageSize = Math.min(Math.max(Number(limit) || 50, 1), 200);
+
+  const result = await sql`
+    SELECT TOP (${pageSize})
+           q.document_id, q.version_number, q.status, q.attempts, q.queued_at, q.started_at,
+           d.title, d.folder_id, d.extraction_status,
+           -- A multi-file document has no version row, so the LEFT JOIN above
+           -- yields NULL for both of these and the diagnostics list would show a
+           -- nameless, typeless entry. Falling back to the first constituent
+           -- gives the operator something to recognise it by.
+           COALESCE(v.original_filename, (
+             SELECT TOP (1) df.original_filename FROM dbo.document_files df
+              WHERE df.document_id = q.document_id ORDER BY df.sort_order
+           )) AS original_filename,
+           COALESCE(v.mime_type, (
+             SELECT TOP (1) df.mime_type FROM dbo.document_files df
+              WHERE df.document_id = q.document_id ORDER BY df.sort_order
+           )) AS mime_type,
+           (SELECT COUNT(*) FROM dbo.document_files df WHERE df.document_id = q.document_id) AS file_count,
+           f.name AS folder_name,
+           CASE WHEN q.status = ${QUEUE.RUNNING}
+                 AND q.started_at IS NOT NULL
+                 AND DATEDIFF(second, q.started_at, SYSUTCDATETIME()) > ${Math.floor(STALE_CLAIM_MS / 1000)}
+                THEN 1 ELSE 0 END AS is_stale
+      FROM dbo.extraction_queue q
+      JOIN dbo.documents d ON d.document_id = q.document_id
+      LEFT JOIN dbo.folders f ON f.folder_id = d.folder_id
+      LEFT JOIN dbo.document_versions v
+        ON v.document_id = q.document_id AND v.version_number = q.version_number
+     WHERE d.is_deleted = 0
+       AND (
+             q.status IN (${QUEUE.PENDING}, ${QUEUE.RUNNING})
+             OR (q.status = ${QUEUE.RETRYABLE} AND q.attempts < ${config.extraction.maxAttempts})
+           )
+     -- Oldest first: the one that has been waiting longest is the one worth
+     -- looking at, and it is the last thing a newest-first list would show.
+     ORDER BY q.queued_at ASC, q.queue_id ASC
+  `.execute(db);
+
+  return result.rows.map((row) => ({
+    documentId: String(row.document_id),
+    version: Number(row.version_number),
+    title: row.title,
+    folderId: String(row.folder_id),
+    folderName: row.folder_name,
+    filename: row.original_filename,
+    mimeType: row.mime_type,
+    // 0 for an ordinary document; N tells the operator this entry is one
+    // document made of N files, so a missing thumbnail or a slow OCR pass has
+    // an obvious explanation.
+    fileCount: Number(row.file_count ?? 0),
+    status: Number(row.status),
+    attempts: Number(row.attempts),
+    waitingSince: row.queued_at,
+    startedAt: row.started_at,
+    // A claim nobody is honouring. It reads as "being processed" forever
+    // otherwise, which is the most misleading state the queue has.
+    stale: Number(row.is_stale) === 1,
   }));
 }
 

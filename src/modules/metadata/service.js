@@ -201,12 +201,154 @@ export async function setFieldActive({ fieldId, active }) {
   return Number(result.numAffectedRows ?? 0) === 1 ? { ok: true } : { ok: false, reason: 'not_found' };
 }
 
+export async function updateType({ typeId, name, description, sortOrder }) {
+  const cleanName = name === undefined ? undefined : String(name ?? '').trim();
+  if (cleanName !== undefined && (!cleanName || cleanName.length > 200)) {
+    return { ok: false, reason: 'invalid_name' };
+  }
+
+  // description: undefined = no change; null or '' = clear the column.
+  const cleanDesc =
+    description === undefined ? undefined : description == null || description === '' ? null : String(description).trim() || null;
+
+  try {
+    const result = await sql`
+      UPDATE dbo.document_types
+         SET name        = ${cleanName === undefined ? sql`name` : cleanName},
+             description = ${cleanDesc === undefined ? sql`description` : cleanDesc},
+             sort_order  = ${sortOrder === undefined ? sql`sort_order` : Number(sortOrder) || 0}
+       WHERE type_id = ${typeId}
+    `.execute(db);
+
+    if (Number(result.numAffectedRows ?? 0) === 0) return { ok: false, reason: 'not_found' };
+    return { ok: true };
+  } catch (error) {
+    if (/UQ_document_types_name|duplicate key/i.test(error.message)) {
+      return { ok: false, reason: 'name_taken' };
+    }
+    throw error;
+  }
+}
+
+export async function updateField({ fieldId, name, isRequired, isSearchable, sortOrder, choices }) {
+  const cleanName = name === undefined ? undefined : String(name ?? '').trim();
+  if (cleanName !== undefined && (!cleanName || cleanName.length > 200)) {
+    return { ok: false, reason: 'invalid_name' };
+  }
+
+  try {
+    const outcome = await db.transaction().execute(async (trx) => {
+      // Read the field inside the transaction so we have a consistent view.
+      // data_type and type_id are immutable after creation: values are stored in
+      // the column chosen by the data type (see VALUE_COLUMNS above), and a
+      // field's type_id decides which documents' values are meaningful. Changing
+      // either after values exist would silently corrupt all existing document
+      // field values.
+      const fieldRows = await sql`
+        SELECT field_id, data_type FROM dbo.custom_field_defs WHERE field_id = ${fieldId}
+      `.execute(trx);
+      if (fieldRows.rows.length === 0) return { ok: false, reason: 'not_found' };
+
+      const dataType = fieldRows.rows[0].data_type;
+      const isChoiceType = ['choice', 'multiselect'].includes(dataType);
+
+      // Validate and normalise the choices list only for choice/multiselect fields.
+      // For all other data types the choices argument is silently ignored — it has
+      // no meaning for text, number, date, bool or user fields, and raising an
+      // error for an irrelevant key in the payload would be surprising.
+      let cleanChoices;
+      if (Array.isArray(choices) && isChoiceType) {
+        cleanChoices = choices.map((c) => String(c).trim()).filter(Boolean);
+        if (cleanChoices.length === 0) return { ok: false, reason: 'choices_required' };
+
+        // The DB collation is Arabic_CI_AI, so two labels that differ only in
+        // tashkeel or yaa/maqsura are the same from SQL Server's perspective.
+        // Detect that before inserting, because the error would surface as an
+        // unrelated constraint name rather than a clear reason code.
+        const seen = new Set();
+        for (const label of cleanChoices) {
+          const key = normalizeArabic(label).toLowerCase();
+          if (seen.has(key)) return { ok: false, reason: 'duplicate_choice' };
+          seen.add(key);
+        }
+      }
+
+      await sql`
+        UPDATE dbo.custom_field_defs
+           SET name         = ${cleanName === undefined ? sql`name` : cleanName},
+               is_required  = ${isRequired === undefined ? sql`is_required` : isRequired ? 1 : 0},
+               is_searchable= ${isSearchable === undefined ? sql`is_searchable` : isSearchable ? 1 : 0},
+               sort_order   = ${sortOrder === undefined ? sql`sort_order` : Number(sortOrder) || 0}
+         WHERE field_id = ${fieldId}
+      `.execute(trx);
+
+      if (cleanChoices !== undefined) {
+        // Load ALL existing rows — active or not — so matched rows keep their
+        // choice_id (document_field_values.value_choice_id and
+        // document_field_selections.choice_id reference them, so we must never
+        // DELETE a choice that has ever been set on a document).
+        const choiceRows = await sql`
+          SELECT choice_id, label FROM dbo.custom_field_choices WHERE field_id = ${fieldId}
+        `.execute(trx);
+
+        const existingMap = new Map();
+        for (const row of choiceRows.rows) {
+          existingMap.set(normalizeArabic(row.label).toLowerCase(), row);
+        }
+
+        const matchedIds = new Set();
+        for (let i = 0; i < cleanChoices.length; i++) {
+          const label = cleanChoices[i];
+          const key = normalizeArabic(label).toLowerCase();
+          const existing = existingMap.get(key);
+          if (existing) {
+            matchedIds.add(Number(existing.choice_id));
+            // Reactivate in case it was previously deactivated, and rewrite
+            // sort_order to match the new list position.
+            await sql`
+              UPDATE dbo.custom_field_choices
+                 SET is_active = 1, sort_order = ${i}
+               WHERE choice_id = ${existing.choice_id}
+            `.execute(trx);
+          } else {
+            await sql`
+              INSERT INTO dbo.custom_field_choices (field_id, label, sort_order)
+              VALUES (${fieldId}, ${label}, ${i})
+            `.execute(trx);
+          }
+        }
+
+        // Any existing choice not matched by the new list is deactivated rather
+        // than deleted — historical document values keep their FK valid.
+        for (const row of choiceRows.rows) {
+          if (!matchedIds.has(Number(row.choice_id))) {
+            await sql`
+              UPDATE dbo.custom_field_choices SET is_active = 0 WHERE choice_id = ${row.choice_id}
+            `.execute(trx);
+          }
+        }
+      }
+
+      return { ok: true };
+    });
+
+    return outcome;
+  } catch (error) {
+    if (/UX_custom_field_defs|duplicate key/i.test(error.message)) {
+      return { ok: false, reason: 'name_taken' };
+    }
+    throw error;
+  }
+}
+
 // ── Sensitivity labels ───────────────────────────────────────────────────
 
-export async function listLabels() {
+export async function listLabels({ includeInactive = false } = {}) {
   const result = await sql`
     SELECT label_id, name, severity_rank, colour, is_active
-      FROM dbo.sensitivity_labels WHERE is_active = 1 ORDER BY severity_rank
+      FROM dbo.sensitivity_labels
+     WHERE (${includeInactive ? 1 : 0} = 1 OR is_active = 1)
+     ORDER BY severity_rank
   `.execute(db);
 
   return result.rows.map((row) => ({
@@ -214,6 +356,7 @@ export async function listLabels() {
     name: row.name,
     severityRank: Number(row.severity_rank),
     colour: row.colour,
+    isActive: Number(row.is_active) === 1,
   }));
 }
 
@@ -240,6 +383,52 @@ export async function createLabel({ name, severityRank, colour }) {
     }
     throw error;
   }
+}
+
+export async function updateLabel({ labelId, name, severityRank, colour }) {
+  const cleanName = name === undefined ? undefined : String(name ?? '').trim();
+  if (cleanName !== undefined && (!cleanName || cleanName.length > 100)) {
+    return { ok: false, reason: 'invalid_name' };
+  }
+
+  const rank = severityRank === undefined ? undefined : Number(severityRank);
+  if (rank !== undefined && !Number.isInteger(rank)) return { ok: false, reason: 'invalid_rank' };
+
+  // colour: undefined = no change; null or '' = clear; '#rrggbb' = set.
+  let cleanColour;
+  if (colour === undefined) {
+    cleanColour = undefined;
+  } else if (colour == null || colour === '') {
+    cleanColour = null;
+  } else {
+    if (!/^#[0-9A-Fa-f]{6}$/.test(colour)) return { ok: false, reason: 'invalid_colour' };
+    cleanColour = colour;
+  }
+
+  try {
+    const result = await sql`
+      UPDATE dbo.sensitivity_labels
+         SET name          = ${cleanName === undefined ? sql`name` : cleanName},
+             severity_rank = ${rank === undefined ? sql`severity_rank` : rank},
+             colour        = ${cleanColour === undefined ? sql`colour` : cleanColour}
+       WHERE label_id = ${labelId}
+    `.execute(db);
+
+    if (Number(result.numAffectedRows ?? 0) === 0) return { ok: false, reason: 'not_found' };
+    return { ok: true };
+  } catch (error) {
+    if (/UQ_sensitivity_labels|duplicate key/i.test(error.message)) {
+      return { ok: false, reason: /rank/i.test(error.message) ? 'rank_taken' : 'name_taken' };
+    }
+    throw error;
+  }
+}
+
+export async function setLabelActive({ labelId, active }) {
+  const result = await sql`
+    UPDATE dbo.sensitivity_labels SET is_active = ${active ? 1 : 0} WHERE label_id = ${labelId}
+  `.execute(db);
+  return Number(result.numAffectedRows ?? 0) === 1 ? { ok: true } : { ok: false, reason: 'not_found' };
 }
 
 // ── Values on a document ─────────────────────────────────────────────────

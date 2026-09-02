@@ -19,7 +19,12 @@ export async function overview() {
       (SELECT COUNT(*) FROM dbo.documents WHERE is_deleted = 0)                      AS documents,
       (SELECT COUNT(*) FROM dbo.documents WHERE is_deleted = 1)                      AS deleted,
       (SELECT COUNT(*) FROM dbo.document_versions)                                   AS versions,
-      (SELECT ISNULL(SUM(file_size_bytes), 0) FROM dbo.document_versions)            AS bytes,
+      -- Both file axes. Counting only versions would under-report the disk by
+      -- the whole of every multi-file document, and an operator sizing a backup
+      -- from this number would size it short.
+      (SELECT ISNULL(SUM(file_size_bytes), 0) FROM dbo.document_versions)
+        + (SELECT ISNULL(SUM(file_size_bytes), 0) FROM dbo.document_files)           AS bytes,
+      (SELECT COUNT(*) FROM dbo.document_files)                                      AS constituent_files,
       (SELECT COUNT(*) FROM dbo.folders WHERE is_deleted = 0)                        AS folders,
       (SELECT COUNT(*) FROM dbo.users u JOIN dbo.principals p ON p.principal_id = u.user_id
         WHERE p.is_active = 1)                                                       AS active_users,
@@ -37,6 +42,10 @@ export async function overview() {
     documents: Number(row.documents),
     deleted: Number(row.deleted),
     versions: Number(row.versions),
+    // Files held inside multi-file documents. Reported separately from
+    // `versions` because they are a different thing being counted, and folding
+    // them together would make the version count look like it had jumped.
+    constituentFiles: Number(row.constituent_files),
     bytes: Number(row.bytes),
     folders: Number(row.folders),
     activeUsers: Number(row.active_users),
@@ -73,10 +82,14 @@ export async function storageByFolder({ limit = 20 } = {}) {
     SELECT TOP (${top})
            f.folder_id, f.name,
            COUNT(DISTINCT d.document_id) AS documents,
-           ISNULL(SUM(v.file_size_bytes), 0) AS bytes
+           ISNULL(SUM(c.file_size_bytes), 0) AS bytes
       FROM dbo.folders f
       LEFT JOIN dbo.documents d ON d.folder_id = f.folder_id AND d.is_deleted = 0
-      LEFT JOIN dbo.document_versions v ON v.document_id = d.document_id
+      LEFT JOIN (
+                 SELECT document_id, file_size_bytes FROM dbo.document_versions
+                  UNION ALL
+                 SELECT document_id, file_size_bytes FROM dbo.document_files
+                ) c ON c.document_id = d.document_id
      WHERE f.is_deleted = 0
      GROUP BY f.folder_id, f.name
      ORDER BY bytes DESC
@@ -165,7 +178,20 @@ export async function exportMetadataCsv({ userId, folderId = null }) {
            f.name AS folder_name, f.mpath,
            t.name AS type_name, s.name AS sensitivity,
            creator.display_name AS created_by,
-           v.file_size_bytes, v.sha256, v.mime_type
+           COALESCE(
+             (SELECT SUM(df.file_size_bytes) FROM dbo.document_files df
+               WHERE df.document_id = d.document_id),
+             v.file_size_bytes
+           ) AS file_size_bytes,
+           v.sha256,
+           -- A multi-file document has no single type. Naming the count is more
+           -- use in a spreadsheet than a blank cell or an arbitrary first file.
+           COALESCE(
+             v.mime_type,
+             (SELECT 'multi-file (' + CAST(COUNT(*) AS varchar(10)) + ')'
+                FROM dbo.document_files df WHERE df.document_id = d.document_id
+               HAVING COUNT(*) > 0)
+           ) AS mime_type
       FROM dbo.documents d
       JOIN dbo.folders f ON f.folder_id = d.folder_id
      CROSS APPLY dbo.fn_effective_permission(${userId}, d.folder_id) p

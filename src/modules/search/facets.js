@@ -146,3 +146,125 @@ export async function snippetsFor({ userId, documentIds, query, radius = 90 }) {
 function escapeLike(value) {
   return String(value).replace(/[[\]%_]/g, (c) => `[${c}]`);
 }
+
+/**
+ * The vocabulary a parameter-filter bar needs to render its controls.
+ *
+ * ─── Why it is derived, not listed ──────────────────────────────────────────
+ *
+ * Document types and labels are admin-defined, so those come from their own
+ * tables. File types and uploaders are not configured anywhere — they are
+ * whatever happens to have been filed. Offering the full list of MIME types a
+ * browser can produce, or every user account, would fill a dropdown with
+ * options that match nothing. So both are read from what is actually present.
+ *
+ * ─── Why it is permission-scoped ────────────────────────────────────────────
+ *
+ * Every count and every option passes through fn_effective_permission. A filter
+ * list built without it discloses that a document type called "تحقيق داخلي"
+ * exists, and who has been filing documents, to someone who cannot see any of
+ * them — and then returns an empty result when they pick it, which is both a
+ * leak and a confusing dead end.
+ */
+export async function filterOptions({ userId, folderId = null }) {
+  let mpathPrefix = null;
+  if (folderId != null) {
+    const scope = await sql`
+      SELECT mpath FROM dbo.folders WHERE folder_id = ${folderId} AND is_deleted = 0
+    `.execute(db);
+    if (!scope.rows[0]) return { types: [], labels: [], tags: [], creators: [], fileTypes: [] };
+    mpathPrefix = `${scope.rows[0].mpath}%`;
+  }
+
+  // One visibility gate, reused by every list below. Kept as a derived table
+  // rather than repeated inline so the five queries cannot diverge on what
+  // "visible" means.
+  const visible = sql`
+    SELECT d.document_id, d.type_id, d.sensitivity_label_id, d.created_by, d.current_version
+      FROM dbo.documents d
+      JOIN dbo.folders f ON f.folder_id = d.folder_id
+     CROSS APPLY dbo.fn_effective_permission(${userId}, d.folder_id) p
+     WHERE d.is_deleted = 0
+       AND f.is_deleted = 0
+       AND (p.perm_bits & ${PERM.BROWSE}) <> 0
+       AND (${mpathPrefix} IS NULL OR f.mpath LIKE ${mpathPrefix})
+  `;
+
+  const [types, labels, tags, creators, fileTypes] = await Promise.all([
+    sql`
+      SELECT t.type_id, t.name, COUNT(*) AS total
+        FROM (${visible}) v
+        JOIN dbo.document_types t ON t.type_id = v.type_id
+       GROUP BY t.type_id, t.name
+       ORDER BY t.name
+    `.execute(db),
+
+    sql`
+      SELECT s.label_id, s.name, s.colour, s.severity_rank, COUNT(*) AS total
+        FROM (${visible}) v
+        JOIN dbo.sensitivity_labels s ON s.label_id = v.sensitivity_label_id
+       GROUP BY s.label_id, s.name, s.colour, s.severity_rank
+       ORDER BY s.severity_rank
+    `.execute(db),
+
+    sql`
+      SELECT tg.tag_id, tg.name, COUNT(*) AS total
+        FROM (${visible}) v
+        JOIN dbo.document_tags dt ON dt.document_id = v.document_id
+        JOIN dbo.tags tg ON tg.tag_id = dt.tag_id
+       GROUP BY tg.tag_id, tg.name
+       ORDER BY COUNT(*) DESC, tg.name
+    `.execute(db),
+
+    sql`
+      SELECT pr.principal_id, pr.display_name, COUNT(*) AS total
+        FROM (${visible}) v
+        JOIN dbo.principals pr ON pr.principal_id = v.created_by
+       GROUP BY pr.principal_id, pr.display_name
+       ORDER BY COUNT(*) DESC, pr.display_name
+    `.execute(db),
+
+    // Both file axes. A deployment whose scans are all filed as multi-file
+    // documents would otherwise show an empty file-type list while every one of
+    // its documents had a type.
+    sql`
+      SELECT c.mime_type, COUNT(DISTINCT c.document_id) AS total
+        FROM (${visible}) v
+        JOIN (
+              SELECT document_id, mime_type FROM dbo.document_versions
+               UNION ALL
+              SELECT document_id, mime_type FROM dbo.document_files
+             ) c ON c.document_id = v.document_id
+       GROUP BY c.mime_type
+       ORDER BY COUNT(DISTINCT c.document_id) DESC, c.mime_type
+    `.execute(db),
+  ]);
+
+  return {
+    types: types.rows.map((row) => ({
+      typeId: Number(row.type_id),
+      name: row.name,
+      total: Number(row.total),
+    })),
+    labels: labels.rows.map((row) => ({
+      labelId: Number(row.label_id),
+      name: row.name,
+      colour: row.colour,
+      total: Number(row.total),
+    })),
+    tags: tags.rows.map((row) => ({
+      tagId: Number(row.tag_id),
+      name: row.name,
+      total: Number(row.total),
+    })),
+    creators: creators.rows.map((row) => ({
+      userId: String(row.principal_id),
+      name: row.display_name,
+      total: Number(row.total),
+    })),
+    fileTypes: fileTypes.rows.map((row) => ({
+      mimeType: row.mime_type,
+      total: Number(row.total),
+    })),
+  };
+}

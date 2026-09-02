@@ -118,17 +118,81 @@ export function buildRelativePath({
   return `${year}/${month}/${documentId}_v${version}_${safeTitle}${ext}`;
 }
 
-/** Splits a relative path back into its parts. Returns null when it does not match the layout. */
+/**
+ * Builds the storage-root-relative path for one constituent file of a
+ * multi-file document.
+ *
+ * `_f{n}_` rather than `_v{n}_` so the two axes cannot collide in the one
+ * namespace they share. Both tables declare UNIQUE (storage_path), but those
+ * are two separate constraints over two separate tables — nothing in the
+ * database would stop a version row and a constituent row from naming the same
+ * blob, and the first delete would take out both. The differing infix is what
+ * actually makes that impossible.
+ *
+ * The index is the file's sort_order, so the path also reads in document order
+ * to anyone looking at the directory during a restore.
+ *
+ * @param {object} args
+ * @param {number|string} args.documentId
+ * @param {number} args.index 0-based position within the document
+ * @param {string} args.title the parent document's title
+ * @param {string} [args.originalFilename] used to derive the extension
+ * @param {Date} args.createdAt determines the yyyy/MM partition
+ * @param {number} [args.maxTitleLength]
+ * @returns {string} e.g. "2026/08/10432_f0_عقد_إيجار.pdf"
+ */
+export function buildConstituentPath({
+  documentId,
+  index,
+  title,
+  originalFilename,
+  createdAt,
+  maxTitleLength = 120,
+}) {
+  if (documentId === undefined || documentId === null || `${documentId}`.trim() === '') {
+    throw new TypeError('buildConstituentPath: documentId is required');
+  }
+  if (!Number.isInteger(index) || index < 0) {
+    throw new TypeError(`buildConstituentPath: index must be a non-negative integer, got ${index}`);
+  }
+  if (!(createdAt instanceof Date) || Number.isNaN(createdAt.getTime())) {
+    throw new TypeError('buildConstituentPath: createdAt must be a valid Date');
+  }
+
+  const year = String(createdAt.getFullYear());
+  const month = String(createdAt.getMonth() + 1).padStart(2, '0');
+  const ext = sanitizeExtension(originalFilename);
+  const safeTitle = sanitizeTitle(title, maxTitleLength);
+
+  return `${year}/${month}/${documentId}_f${index}_${safeTitle}${ext}`;
+}
+
+/**
+ * Splits a relative path back into its parts. Returns null when it does not
+ * match the layout.
+ *
+ * `kind` distinguishes the two axes: 'version' for a revision of a single-file
+ * document, 'constituent' for one file of a multi-file document. A version path
+ * still reports `version`, so existing callers read unchanged.
+ */
 export function parseRelativePath(relativePath) {
-  const match = /^(\d{4})\/(\d{2})\/(\d+)_v(\d+)_(.*?)(\.[a-z0-9]+)?$/.exec(String(relativePath ?? ''));
+  const match = /^(\d{4})\/(\d{2})\/(\d+)_([vf])(\d+)_(.*?)(\.[a-z0-9]+)?$/.exec(
+    String(relativePath ?? ''),
+  );
   if (!match) return null;
+
+  const isVersion = match[4] === 'v';
+  const ordinal = Number(match[5]);
+
   return {
     year: match[1],
     month: match[2],
     documentId: Number(match[3]),
-    version: Number(match[4]),
-    title: match[5],
-    extension: match[6] ?? '',
+    kind: isVersion ? 'version' : 'constituent',
+    version: isVersion ? ordinal : null,
+    index: isVersion ? null : ordinal,
+    title: match[6],
+    extension: match[7] ?? '',
   };
 }
 

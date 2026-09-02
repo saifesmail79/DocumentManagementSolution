@@ -35,22 +35,55 @@ import { writeAllManifests } from './manifest.js';
 
 const log = moduleLogger('purge');
 
+/** The grace period the administrator set; the environment value if unreachable. */
+async function effectiveGraceDays() {
+  try {
+    const { getSetting } = await import('../settings/service.js');
+    return await getSetting('storage.purge_grace_days');
+  } catch {
+    return config.storage.purgeGraceDays;
+  }
+}
+
 /**
  * Removes the blobs of documents soft-deleted before the grace period.
  *
  * @param {{graceDays?: number, max?: number, dryRun?: boolean}} options
  */
 export async function purgeDeletedDocuments({
-  graceDays = config.storage.purgeGraceDays,
+  graceDays,
   max = 500,
   dryRun = false,
 } = {}) {
+  // Resolved at run time, not in the signature: a default parameter is bound to
+  // the frozen boot config, which is how the setting spent months accepting
+  // values that no sweep ever read.
+  if (graceDays === undefined) graceDays = await effectiveGraceDays();
+  // Both file axes are purged.
+  //
+  // Enumerating only dbo.document_versions would leave every constituent file
+  // of every deleted multi-file document on disk forever: the document row is
+  // tombstoned, nothing references the blobs, and the orphan sweep only looks
+  // at .tmp and .staging — so the bytes would never be reclaimed and would
+  // never be reported as reclaimable either. That is the quietest possible
+  // storage leak, which is why the union is here rather than in a second pass.
   const candidates = await sql`
     SELECT TOP (${max})
-           v.document_id, v.version_number, v.storage_path, v.sha256, v.file_size_bytes,
+           c.document_id, c.version_number, c.file_id, c.source,
+           c.storage_path, c.sha256, c.file_size_bytes,
            d.title, d.folder_id, d.deleted_at
-      FROM dbo.document_versions v
-      JOIN dbo.documents d ON d.document_id = v.document_id
+      FROM (
+            SELECT document_id, version_number, CAST(NULL AS bigint) AS file_id,
+                   CAST('version' AS varchar(10)) AS source,
+                   storage_path, sha256, file_size_bytes
+              FROM dbo.document_versions
+             UNION ALL
+            SELECT document_id, 0 AS version_number, file_id,
+                   CAST('file' AS varchar(10)) AS source,
+                   storage_path, sha256, file_size_bytes
+              FROM dbo.document_files
+           ) c
+      JOIN dbo.documents d ON d.document_id = c.document_id
      WHERE d.is_deleted = 1
        AND d.deleted_at < DATEADD(day, ${-Math.abs(graceDays)}, SYSUTCDATETIME())
      ORDER BY d.deleted_at
@@ -79,10 +112,16 @@ export async function purgeDeletedDocuments({
                   ${row.sha256}, ${row.file_size_bytes})
         `.execute(trx);
 
-        await sql`
-          DELETE FROM dbo.document_versions
-           WHERE document_id = ${row.document_id} AND version_number = ${row.version_number}
-        `.execute(trx);
+        if (row.source === 'file') {
+          await sql`
+            DELETE FROM dbo.document_files WHERE file_id = ${row.file_id}
+          `.execute(trx);
+        } else {
+          await sql`
+            DELETE FROM dbo.document_versions
+             WHERE document_id = ${row.document_id} AND version_number = ${row.version_number}
+          `.execute(trx);
+        }
 
         // The document row stays as a tombstone: "this existed and was deleted"
         // is worth keeping, and the audit trail references it.
@@ -101,7 +140,10 @@ export async function purgeDeletedDocuments({
         targetType: 'document',
         targetId: row.document_id,
         folderId: row.folder_id,
-        detail: `v${row.version_number} of "${row.title}" purged after ${graceDays} days`,
+        detail:
+          row.source === 'file'
+            ? `a file of "${row.title}" purged after ${graceDays} days`
+            : `v${row.version_number} of "${row.title}" purged after ${graceDays} days`,
       });
     } catch (error) {
       failed += 1;
@@ -117,6 +159,54 @@ export async function purgeDeletedDocuments({
   }
 
   return { purged, bytes, failed, dryRun };
+}
+
+/**
+ * Why a sweep found nothing, in the terms the recycle bin uses.
+ *
+ * "purged: 0" is not an answer. It is the same number whether the bin is empty,
+ * everything is still inside its grace period, or the content is already gone —
+ * three situations calling for three different actions, and an operator staring
+ * at a zero cannot tell which one they are in. So the sweep reports what is in
+ * the bin alongside what it took.
+ */
+export async function recycleBinState({ graceDays } = {}) {
+  if (graceDays === undefined) graceDays = await effectiveGraceDays();
+  const rows = await sql`
+    SELECT
+      SUM(CASE WHEN content.blobs > 0
+                AND d.deleted_at < DATEADD(day, ${-Math.abs(graceDays)}, SYSUTCDATETIME())
+               THEN 1 ELSE 0 END) AS eligible,
+      SUM(CASE WHEN content.blobs > 0
+                AND d.deleted_at >= DATEADD(day, ${-Math.abs(graceDays)}, SYSUTCDATETIME())
+               THEN 1 ELSE 0 END) AS waiting,
+      SUM(CASE WHEN content.blobs = 0 THEN 1 ELSE 0 END) AS tombstones,
+      MIN(CASE WHEN content.blobs > 0
+                AND d.deleted_at >= DATEADD(day, ${-Math.abs(graceDays)}, SYSUTCDATETIME())
+               THEN d.deleted_at END) AS oldest_waiting
+      FROM dbo.documents d
+     CROSS APPLY (
+       SELECT (SELECT COUNT(*) FROM dbo.document_versions v WHERE v.document_id = d.document_id)
+            + (SELECT COUNT(*) FROM dbo.document_files f WHERE f.document_id = d.document_id)
+              AS blobs
+     ) AS content
+     WHERE d.is_deleted = 1
+  `.execute(db);
+
+  const row = rows.rows[0] ?? {};
+  const oldest = row.oldest_waiting ?? null;
+
+  return {
+    graceDays,
+    eligible: Number(row.eligible ?? 0),
+    waiting: Number(row.waiting ?? 0),
+    // Kept for the audit trail and unrestorable: nothing will ever collect them,
+    // and they no longer hold a folder open.
+    tombstones: Number(row.tombstones ?? 0),
+    nextEligibleAt: oldest
+      ? new Date(new Date(oldest).getTime() + Math.abs(graceDays) * 86_400_000).toISOString()
+      : null,
+  };
 }
 
 /**
@@ -187,11 +277,18 @@ async function cleanupStaging(olderThanMs) {
  * only believing the ordering is right.
  */
 export async function findMissingBlobs({ max = 1000 } = {}) {
+  // Constituent files are covered too: the write ordering that guarantees a
+  // committed row has its file is the same for both axes, so the check that
+  // verifies it has to look at both or it only half-verifies the invariant.
   const rows = await sql`
-    SELECT TOP (${max}) v.document_id, v.version_number, v.storage_path, d.title
-      FROM dbo.document_versions v
-      JOIN dbo.documents d ON d.document_id = v.document_id
-     ORDER BY v.document_id
+    SELECT TOP (${max}) c.document_id, c.version_number, c.storage_path, d.title
+      FROM (
+            SELECT document_id, version_number, storage_path FROM dbo.document_versions
+             UNION ALL
+            SELECT document_id, 0 AS version_number, storage_path FROM dbo.document_files
+           ) c
+      JOIN dbo.documents d ON d.document_id = c.document_id
+     ORDER BY c.document_id
   `.execute(db);
 
   const missing = [];

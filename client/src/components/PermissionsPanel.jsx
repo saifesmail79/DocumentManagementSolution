@@ -3,6 +3,10 @@ import { Shield, Trash2, Plus, Unlink, Link as LinkIcon, X } from 'lucide-react'
 
 import { api, ApiError } from '../api.js';
 import { Button, Card, Spinner, Alert, TextField } from './ui.jsx';
+import PermissionIcons, { VERBS } from './PermissionIcons.jsx';
+import { useDialogs } from './DialogProvider.jsx';
+import { Modal } from './Modal.jsx';
+import { roleDisplay } from '../help/content.js';
 
 /**
  * Folder permission editor.
@@ -18,19 +22,7 @@ import { Button, Card, Spinner, Alert, TextField } from './ui.jsx';
  */
 
 /** The six verbs, in the order they escalate. */
-const VERBS = [
-  { key: 'browse', bit: 1, label: 'استعراض', hint: 'رؤية المجلد وعناوين وثائقه' },
-  { key: 'read', bit: 2, label: 'قراءة', hint: 'فتح الوثائق وتنزيلها' },
-  { key: 'upload', bit: 4, label: 'رفع', hint: 'إضافة وثائق وإصدارات جديدة' },
-  { key: 'editMeta', bit: 8, label: 'تعديل البيانات', hint: 'تغيير العناوين والحقول' },
-  { key: 'delete', bit: 16, label: 'حذف', hint: 'حذف الوثائق والمجلدات' },
-  { key: 'managePerms', bit: 32, label: 'إدارة الصلاحيات', hint: 'تعديل هذه القائمة' },
-];
 
-const bitsToLabels = (bits) =>
-  VERBS.filter((verb) => (bits & verb.bit) !== 0)
-    .map((verb) => verb.label)
-    .join('، ') || '—';
 
 export default function PermissionsPanel({ folderId, folderName, onClose, onChanged }) {
   const [acl, setAcl] = useState(null);
@@ -39,6 +31,16 @@ export default function PermissionsPanel({ folderId, folderName, onClose, onChan
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(null);
   const [picker, setPicker] = useState({ open: false, query: '', results: [] });
+  /*
+   * The roles a grant can be built from.
+   *
+   * The server has always accepted a `roleId` on an access-control entry and
+   * stored it as `from_role_id`, but nothing ever sent one — so the roles tab
+   * could create templates that no screen could apply, and the column recorded
+   * nothing. Offering them here is what makes that feature reachable.
+   */
+  const [roles, setRoles] = useState([]);
+  const { confirm } = useDialogs();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -60,7 +62,15 @@ export default function PermissionsPanel({ folderId, folderName, onClose, onChan
     load();
   }, [load]);
 
-  async function save(principalId, allowBits, denyBits) {
+  useEffect(() => {
+    // A failure here only costs the shortcut; the verb checkboxes still work.
+    api.admin
+      .roles()
+      .then((result) => setRoles(result.roles ?? []))
+      .catch(() => setRoles([]));
+  }, []);
+
+  async function save(principalId, allowBits, denyBits, roleId = null) {
     setBusy(true);
     setError(null);
     try {
@@ -70,7 +80,10 @@ export default function PermissionsPanel({ folderId, folderName, onClose, onChan
         // constraint error.
         await api.admin.removeAce(folderId, principalId);
       } else {
-        await api.admin.setAce(folderId, principalId, { allowBits, denyBits });
+        // `roleId` is recorded, not enforced: the bits are copied onto the entry
+        // at grant time, so editing the role later leaves existing grants alone.
+        // It is what lets the list say where a grant came from.
+        await api.admin.setAce(folderId, principalId, { allowBits, denyBits, roleId });
       }
       setEditing(null);
       await load();
@@ -83,7 +96,14 @@ export default function PermissionsPanel({ folderId, folderName, onClose, onChan
   }
 
   async function remove(principalId, displayName) {
-    if (!window.confirm(`إزالة صلاحيات ${displayName} من هذا المجلد؟`)) return;
+    const confirmed = await confirm({
+      title: 'إزالة الصلاحية',
+      message: `ستُزال صلاحيات ${displayName} على هذا المجلد.`,
+      detail: 'الصلاحيات الموروثة من مجلد أعلى لا تتأثر بهذا الإجراء.',
+      confirmLabel: 'إزالة',
+      variant: 'danger',
+    });
+    if (!confirmed) return;
     setBusy(true);
     try {
       await api.admin.removeAce(folderId, principalId);
@@ -99,11 +119,18 @@ export default function PermissionsPanel({ folderId, folderName, onClose, onChan
   async function toggleInheritance() {
     const breaking = acl.folder.inheritsAcl;
 
-    const message = breaking
-      ? 'إيقاف الوراثة من المجلد الأعلى. سيتم نسخ الصلاحيات الموروثة الحالية إلى هذا المجلد حتى لا يفقد أحد وصوله. متابعة؟'
-      : 'إعادة تفعيل الوراثة من المجلد الأعلى؟';
-
-    if (!window.confirm(message)) return;
+    const confirmed = await confirm({
+      title: breaking ? 'إيقاف الوراثة' : 'إعادة تفعيل الوراثة',
+      message: breaking
+        ? 'لن يرث هذا المجلد صلاحيات المجلد الأعلى بعد الآن.'
+        : 'سيعود هذا المجلد إلى وراثة صلاحيات المجلد الأعلى.',
+      detail: breaking
+        ? 'تُنسخ الصلاحيات الموروثة الحالية إلى هذا المجلد أولاً، حتى لا يفقد أحد وصوله.'
+        : 'الصلاحيات الممنوحة على هذا المجلد مباشرةً تبقى كما هي.',
+      confirmLabel: breaking ? 'إيقاف الوراثة' : 'تفعيل الوراثة',
+      variant: 'warning',
+    });
+    if (!confirmed) return;
 
     setBusy(true);
     try {
@@ -194,7 +221,7 @@ export default function PermissionsPanel({ folderId, folderName, onClose, onChan
                   className="w-full rounded px-2 py-1.5 text-right text-sm hover:bg-primary/10"
                 >
                   {principal.displayName}
-                  <span className="me-2 text-xs text-text-muted">
+                  <span className="ms-2 text-xs text-text-muted">
                     {principal.type === 'group' ? 'مجموعة' : principal.username}
                   </span>
                 </button>
@@ -206,10 +233,13 @@ export default function PermissionsPanel({ folderId, folderName, onClose, onChan
 
       {editing ? (
         <VerbEditor
+          key={editing.principalId}
           entry={editing}
           busy={busy}
           onCancel={() => setEditing(null)}
-          onSave={(allowBits, denyBits) => save(editing.principalId, allowBits, denyBits)}
+          roles={roles}
+          onSave={(allowBits, denyBits, roleId) =>
+            save(editing.principalId, allowBits, denyBits, roleId)}
         />
       ) : null}
 
@@ -235,19 +265,26 @@ export default function PermissionsPanel({ folderId, folderName, onClose, onChan
                 <tr key={entry.aceId} className="hover:bg-surface-muted/30">
                   <td className="px-3 py-2 text-right">
                     <span className="font-medium text-text">{entry.displayName}</span>
-                    <span className="me-2 text-xs text-text-muted">
+                    <span className="ms-2 text-xs text-text-muted">
                       {entry.principalType === 'group' ? 'مجموعة' : 'مستخدم'}
                     </span>
+                    {/* Where the grant came from. Recorded at grant time, so it
+                        stays true even after the role itself is edited. */}
+                    {entry.fromRole ? (
+                      <span className="ms-2 rounded border border-border px-1.5 py-0.5 text-[11px] text-text-muted">
+                        من دور: {entry.fromRole}
+                      </span>
+                    ) : null}
                     {!entry.isActive ? (
-                      <span className="me-2 text-xs text-amber-600">غير مفعّل</span>
+                      <span className="ms-2 text-xs text-amber-600">غير مفعّل</span>
                     ) : null}
                   </td>
-                  <td className="px-3 py-2 text-right text-text-muted">
-                    {bitsToLabels(entry.allowBits)}
+                  <td className="px-3 py-2 text-right">
+                    <PermissionIcons bits={entry.allowBits} />
                   </td>
                   <td className="px-3 py-2 text-right">
                     {entry.denyBits ? (
-                      <span className="text-red-600">{bitsToLabels(entry.denyBits)}</span>
+                      <PermissionIcons bits={entry.denyBits} tone="deny" />
                     ) : (
                       <span className="text-text-muted">—</span>
                     )}
@@ -288,10 +325,8 @@ export default function PermissionsPanel({ folderId, folderName, onClose, onChan
                 className="flex flex-wrap items-center gap-2 rounded border border-border bg-surface-muted/30 px-3 py-1.5 text-xs"
               >
                 <span className="font-medium text-text">{entry.displayName}</span>
-                <span className="text-text-muted">{bitsToLabels(entry.allowBits)}</span>
-                {entry.denyBits ? (
-                  <span className="text-red-600">منع: {bitsToLabels(entry.denyBits)}</span>
-                ) : null}
+                <PermissionIcons bits={entry.allowBits} />
+                {entry.denyBits ? <PermissionIcons bits={entry.denyBits} tone="deny" /> : null}
                 <span className="text-text-muted">من: {entry.folderName}</span>
               </li>
             ))}
@@ -303,9 +338,20 @@ export default function PermissionsPanel({ folderId, folderName, onClose, onChan
 }
 
 /** Checkbox grid for one entry. Allow and deny are separate: DENY beats ALLOW. */
-function VerbEditor({ entry, busy, onCancel, onSave }) {
+/**
+ * Allow and deny, one row per verb.
+ *
+ * A dialog rather than a panel that unfolds above the table: the entry being
+ * edited sits in that table, and expanding a block over it pushed the row out
+ * from under the pointer that had just clicked it.
+ *
+ * Keyed by the entry it is editing, so opening a second one re-seeds the
+ * checkboxes instead of carrying the first one's state across.
+ */
+function VerbEditor({ entry, busy, onCancel, onSave, roles = [] }) {
   const [allowBits, setAllowBits] = useState(entry.allowBits ?? 0);
   const [denyBits, setDenyBits] = useState(entry.denyBits ?? 0);
+  const [roleId, setRoleId] = useState(entry.fromRoleId ?? '');
 
   const toggle = (bits, setBits, bit, otherBits, setOtherBits) => {
     setBits(bits ^ bit);
@@ -314,9 +360,78 @@ function VerbEditor({ entry, busy, onCancel, onSave }) {
     if ((otherBits & bit) !== 0) setOtherBits(otherBits & ~bit);
   };
 
+  const emptying = allowBits === 0 && denyBits === 0;
+
   return (
-    <div className="mb-4 rounded-lg border border-primary/30 bg-primary/5 p-3">
-      <p className="mb-2 text-sm font-medium text-text">{entry.displayName}</p>
+    <Modal
+      open
+      onClose={onCancel}
+      title="تعديل الصلاحية"
+      subtitle={entry.displayName}
+      icon={Shield}
+      size="md"
+      footer={
+        <>
+          <Button
+            onClick={() => onSave(allowBits, denyBits, roleId === '' ? null : Number(roleId))}
+            disabled={busy}
+          >
+            حفظ
+          </Button>
+          <Button variant="secondary" onClick={onCancel} disabled={busy}>
+            إلغاء
+          </Button>
+          {emptying ? (
+            <span className="text-xs text-amber-600">
+              بلا صلاحيات — سيؤدي الحفظ إلى إزالة الإدخال.
+            </span>
+          ) : null}
+        </>
+      }
+    >
+      <p className="mb-3 text-xs text-text-muted">
+        «منع» يتقدّم على «سماح» دائماً، بما في ذلك السماح الموروث من مجلد أعلى.
+      </p>
+
+      {/*
+        A starting point, not a lock.
+
+        Choosing a role ticks the verbs it carries and records which role the
+        grant came from; the checkboxes stay editable afterwards, because the
+        bits are copied at grant time and the entry is what the server enforces.
+        Editing the role later never changes a grant already made.
+      */}
+      {roles.length > 0 ? (
+        <label className="mb-3 block">
+          <span className="mb-1 block text-xs text-text-muted">ابدأ من دور (اختياري)</span>
+          <select
+            value={roleId}
+            disabled={busy}
+            onChange={(event) => {
+              const chosen = event.target.value;
+              setRoleId(chosen);
+              const role = roles.find((r) => String(r.roleId) === chosen);
+              if (!role) return;
+              setAllowBits(role.permissionBits);
+              // A role grants; it never denies. Leaving a stale deny in place
+              // would silently cancel part of what was just chosen.
+              setDenyBits(0);
+            }}
+            className="w-full max-w-sm rounded-lg border border-border bg-control px-2 py-1.5 text-sm"
+          >
+            <option value="">بدون دور — حدّد الصلاحيات يدوياً</option>
+            {roles.map((role) => {
+              const display = roleDisplay(role);
+              return (
+                <option key={role.roleId} value={role.roleId}>
+                  {display.name}
+                  {display.description ? ` — ${display.description}` : ''}
+                </option>
+              );
+            })}
+          </select>
+        </label>
+      ) : null}
 
       <div className="grid gap-2 sm:grid-cols-2">
         {VERBS.map((verb) => (
@@ -345,20 +460,6 @@ function VerbEditor({ entry, busy, onCancel, onSave }) {
           </div>
         ))}
       </div>
-
-      <div className="mt-3 flex flex-row gap-2">
-        <Button onClick={() => onSave(allowBits, denyBits)} disabled={busy}>
-          حفظ
-        </Button>
-        <Button variant="secondary" onClick={onCancel} disabled={busy}>
-          إلغاء
-        </Button>
-        {allowBits === 0 && denyBits === 0 ? (
-          <span className="self-center text-xs text-text-muted">
-            بلا صلاحيات — سيؤدي الحفظ إلى إزالة الإدخال.
-          </span>
-        ) : null}
-      </div>
-    </div>
+    </Modal>
   );
 }

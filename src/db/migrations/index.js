@@ -34,6 +34,12 @@ import { m0007WidenDataType } from './0007-widen-data-type.js';
 import { m0008Collaboration } from './0008-collaboration.js';
 import { m0009Integration } from './0009-integration.js';
 import { m0010ExpandGroupMembers } from './0010-expand-group-members.js';
+import { m0011RenditionClaimRecovery } from './0011-rendition-claim-recovery.js';
+import { m0012MultiFileDocuments } from './0012-multi-file-documents.js';
+import { m0013PerFileRenditions } from './0013-per-file-renditions.js';
+import { m0014StorageReconciliation } from './0014-storage-reconciliation.js';
+import { m0015UserPreferences } from './0015-user-preferences.js';
+import { m0016ClassificationPilot } from './0016-classification-pilot.js';
 
 /**
  * @typedef {object} Migration
@@ -55,4 +61,10 @@ export const MIGRATIONS = [
   m0008Collaboration,
   m0009Integration,
   m0010ExpandGroupMembers,
+  m0011RenditionClaimRecovery,
+  m0012MultiFileDocuments,
+  m0013PerFileRenditions,
+  m0014StorageReconciliation,
+  m0015UserPreferences,
+  m0016ClassificationPilot,
 ];

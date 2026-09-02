@@ -13,6 +13,22 @@ export default {
   content: ['./index.html', './src/**/*.{js,jsx}'],
   theme: {
     extend: {
+      /*
+        The panel that opens under a tile.
+
+        Written here rather than pulled in with tailwindcss-animate: one keyframe
+        does not justify a plugin, and the standard asks only that the panel
+        arrive from above rather than appear.
+      */
+      keyframes: {
+        'slide-down': {
+          from: { opacity: '0', transform: 'translateY(-1rem)' },
+          to: { opacity: '1', transform: 'translateY(0)' },
+        },
+      },
+      animation: {
+        'slide-down': 'slide-down 300ms ease-out',
+      },
       colors: {
         primary: token('primary'),
         'primary-dark': token('primary-dark'),

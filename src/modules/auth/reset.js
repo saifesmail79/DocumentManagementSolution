@@ -25,7 +25,7 @@ import { randomBytes, createHash } from 'node:crypto';
 import { db, sql } from '../../db/index.js';
 import { config } from '../../config/index.js';
 import { moduleLogger } from '../../lib/logger.js';
-import { hashPassword, validatePassword } from './passwords.js';
+import { hashPassword, checkPassword } from './passwords.js';
 import { revokeAllSessions } from './sessions.js';
 
 const log = moduleLogger('auth');
@@ -161,8 +161,10 @@ export async function completeReset({ token, newPassword }) {
   const check = await checkResetToken(token);
   if (!check.ok) return check;
 
-  const policy = validatePassword(newPassword, { username: check.username });
-  if (!policy.ok) return { ok: false, reason: 'weak_password', problems: policy.problems };
+  const policy = await checkPassword(newPassword, { username: check.username });
+  if (!policy.ok) {
+    return { ok: false, reason: 'weak_password', problems: policy.problems, details: policy.details };
+  }
 
   const hash = await hashPassword(newPassword);
 

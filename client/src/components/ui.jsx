@@ -6,7 +6,8 @@
  * to leave nowhere that needs one.
  */
 
-import { Loader2 } from 'lucide-react';
+import { useState } from 'react';
+import { Check, Copy, Loader2 } from 'lucide-react';
 
 export function Button({ variant = 'primary', icon: Icon, children, className = '', ...props }) {
   const variants = {
@@ -117,5 +118,54 @@ export function ReadOnlyBadge() {
     <span className="rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[11px] text-amber-600">
       عرض الاسم فقط
     </span>
+  );
+}
+
+/**
+ * A secret shown once, with the one control that makes that survivable.
+ *
+ * Generated passwords and API keys are displayed exactly once and are never
+ * retrievable afterwards. Rendering one as plain text inside a sentence asks the
+ * reader to select a 30-character random string by hand, at the one moment where
+ * getting it wrong means starting over — so it gets its own box and its own copy
+ * button.
+ */
+export function CopyField({ value, label }) {
+  const [copied, setCopied] = useState(false);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      // Long enough to be read as confirmation, short enough that the button is
+      // back to its normal state before anyone needs it again.
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard access can be refused outright (an insecure origin, a policy).
+      // The value is still on screen and selectable, so this is not worth an
+      // error message of its own.
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-1">
+      <code
+        dir="ltr"
+        className="flex-1 select-all truncate rounded border border-border bg-surface px-2 py-1 text-[12px] text-text"
+      >
+        {value}
+      </code>
+      <button
+        type="button"
+        onClick={copy}
+        title={copied ? 'تم النسخ' : (label ?? 'نسخ')}
+        aria-label={copied ? 'تم النسخ' : (label ?? 'نسخ')}
+        className={`shrink-0 rounded-lg border border-border p-1.5 transition-colors ${
+          copied ? 'bg-green-50 text-green-600' : 'text-text-muted hover:bg-primary/10 hover:text-primary'
+        }`}
+      >
+        {copied ? <Check size={14} /> : <Copy size={14} />}
+      </button>
+    </div>
   );
 }

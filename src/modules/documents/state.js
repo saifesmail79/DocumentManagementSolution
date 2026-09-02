@@ -242,7 +242,17 @@ export async function restoreVersion({ userId, documentId, versionNumber, commen
   `.execute(db);
 
   const version = source.rows[0];
-  if (!version) return { ok: false, reason: 'version_not_found' };
+  if (!version) {
+    // A multi-file document has no version rows at all, so "restore version N"
+    // misses for a reason that has nothing to do with N. Reported distinctly, or
+    // the client shows "that version no longer exists" about a document that
+    // never had versions in the first place.
+    const { isMultiFileDocument } = await import('./service.js');
+    if (await isMultiFileDocument(documentId)) {
+      return { ok: false, reason: 'multi_file_document' };
+    }
+    return { ok: false, reason: 'version_not_found' };
+  }
   if (Number(version.current_version) === Number(versionNumber)) {
     return { ok: false, reason: 'already_current' };
   }

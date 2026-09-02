@@ -11,10 +11,12 @@ import {
   listSubfolders,
   listDocuments,
   createFolder,
+  deleteFolder,
   listTree,
   getAncestors,
 } from './service.js';
 import { record, ACTION } from '../audit/service.js';
+import { normaliseFilters } from '../search/filters.js';
 
 export async function treeRoutes(app) {
   // Nothing in this module is reachable without a session.
@@ -45,11 +47,19 @@ export async function treeRoutes(app) {
     const folder = await getFolder(request.user.userId, folderId);
     if (!folder) return reply.code(404).send({ error: 'not_found' });
 
+    // Filters arrive on the query string so a narrowed folder view is a
+    // linkable URL, the same way a search result set is.
+    const { filters, problems } = normaliseFilters(request.query);
+    if (problems.length > 0) {
+      return reply.code(400).send({ error: 'invalid_filter', detail: problems.join(', ') });
+    }
+
     const [folders, documents, ancestors] = await Promise.all([
       listSubfolders(request.user.userId, folderId),
       listDocuments(request.user.userId, folderId, {
         limit: request.query.limit,
         cursor: parseCursor(request.query.cursor),
+        filters,
       }),
       // Shipped with the folder so the breadcrumb needs no second round trip.
       getAncestors(request.user.userId, folderId),
@@ -90,6 +100,45 @@ export async function treeRoutes(app) {
     });
 
     return reply.code(201).send({ folderId: String(result.folderId) });
+  });
+
+  /**
+   * Removes an empty folder.
+   *
+   * Refused with a count of what is in the way when it still holds anything, so
+   * the caller can say what is blocking rather than only that something is.
+   */
+  app.delete('/:folderId', async (request, reply) => {
+    const folderId = parseId(request.params.folderId);
+    if (folderId === null) return reply.code(400).send({ error: 'invalid_folder_id' });
+
+    const result = await deleteFolder(request.user.userId, folderId);
+
+    if (!result.ok) {
+      const status = { forbidden: 403, not_found: 404, not_empty: 409 }[result.reason] ?? 400;
+      return reply.code(status).send({
+        error: result.reason,
+        // The counts travel with the refusal: "not empty" is far more useful
+        // when it says how much is in there.
+        subfolders: result.subfolders,
+        documents: result.documents,
+        // Binned separately: it blocks the delete but is fixed in the recycle
+        // bin, not in the folder, so the caller must be able to say which.
+        binned: result.binned,
+      });
+    }
+
+    await record({
+      actor: request.user,
+      action: ACTION.FOLDER_DELETED,
+      targetType: 'folder',
+      targetId: folderId,
+      folderId,
+      detail: result.name,
+      request,
+    });
+
+    return reply.code(204).send();
   });
 }
 

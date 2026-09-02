@@ -525,9 +525,38 @@ describe('Tier 1 gaps', { skip: CONFIGURED ? false : target.reason }, () => {
   });
 
   test('an out-of-range or unknown setting is refused', async () => {
-    const tooLow = await call('PUT', '/api/settings/auth.min_password_length', bossCookie, { value: 2 });
+    /*
+     * 0, not 2.
+     *
+     * The minimum password length used to refuse anything under 8, and this
+     * asserted that. The floor was removed deliberately — it is the
+     * administrator's policy to set, and a control that refuses the decision it
+     * exists to record is not a setting. 2 is now a legal, if unwise, policy.
+     *
+     * What remains is the bound that cannot be satisfied rather than the one
+     * that is merely lax: 0 characters is not a password, and a minimum above
+     * the longest password the system will hash would lock every account out of
+     * changing its own.
+     */
+    const tooLow = await call('PUT', '/api/settings/auth.min_password_length', bossCookie, { value: 0 });
     assert.equal(tooLow.statusCode, 400);
     assert.equal(tooLow.json().error, 'out_of_range');
+
+    // The bounds come back with the refusal, so the message can name them
+    // instead of leaving the reader to find the limit by trial and error.
+    assert.equal(tooLow.json().min, 1);
+    assert.equal(typeof tooLow.json().max, 'number');
+
+    const tooHigh = await call('PUT', '/api/settings/auth.min_password_length', bossCookie, {
+      value: 100000,
+    });
+    assert.equal(tooHigh.statusCode, 400);
+    assert.equal(tooHigh.json().error, 'out_of_range');
+
+    // And the policy the owner asked for is accepted.
+    const short = await call('PUT', '/api/settings/auth.min_password_length', bossCookie, { value: 4 });
+    assert.equal(short.statusCode, 200, short.body);
+    await call('DELETE', '/api/settings/auth.min_password_length', bossCookie);
 
     const unknown = await call('PUT', '/api/settings/not.a.real.setting', bossCookie, { value: 'x' });
     assert.equal(unknown.statusCode, 404);

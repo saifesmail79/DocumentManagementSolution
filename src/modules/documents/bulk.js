@@ -210,12 +210,28 @@ export async function buildZip({ userId, documentIds, reply }) {
 
   if (readable.length === 0) return { ok: false, reason: 'nothing_readable' };
 
+  // Both file axes.
+  //
+  // Matching only on version_number = current_version silently drops every
+  // multi-file document: those have no version row at all. The user would
+  // select ten documents, receive eight files, and find nothing in the archive
+  // or the manifest to say what happened to the other two.
+  const readableIds = sql.join(readable.map((d) => sql`${d.documentId}`));
   const versions = await sql`
-    SELECT v.document_id, v.storage_path, v.original_filename, d.title
-      FROM dbo.document_versions v
-      JOIN dbo.documents d ON d.document_id = v.document_id
-     WHERE v.version_number = d.current_version
-       AND v.document_id IN (${sql.join(readable.map((d) => sql`${d.documentId}`))})
+    SELECT c.document_id, c.storage_path, c.original_filename, c.sort_order, d.title
+      FROM (
+            SELECT v.document_id, v.storage_path, v.original_filename,
+                   CAST(NULL AS int) AS sort_order, v.version_number
+              FROM dbo.document_versions v
+             UNION ALL
+            SELECT df.document_id, df.storage_path, df.original_filename,
+                   df.sort_order, NULL AS version_number
+              FROM dbo.document_files df
+           ) c
+      JOIN dbo.documents d ON d.document_id = c.document_id
+     WHERE (c.version_number IS NULL OR c.version_number = d.current_version)
+       AND c.document_id IN (${readableIds})
+     ORDER BY c.document_id, c.sort_order
   `.execute(db);
 
   const { default: archiver } = await import('archiver');
@@ -229,9 +245,19 @@ export async function buildZip({ userId, documentIds, reply }) {
     // Two documents can legitimately share a title. Suffixing keeps both rather
     // than letting the second overwrite the first inside the archive.
     const base = row.original_filename || `${row.title}`;
-    const count = (used.get(base) ?? 0) + 1;
-    used.set(base, count);
-    const name = count === 1 ? base : `${count}_${base}`;
+
+    // A multi-file document becomes a directory inside the archive, named after
+    // the document and holding its files in reading order. Flattening them
+    // alongside everything else would scatter one document's pages through the
+    // archive with nothing to say they belong together.
+    const entry =
+      row.sort_order === null
+        ? base
+        : `${row.title}/${String(row.sort_order + 1).padStart(2, '0')}-${base}`;
+
+    const count = (used.get(entry) ?? 0) + 1;
+    used.set(entry, count);
+    const name = count === 1 ? entry : `${count}_${entry}`;
 
     archive.append(storage.createReadStream(row.storage_path), { name });
   }

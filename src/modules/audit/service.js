@@ -33,20 +33,41 @@ export const ACTION = Object.freeze({
   PASSWORD_RESET_BY_ADMIN: 'password.reset_by_admin',
 
   USER_CREATED: 'user.created',
+  USER_UPDATED: 'user.updated',
   USER_ACTIVATED: 'user.activated',
   USER_DEACTIVATED: 'user.deactivated',
   USER_SUPER_ADMIN_CHANGED: 'user.super_admin_changed',
   USER_UNLOCKED: 'user.unlocked',
 
   GROUP_CREATED: 'group.created',
+  GROUP_UPDATED: 'group.updated',
+  GROUP_ACTIVATED: 'group.activated',
+  GROUP_DEACTIVATED: 'group.deactivated',
   GROUP_MEMBER_ADDED: 'group.member_added',
   GROUP_MEMBER_REMOVED: 'group.member_removed',
+
+  ROLE_CREATED: 'role.created',
+  ROLE_UPDATED: 'role.updated',
+  ROLE_DELETED: 'role.deleted',
 
   ACE_SET: 'acl.entry_set',
   ACE_REMOVED: 'acl.entry_removed',
   INHERITANCE_CHANGED: 'acl.inheritance_changed',
 
+  // Administration of the system's own vocabulary and integrations. These were
+  // silent: the constants for identity changes above existed for a long time
+  // without a single call recording them, and the definitions, keys, webhooks
+  // and templates had no constants at all. An audit trail that answers "who
+  // downloaded this" but not "who made that person an administrator" or "who
+  // pointed a webhook at that address" is answering the easier question.
+  METADATA_DEFINITION_CHANGED: 'metadata.definition_changed',
+  API_KEY_ISSUED: 'api_key.issued',
+  API_KEY_REVOKED: 'api_key.revoked',
+  WEBHOOK_CHANGED: 'webhook.changed',
+  APPROVAL_TEMPLATE_CHANGED: 'approval.template_changed',
+
   FOLDER_CREATED: 'folder.created',
+  FOLDER_DELETED: 'folder.deleted',
 
   DOCUMENT_CREATED: 'document.created',
   DOCUMENT_VERSION_ADDED: 'document.version_added',

@@ -641,6 +641,116 @@ describe('Tier 2 features', { skip: CONFIGURED ? false : target.reason }, () => 
     assert.equal(second.json().error, 'already_pending');
   });
 
+  // The next four tests form a sequence: they share a template and document
+  // created in the first test. They are isolated from the templates above so
+  // the existing tests are not disturbed.
+  let _editTemplateId;
+  let _editTypeId;
+  let _editDocumentId;
+  let _editRequestId;
+
+  test('renaming a template and linking it to a type shows in GET with pendingRequests 0', async () => {
+    const typeResp = await call('POST', '/api/metadata/types', bossCookie, { name: 'نوع اختبار القوالب' });
+    _editTypeId = typeResp.json().typeId;
+
+    const tmplResp = await call('POST', '/api/approval-templates', bossCookie, {
+      name: 'قالب لاختبار التعديل',
+      steps: [{ approverId: String(id.المدققون) }],
+    });
+    assert.equal(tmplResp.statusCode, 201);
+    _editTemplateId = tmplResp.json().templateId;
+
+    const patched = await call('PATCH', `/api/approval-templates/${_editTemplateId}`, bossCookie, {
+      name: 'قالب معدّل للاختبار',
+      typeId: _editTypeId,
+    });
+    assert.equal(patched.statusCode, 200, patched.body);
+
+    const list = (await call('GET', '/api/approval-templates', bossCookie)).json();
+    const found = list.templates.find((t) => t.templateId === _editTemplateId);
+    assert.ok(found, 'the renamed template should appear in the list');
+    assert.equal(found.name, 'قالب معدّل للاختبار');
+    assert.equal(found.typeId, _editTypeId);
+    assert.equal(found.pendingRequests, 0);
+  });
+
+  test('PATCH with steps is refused while a request is pending; name-only PATCH succeeds', async () => {
+    _editDocumentId = await upload(aliceCookie, 'legal', 'template-edit-pending.txt', 'للاعتماد');
+
+    const req = await call('POST', `/api/documents/${_editDocumentId}/approvals`, aliceCookie, {
+      templateId: _editTemplateId,
+    });
+    assert.equal(req.statusCode, 201);
+    _editRequestId = req.json().requestId;
+
+    // Steps update must be refused while the request is live.
+    const blocked = await call('PATCH', `/api/approval-templates/${_editTemplateId}`, bossCookie, {
+      steps: [{ approverId: String(id.المدراء) }],
+    });
+    assert.equal(blocked.statusCode, 409, blocked.body);
+    assert.equal(blocked.json().error, 'template_in_use');
+
+    // A name-only update must go through even with a pending request.
+    const nameOnly = await call('PATCH', `/api/approval-templates/${_editTemplateId}`, bossCookie, {
+      name: 'قالب معدّل أثناء الانتظار',
+    });
+    assert.equal(nameOnly.statusCode, 200, nameOnly.body);
+  });
+
+  test('after the pending request is cancelled, PATCH with new steps succeeds', async () => {
+    const cancelled = await call('POST', `/api/approvals/${_editRequestId}/cancel`, aliceCookie, {});
+    assert.equal(cancelled.statusCode, 200, cancelled.body);
+
+    const newSteps = await call('PATCH', `/api/approval-templates/${_editTemplateId}`, bossCookie, {
+      steps: [
+        { approverId: String(id.المدراء) },
+        { approverId: String(id.المدققون) },
+      ],
+    });
+    assert.equal(newSteps.statusCode, 200, newSteps.body);
+
+    const list = (await call('GET', '/api/approval-templates', bossCookie)).json();
+    const found = list.templates.find((t) => t.templateId === _editTemplateId);
+    assert.equal(found.steps.length, 2);
+    assert.equal(found.steps[0].order, 1);
+    assert.equal(found.steps[1].order, 2);
+    // No in-flight requests remain after the cancel — the template is free.
+    assert.equal(found.pendingRequests, 0, 'pendingRequests must be 0 after the cancel');
+  });
+
+  test('a deactivated template is not chosen for its type; reactivating restores it', async () => {
+    const deactivated = await call(
+      'POST', `/api/approval-templates/${_editTemplateId}/active`, bossCookie, { active: false },
+    );
+    assert.equal(deactivated.statusCode, 200, deactivated.body);
+
+    // Create a fresh document of the linked type and try to start an approval
+    // without naming a template — the type should supply one, but won't now.
+    const doc = await upload(aliceCookie, 'legal', 'auto-resolve-test.txt', 'اختبار التوجيه التلقائي');
+    await call('PATCH', `/api/documents/${doc}/metadata`, aliceCookie, { typeId: _editTypeId });
+
+    const noTemplate = await call('POST', `/api/documents/${doc}/approvals`, aliceCookie, {});
+    assert.equal(noTemplate.statusCode, 400, noTemplate.body);
+    assert.equal(noTemplate.json().error, 'no_template');
+
+    const reactivated = await call(
+      'POST', `/api/approval-templates/${_editTemplateId}/active`, bossCookie, { active: true },
+    );
+    assert.equal(reactivated.statusCode, 200, reactivated.body);
+
+    // After reactivation the template is chosen automatically.
+    const withTemplate = await call('POST', `/api/documents/${doc}/approvals`, aliceCookie, {});
+    assert.equal(withTemplate.statusCode, 201, withTemplate.body);
+  });
+
+  test('audit log contains approval.template_changed rows with actor boss', async () => {
+    const rows = await sql`
+      SELECT actor_username FROM dbo.audit_log
+       WHERE action = 'approval.template_changed' AND actor_username = 'boss'
+    `.execute(db);
+    assert.ok(rows.rows.length > 0, 'should have at least one audit row for approval template changes by boss');
+  });
+
   // ── Metadata inheritance ───────────────────────────────────────────────
 
   test('folder defaults fill in a new document', async () => {

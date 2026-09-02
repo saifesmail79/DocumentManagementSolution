@@ -101,6 +101,9 @@ export async function getFolderAcl(userId, folderId) {
       allowBits: Number(entry.allow_bits),
       denyBits: Number(entry.deny_bits),
       fromRole: entry.role_name,
+      // The id as well as the name: the editor pre-selects the role a grant was
+      // built from, and a name cannot be matched back to a row reliably.
+      fromRoleId: entry.from_role_id === null ? null : Number(entry.from_role_id),
       createdAt: entry.created_at,
     })),
     inherited: inherited.map((entry) => ({

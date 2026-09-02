@@ -24,7 +24,7 @@ import { randomBytes } from 'node:crypto';
 
 import { db, sql } from '../../db/index.js';
 import { moduleLogger } from '../../lib/logger.js';
-import { hashPassword, validatePassword } from '../auth/passwords.js';
+import { hashPassword, checkPassword } from '../auth/passwords.js';
 import { revokeAllSessions } from '../auth/sessions.js';
 
 const log = moduleLogger('admin');
@@ -34,13 +34,41 @@ async function bumpEpoch(trx, reason) {
   await sql`EXEC dbo.sp_bump_acl_epoch @reason = ${reason}`.execute(trx);
 }
 
+/**
+ * Sentinel returned by cleanEmail when the address fails validation.
+ * Using a symbol means callers cannot accidentally confuse it with null or a
+ * string, so the check `=== INVALID_EMAIL` is always unambiguous.
+ */
+const INVALID_EMAIL = Symbol('invalid_email');
+
+/**
+ * Normalises and validates an email value from a request body.
+ *
+ * undefined  → undefined  (caller omitted the field; leave the DB row alone)
+ * null / ''  → null       (explicit clear)
+ * string     → trimmed address, or INVALID_EMAIL if it fails the plausibility
+ *              check (one @, no whitespace, a dot after the @, max 255 chars)
+ *
+ * Callers turn INVALID_EMAIL into { ok: false, reason: 'invalid_email' }.
+ */
+function cleanEmail(value) {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  const trimmed = String(value).trim();
+  if (trimmed === '') return null;
+  if (trimmed.length > 255) return INVALID_EMAIL;
+  // One @, no whitespace in either part, at least one dot after the @.
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) return INVALID_EMAIL;
+  return trimmed;
+}
+
 // ── Users ────────────────────────────────────────────────────────────────
 
 export async function listUsers({ search, includeInactive = true } = {}) {
   const pattern = search ? `%${String(search).replace(/[[\]%_]/g, (c) => `[${c}]`)}%` : null;
 
   const result = await sql`
-    SELECT u.user_id, u.username, u.is_super_admin, u.must_change_password,
+    SELECT u.user_id, u.username, u.email, u.is_super_admin, u.must_change_password,
            u.failed_login_count, u.locked_until, u.last_login_at, u.created_at,
            p.display_name, p.is_active,
            (SELECT COUNT(*) FROM dbo.group_members gm WHERE gm.member_principal_id = u.user_id) AS group_count
@@ -54,6 +82,7 @@ export async function listUsers({ search, includeInactive = true } = {}) {
   return result.rows.map((row) => ({
     userId: String(row.user_id),
     username: row.username,
+    email: row.email ?? null,
     displayName: row.display_name,
     isActive: Number(row.is_active) === 1,
     isSuperAdmin: Number(row.is_super_admin) === 1,
@@ -70,18 +99,23 @@ export async function listUsers({ search, includeInactive = true } = {}) {
  * Creates a user. With no password given, one is generated and returned once —
  * the account is flagged must_change_password so it works for a single login.
  */
-export async function createUser({ username, displayName, password, isSuperAdmin = false }) {
+export async function createUser({ username, displayName, email, password, isSuperAdmin = false }) {
   const name = String(username ?? '').trim();
   if (!/^[A-Za-z0-9._-]{3,100}$/.test(name)) return { ok: false, reason: 'invalid_username' };
 
   const existing = await sql`SELECT user_id FROM dbo.users WHERE username = ${name}`.execute(db);
   if (existing.rows.length > 0) return { ok: false, reason: 'username_taken' };
 
+  const cleanedEmail = cleanEmail(email);
+  if (cleanedEmail === INVALID_EMAIL) return { ok: false, reason: 'invalid_email' };
+
   const generated = !password;
   const secret = generated ? randomBytes(18).toString('base64url') : password;
 
-  const policy = validatePassword(secret, { username: name });
-  if (!policy.ok) return { ok: false, reason: 'weak_password', problems: policy.problems };
+  const policy = await checkPassword(secret, { username: name });
+  if (!policy.ok) {
+    return { ok: false, reason: 'weak_password', problems: policy.problems, details: policy.details };
+  }
 
   const hash = await hashPassword(secret);
 
@@ -96,8 +130,8 @@ export async function createUser({ username, displayName, password, isSuperAdmin
 
     await sql`
       INSERT INTO dbo.users
-        (user_id, username, password_hash, is_super_admin, must_change_password, password_changed_at)
-      VALUES (${pid}, ${name}, ${hash}, ${isSuperAdmin ? 1 : 0}, ${generated ? 1 : 0}, SYSUTCDATETIME())
+        (user_id, username, email, password_hash, is_super_admin, must_change_password, password_changed_at)
+      VALUES (${pid}, ${name}, ${cleanedEmail ?? null}, ${hash}, ${isSuperAdmin ? 1 : 0}, ${generated ? 1 : 0}, SYSUTCDATETIME())
     `.execute(trx);
 
     // A new super admin gains permissions everywhere without any ACE.
@@ -110,6 +144,53 @@ export async function createUser({ username, displayName, password, isSuperAdmin
   // The password is returned only when generated, and only here — it is never
   // stored or logged in readable form.
   return { ok: true, userId: String(userId), username: name, ...(generated ? { password: secret } : {}) };
+}
+
+/**
+ * Updates a user's display name and/or email address.
+ *
+ * The username is intentionally not editable here. It is the login identity and
+ * the audit trail stores usernames as plain text; renaming a user would silently
+ * rewrite who every historical audit entry says acted, turning a reliable record
+ * into a lie. Deactivate and recreate if the login name genuinely needs to change.
+ *
+ * No epoch bump: changing a display name or email address does not change what
+ * the user may do, so cached permission rows remain valid.
+ */
+export async function updateUser({ userId, displayName, email }) {
+  // displayName is optional — omitting it leaves the column alone.
+  let name;
+  if (displayName !== undefined) {
+    name = String(displayName).trim();
+    if (!name || name.length > 200) return { ok: false, reason: 'invalid_name' };
+  }
+
+  const cleanedEmail = cleanEmail(email);
+  if (cleanedEmail === INVALID_EMAIL) return { ok: false, reason: 'invalid_email' };
+
+  const found = await sql`SELECT user_id FROM dbo.users WHERE user_id = ${userId}`.execute(db);
+  if (!found.rows[0]) return { ok: false, reason: 'not_found' };
+
+  // Nothing supplied: report success without touching the database.
+  if (name === undefined && cleanedEmail === undefined) return { ok: true };
+
+  // Two tables, one transaction: a name that changed while the address did not
+  // is a half-applied edit the screen has no way to show.
+  await db.transaction().execute(async (trx) => {
+    if (name !== undefined) {
+      await sql`
+        UPDATE dbo.principals SET display_name = ${name} WHERE principal_id = ${userId}
+      `.execute(trx);
+    }
+
+    // Only touch the email column if the caller explicitly sent it; undefined
+    // means "leave it alone", null/'' means "clear it".
+    if (cleanedEmail !== undefined) {
+      await sql`UPDATE dbo.users SET email = ${cleanedEmail} WHERE user_id = ${userId}`.execute(trx);
+    }
+  });
+
+  return { ok: true };
 }
 
 export async function setUserActive({ userId, active, actorId }) {
@@ -212,6 +293,7 @@ export async function listGroups() {
     groupId: String(row.group_id),
     name: row.name,
     description: row.description,
+    isActive: Number(row.is_active) === 1,
     memberCount: Number(row.member_count),
     createdAt: row.created_at,
   }));
@@ -240,6 +322,82 @@ export async function createGroup({ name, description }) {
   // A new empty group grants nothing, so no epoch bump is needed.
   log.info({ groupId: String(groupId), name: clean }, 'group created');
   return { ok: true, groupId: String(groupId) };
+}
+
+/**
+ * Renames a group and optionally updates its description.
+ *
+ * The name change propagates to dbo.principals.display_name in the same
+ * transaction because pickers, ACL views and member lists all read the
+ * principal row, not the groups table. One transaction means the two columns
+ * are never momentarily out of step.
+ *
+ * No epoch bump: renaming a group does not change the permissions it conveys.
+ */
+export async function updateGroup({ groupId, name, description }) {
+  const clean = String(name ?? '').trim();
+  if (!clean || clean.length > 200) return { ok: false, reason: 'invalid_name' };
+
+  const found = await sql`
+    SELECT g.group_id FROM dbo.groups g WHERE g.group_id = ${groupId}
+  `.execute(db);
+  if (!found.rows[0]) return { ok: false, reason: 'not_found' };
+
+  const duplicate = await sql`
+    SELECT group_id FROM dbo.groups WHERE name = ${clean} AND group_id <> ${groupId}
+  `.execute(db);
+  if (duplicate.rows.length > 0) return { ok: false, reason: 'name_taken' };
+
+  // description undefined → leave the column alone; null/'' → set to NULL.
+  const desc = description === undefined ? undefined : (String(description ?? '').trim() || null);
+
+  await db.transaction().execute(async (trx) => {
+    if (desc !== undefined) {
+      await sql`
+        UPDATE dbo.groups SET name = ${clean}, description = ${desc} WHERE group_id = ${groupId}
+      `.execute(trx);
+    } else {
+      await sql`
+        UPDATE dbo.groups SET name = ${clean} WHERE group_id = ${groupId}
+      `.execute(trx);
+    }
+    // Pickers and ACL views read display_name from principals, so keep it in sync.
+    await sql`
+      UPDATE dbo.principals SET display_name = ${clean} WHERE principal_id = ${groupId}
+    `.execute(trx);
+  });
+
+  return { ok: true };
+}
+
+/**
+ * Activates or deactivates a group.
+ *
+ * fn_expand_principals joins on principals.is_active = 1, so setting a group
+ * inactive immediately stops it from conveying any permission to its members —
+ * every cached permission row that came through the group becomes stale. The
+ * epoch bump inside the transaction closes that window.
+ *
+ * Membership rows and ACEs are preserved so reactivating the group restores
+ * exactly the access it had before, without any manual work by an administrator.
+ */
+export async function setGroupActive({ groupId, active }) {
+  const found = await sql`
+    SELECT principal_type FROM dbo.principals WHERE principal_id = ${groupId}
+  `.execute(db);
+  if (!found.rows[0] || found.rows[0].principal_type !== 'group') {
+    return { ok: false, reason: 'not_found' };
+  }
+
+  await db.transaction().execute(async (trx) => {
+    await sql`
+      UPDATE dbo.principals SET is_active = ${active ? 1 : 0} WHERE principal_id = ${groupId}
+    `.execute(trx);
+    await bumpEpoch(trx, `group ${active ? 'activated' : 'deactivated'}: ${groupId}`);
+  });
+
+  log.info({ groupId: String(groupId), active }, 'group activation changed');
+  return { ok: true };
 }
 
 export async function listGroupMembers(groupId) {

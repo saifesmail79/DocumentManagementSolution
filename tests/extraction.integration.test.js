@@ -647,6 +647,57 @@ describe('text extraction', { skip: CONFIGURED ? false : target.reason }, () => 
     assert.ok(mine.title, 'a reason with no document title is not actionable');
   });
 
+  /**
+   * "Failed" and "has not run yet" are different states with different
+   * remedies, and only the first was ever listed. A document waiting in the
+   * queue appeared in no list at all — it was a number in a tile, so the only
+   * way to find out whether a document you had just filed was searchable was to
+   * watch a count and guess.
+   */
+  test('the waiting list names the documents queued but not yet indexed', async () => {
+    const documentId = await upload(cookie, 'pending.txt', 'وثيقة تنتظر الفهرسة', 'text/plain');
+
+    // Left exactly as an upload leaves it: queued, untouched by any worker.
+    const waiting = await worker.listWaiting();
+    const mine = waiting.find((w) => String(w.documentId) === String(documentId));
+
+    assert.ok(mine, 'a queued document was missing from the waiting list');
+    assert.equal(mine.status, worker.QUEUE.PENDING);
+    assert.ok(mine.waitingSince, 'without an age the list cannot show what is stuck');
+    assert.equal(mine.stale, false);
+    assert.ok(mine.title, 'a row with no title is not actionable');
+  });
+
+  test('a document that has been indexed leaves the waiting list', async () => {
+    const documentId = await upload(cookie, 'done.txt', 'وثيقة ستُفهرس فوراً', 'text/plain');
+    await worker.drainQueue();
+
+    const waiting = await worker.listWaiting();
+    assert.ok(
+      !waiting.some((w) => String(w.documentId) === String(documentId)),
+      'a finished document must not still read as waiting',
+    );
+  });
+
+  /**
+   * A claim nobody is honouring reads as "being processed" indefinitely, which
+   * is the most misleading state the queue has — it looks like progress.
+   */
+  test('an abandoned claim is listed as waiting, and flagged as stale', async () => {
+    const documentId = await upload(cookie, 'abandoned.txt', 'وثيقة عالقة', 'text/plain');
+    await sql`
+      UPDATE dbo.extraction_queue
+         SET status = ${worker.QUEUE.RUNNING}, started_at = DATEADD(hour, -2, SYSUTCDATETIME())
+       WHERE document_id = ${documentId}
+    `.execute(db);
+
+    const waiting = await worker.listWaiting();
+    const mine = waiting.find((w) => String(w.documentId) === String(documentId));
+
+    assert.ok(mine, 'a stranded job was missing from the waiting list');
+    assert.equal(mine.stale, true, 'a stale claim must be distinguishable from live work');
+  });
+
   test('worker health distinguishes idle from switched off', async () => {
     const { setSetting, clearSetting, resetSettingsCache } = await import(
       '../src/modules/settings/service.js'

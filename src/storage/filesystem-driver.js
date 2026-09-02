@@ -44,9 +44,45 @@ export class FilesystemDriver {
   constructor({ root, tempDirName = '.tmp', ioTimeoutMs = 120_000, logger } = {}) {
     if (!root) throw new TypeError('FilesystemDriver: root is required');
     this.root = root;
+    this.tempDirName = tempDirName;
     this.tempDir = path.join(root, tempDirName);
     this.ioTimeoutMs = ioTimeoutMs;
     this.logger = logger ?? { info() {}, warn() {}, error() {}, debug() {} };
+  }
+
+  /**
+   * Repoints the driver at a different root while the process is running.
+   *
+   * Every stored path is relative, so nothing in the database has to change —
+   * that is the whole reason the layout was chosen. What must not change is the
+   * standard the root is held to: this runs the same `init()` the boot path
+   * does, so a location that cannot be written or cannot be read back is
+   * rejected here rather than on the first upload after the change.
+   *
+   * The old root is left untouched; copying between them is a job for a tool
+   * built for it, not for a web request.
+   */
+  async setRoot(nextRoot) {
+    if (!nextRoot) throw new TypeError('FilesystemDriver: root is required');
+
+    const previousRoot = this.root;
+    const previousTemp = this.tempDir;
+
+    this.root = nextRoot;
+    this.tempDir = path.join(nextRoot, this.tempDirName);
+
+    try {
+      await this.init();
+    } catch (error) {
+      // Put it back rather than leaving the process pointed somewhere unusable:
+      // a failed change must not also break the location that was working.
+      this.root = previousRoot;
+      this.tempDir = previousTemp;
+      throw error;
+    }
+
+    this.logger.warn({ from: previousRoot, to: nextRoot }, 'storage root repointed');
+    return this.root;
   }
 
   /** Resolves a relative path to an absolute one, refusing anything that escapes the root. */

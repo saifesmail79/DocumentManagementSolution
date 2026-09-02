@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Star, Clock, Bell, FileText, Folder, CheckSquare } from 'lucide-react';
 
+import { MY_TABS as TABS } from '../navigation.js';
 import { api } from '../api.js';
 import { formatDate } from '../format.js';
 import { Card, Spinner, EmptyState, Alert, ReadOnlyBadge, Button } from '../components/ui.jsx';
+import { useDialogs } from '../components/DialogProvider.jsx';
 
 /**
  * The personal landing page: favourites, recently viewed, watches, and
@@ -14,15 +16,14 @@ import { Card, Spinner, EmptyState, Alert, ReadOnlyBadge, Button } from '../comp
  * people abandon a DMS. This page is the answer to it — everything here is
  * scoped to one person and needs no search.
  */
-const TABS = [
-  { key: 'favourites', label: 'المفضلة', icon: Star },
-  { key: 'recent', label: 'المفتوحة مؤخراً', icon: Clock },
-  { key: 'watches', label: 'المتابَعة', icon: Bell },
-  { key: 'approvals', label: 'بانتظار موافقتي', icon: CheckSquare },
-];
 
 export default function MyDocuments() {
-  const [tab, setTab] = useState('favourites');
+  // From the URL, so a tile can land on one of these four directly and so each
+  // is a place that can be linked to rather than a state only clicking reaches.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requested = searchParams.get('tab');
+  const tab = TABS.some((entry) => entry.key === requested) ? requested : 'favourites';
+  const setTab = (key) => setSearchParams(key === 'favourites' ? {} : { tab: key });
 
   return (
     <div className="space-y-4">
@@ -170,6 +171,7 @@ function Approvals() {
   const [requests, setRequests] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const { prompt } = useDialogs();
 
   const load = useCallback(async () => {
     try {
@@ -184,7 +186,22 @@ function Approvals() {
   }, [load]);
 
   async function decide(requestId, decision) {
-    const note = decision === 'rejected' ? window.prompt('سبب الرفض (اختياري)') : null;
+    let note = null;
+
+    if (decision === 'rejected') {
+      note = await prompt({
+        title: 'رفض الطلب',
+        message: 'الرفض ينهي مسار الاعتماد كله ولا يعيده خطوة إلى الوراء.',
+        label: 'سبب الرفض (اختياري)',
+        placeholder: 'يُعرض على صاحب الطلب',
+        confirmLabel: 'تأكيد الرفض',
+        variant: 'warning',
+      });
+      // Dismissing the dialog cancels the rejection. Reading it as
+      // "reject without a reason" would turn a change of mind into a
+      // decision that cannot be taken back.
+      if (note === null) return;
+    }
     setBusy(true);
     setError(null);
     try {

@@ -625,6 +625,125 @@ describe('Tier 3 features', { skip: CONFIGURED ? false : target.reason }, () => 
     assert.equal(response.json().error, 'no_events');
   });
 
+  test('a paused webhook queues nothing while paused and resumes afterwards', async () => {
+    const created = await call('POST', '/api/webhooks', bossCookie, {
+      name: 'خطاف مؤقت',
+      url: 'http://127.0.0.1:9/paused-hook',
+      events: ['document.created'],
+    });
+    assert.equal(created.statusCode, 201);
+    const hookId = created.json().webhookId;
+
+    // Baseline delivery count for this hook before pausing.
+    const before = await sql`
+      SELECT COUNT(*) AS n FROM dbo.webhook_deliveries WHERE webhook_id = ${hookId}
+    `.execute(db);
+    const countBefore = Number(before.rows[0].n);
+
+    // Pause the webhook.
+    const paused = await call('POST', `/api/webhooks/${hookId}/active`, bossCookie, { active: false });
+    assert.equal(paused.statusCode, 200);
+
+    // Upload a document — this normally triggers document.created.
+    await upload(aliceCookie, 'cabinet', 'while-paused.txt', 'لا يُسلَّم');
+
+    const duringPause = await sql`
+      SELECT COUNT(*) AS n FROM dbo.webhook_deliveries WHERE webhook_id = ${hookId}
+    `.execute(db);
+    assert.equal(Number(duringPause.rows[0].n), countBefore, 'no new delivery while paused');
+
+    // GET /api/webhooks should reflect isActive false.
+    const listed = (await call('GET', '/api/webhooks', bossCookie)).json();
+    const entry = listed.webhooks.find((w) => w.webhookId === hookId);
+    assert.equal(entry.isActive, false);
+
+    // Resume and upload again — the delivery count must now grow.
+    const resumed = await call('POST', `/api/webhooks/${hookId}/active`, bossCookie, { active: true });
+    assert.equal(resumed.statusCode, 200);
+
+    await upload(aliceCookie, 'cabinet', 'after-resume.txt', 'يُسلَّم');
+
+    const afterResume = await sql`
+      SELECT COUNT(*) AS n FROM dbo.webhook_deliveries WHERE webhook_id = ${hookId}
+    `.execute(db);
+    assert.equal(Number(afterResume.rows[0].n), countBefore + 1, 'exactly one new delivery after resume');
+  });
+
+  test('editing a webhook changes url and events; bad inputs are rejected; secret_hash is preserved', async () => {
+    const created = await call('POST', '/api/webhooks', bossCookie, {
+      name: 'خطاف قابل للتعديل',
+      url: 'http://127.0.0.1:9/original',
+      events: ['document.created'],
+    });
+    assert.equal(created.statusCode, 201);
+    const hookId = created.json().webhookId;
+
+    // Read the secret_hash before the edit so we can confirm it is unchanged.
+    const before = await sql`
+      SELECT secret_hash FROM dbo.webhooks WHERE webhook_id = ${hookId}
+    `.execute(db);
+    const secretHashBefore = before.rows[0].secret_hash;
+
+    // Valid edit: change url and add another event.
+    const edited = await call('PATCH', `/api/webhooks/${hookId}`, bossCookie, {
+      name: 'خطاف قابل للتعديل',
+      url: 'https://example.test/updated',
+      events: ['document.created', 'document.updated'],
+    });
+    assert.equal(edited.statusCode, 200);
+
+    const listed = (await call('GET', '/api/webhooks', bossCookie)).json();
+    const entry = listed.webhooks.find((w) => w.webhookId === hookId);
+    assert.equal(entry.url, 'https://example.test/updated');
+    assert.ok(entry.events.includes('document.updated'));
+
+    // The secret_hash must be unchanged — the receiver keeps verifying with the
+    // secret it received at creation time.
+    const after = await sql`
+      SELECT secret_hash FROM dbo.webhooks WHERE webhook_id = ${hookId}
+    `.execute(db);
+    assert.equal(after.rows[0].secret_hash, secretHashBefore);
+
+    // A bad url must be rejected.
+    const badUrl = await call('PATCH', `/api/webhooks/${hookId}`, bossCookie, {
+      name: 'خطاف قابل للتعديل',
+      url: 'ftp://not-http',
+      events: ['document.created'],
+    });
+    assert.equal(badUrl.statusCode, 400);
+    assert.equal(badUrl.json().error, 'invalid_url');
+
+    // An empty event list must be rejected.
+    const noEvents = await call('PATCH', `/api/webhooks/${hookId}`, bossCookie, {
+      name: 'خطاف قابل للتعديل',
+      url: 'https://example.test/updated',
+      events: [],
+    });
+    assert.equal(noEvents.statusCode, 400);
+    assert.equal(noEvents.json().error, 'no_events');
+  });
+
+  test('the audit log records api_key.issued, api_key.revoked, and webhook.changed actions by boss', async () => {
+    const apiKeyRows = await sql`
+      SELECT actor_username, action FROM dbo.audit_log
+       WHERE action = 'api_key.issued' AND actor_username = 'boss'
+    `.execute(db);
+    assert.ok(apiKeyRows.rows.length >= 1, 'at least one api_key.issued row by boss');
+
+    // The key created in the first API-key test is revoked with DELETE in that same test.
+    const revokedRows = await sql`
+      SELECT actor_username, action FROM dbo.audit_log
+       WHERE action = 'api_key.revoked' AND actor_username = 'boss'
+    `.execute(db);
+    assert.ok(revokedRows.rows.length >= 1, 'at least one api_key.revoked row by boss');
+
+    const webhookRows = await sql`
+      SELECT actor_username, action FROM dbo.audit_log
+       WHERE action = 'webhook.changed' AND actor_username = 'boss'
+    `.execute(db);
+    assert.ok(webhookRows.rows.length >= 1, 'at least one webhook.changed row by boss');
+  });
+
   // ── Resumable upload ───────────────────────────────────────────────────
 
   test('a chunked upload resumes from the server-recorded offset', async () => {

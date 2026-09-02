@@ -18,7 +18,7 @@ import { randomBytes } from 'node:crypto';
 import { db, sql } from '../../db/index.js';
 import { config } from '../../config/index.js';
 import { moduleLogger } from '../../lib/logger.js';
-import { hashPassword, verifyPassword, validatePassword, needsRehash } from './passwords.js';
+import { hashPassword, verifyPassword, checkPassword, needsRehash } from './passwords.js';
 import { createSession, revokeAllSessions } from './sessions.js';
 
 const log = moduleLogger('auth');
@@ -139,7 +139,20 @@ export async function login({ username, password, ipAddress, userAgent }) {
 /** Increments the failure counter and locks the account once it crosses the threshold. */
 async function recordFailedAttempt(user) {
   const next = Number(user.failed_login_count) + 1;
-  const shouldLock = next >= config.auth.maxFailedLogins;
+
+  // The thresholds the administrator set, not the ones the process booted with.
+  // Falling back to config keeps a database hiccup from turning the lockout off.
+  let maxFailed = config.auth.maxFailedLogins;
+  let lockMinutes = config.auth.lockoutMinutes;
+  try {
+    const { getSetting } = await import('../settings/service.js');
+    maxFailed = await getSetting('auth.max_failed_logins');
+    lockMinutes = await getSetting('auth.lockout_minutes');
+  } catch {
+    /* the compiled values above already stand */
+  }
+
+  const shouldLock = next >= maxFailed;
 
   // Computing locked_until in SQL keeps it on the database clock, which is the
   // same clock the expiry comparison uses. Mixing app and server time here is how
@@ -147,13 +160,13 @@ async function recordFailedAttempt(user) {
   await sql`
     UPDATE dbo.users
        SET failed_login_count = ${next},
-           locked_until = ${shouldLock ? sql`DATEADD(minute, ${config.auth.lockoutMinutes}, SYSUTCDATETIME())` : sql`NULL`}
+           locked_until = ${shouldLock ? sql`DATEADD(minute, ${lockMinutes}, SYSUTCDATETIME())` : sql`NULL`}
      WHERE user_id = ${user.user_id}
   `.execute(db);
 
   if (shouldLock) {
     log.warn(
-      { username: user.username, attempts: next, minutes: config.auth.lockoutMinutes },
+      { username: user.username, attempts: next, minutes: lockMinutes },
       'account locked after repeated failures',
     );
   }
@@ -180,11 +193,18 @@ export async function changePassword({ userId, currentPassword, newPassword, kee
     return { ok: false, reason: 'invalid_credentials' };
   }
 
-  const policy = validatePassword(newPassword, { username: user.username });
-  if (!policy.ok) return { ok: false, reason: 'weak_password', problems: policy.problems };
+  const policy = await checkPassword(newPassword, { username: user.username });
+  if (!policy.ok) {
+    return { ok: false, reason: 'weak_password', problems: policy.problems, details: policy.details };
+  }
 
   if (await verifyPassword(user.password_hash, newPassword)) {
-    return { ok: false, reason: 'weak_password', problems: ['New password must differ from the current one.'] };
+    return {
+      ok: false,
+      reason: 'weak_password',
+      problems: ['New password must differ from the current one.'],
+      details: [{ code: 'same_as_current' }],
+    };
   }
 
   await sql`

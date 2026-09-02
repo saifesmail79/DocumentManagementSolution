@@ -5,6 +5,7 @@ import { BrowserRouter } from 'react-router-dom';
 import './index.css';
 import App from './App.jsx';
 import { AuthProvider } from './auth.jsx';
+import { DialogProvider } from './components/DialogProvider.jsx';
 
 /**
  * Registers the service worker, which is what makes the app installable.
@@ -25,7 +26,12 @@ createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <BrowserRouter>
       <AuthProvider>
-        <App />
+        {/* Outermost so every screen — including the login and forced
+            password-change screens, which render outside the shell — asks its
+            questions in the product's own dialog rather than the browser's. */}
+        <DialogProvider>
+          <App />
+        </DialogProvider>
       </AuthProvider>
     </BrowserRouter>
   </React.StrictMode>,

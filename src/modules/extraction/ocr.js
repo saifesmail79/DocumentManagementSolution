@@ -39,6 +39,59 @@ const log = moduleLogger('ocr');
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp', '.webp']);
 
 /**
+ * Page segmentation modes to try, in order, until one reads the page.
+ *
+ * ─── Why this is a list and not a setting ───────────────────────────────────
+ *
+ * 1 is automatic segmentation WITH orientation and script detection, and it
+ * earns its place: a scan fed upside down is otherwise read as mirrored
+ * nonsense that every status in the system reports as a success.
+ *
+ * But mode 1 has a failure mode of its own, and it is total. Its OSD stage
+ * needs enough clean blobs to decide an orientation; when it cannot, it does
+ * not fall back — it abandons the page and Tesseract prints nothing at all:
+ *
+ *   Too few characters. Skipping this page
+ *   OSD: Weak margin (1.96) for 46 blob text block
+ *
+ * That is what happened to two photographs of an Iraqi residence card. Both
+ * were perfectly legible to a person, and both produced ZERO characters at
+ * mode 1 and again at mode 3 — while mode 6 read 379 and 31 characters of the
+ * printed Arabic. The cards are small (693×468), and carry a stamp, a green
+ * guilloche security pattern and handwriting over the printed lines, which is
+ * plenty to defeat layout analysis without troubling a human reader at all.
+ *
+ * 6 — "assume a single uniform block of text" — skips both the orientation
+ * stage and the layout analysis, which is exactly why it survives a page the
+ * other two give up on. It cannot correct orientation, so it is the fallback
+ * and never the first choice.
+ *
+ * 11 — "sparse text, in no particular order" — is last because it is the one
+ * that stops assuming the page is a page at all. The back of that same card is
+ * a stamp, a signature scrawled across everything, and a handful of short
+ * printed labels stranded between them: mode 6 found 31 characters there and
+ * mode 11 found 127, including نموذج, الرمز, تاريخ and اسم ورتبة. A form whose
+ * printed text is scattered labels rather than paragraphs is common in exactly
+ * the paperwork this system holds.
+ *
+ * Upscaling was measured and rejected: at 2x, 3x and 4x, with and without
+ * greyscale, sharpening and contrast normalisation, nothing beat the original
+ * image at mode 6. The resolution was never the problem — the segmentation was.
+ */
+export const SEGMENTATION_MODES = Object.freeze(['1', '6', '11']);
+
+/**
+ * How much of a string is actual text rather than punctuation and noise.
+ *
+ * Letters and digits by Unicode class, so Arabic counts: a blank page comes
+ * back as a couple of dozen characters of whitespace and page separators, which
+ * clears any length floor and is then recorded as a successful OCR.
+ */
+function meaningfulCharacters(text) {
+  return (String(text ?? '').match(/[\p{L}\p{N}]/gu) ?? []).length;
+}
+
+/**
  * Runs a command with an argument array and no shell.
  *
  * `input` is a path whose bytes are streamed to the child's stdin, for a tool
@@ -255,6 +308,22 @@ async function installedLanguages() {
  * Tesseract its own ASCII-named rasters.
  */
 async function ocrImage(absolutePath) {
+  let best = '';
+
+  for (const psm of SEGMENTATION_MODES) {
+    const text = await runTesseract(absolutePath, psm);
+    if (meaningfulCharacters(text) > meaningfulCharacters(best)) best = text;
+
+    // The first mode that reads the page wins, so an ordinary scan costs one
+    // pass and only a page the layout analysis choked on pays for a second.
+    if (meaningfulCharacters(best) >= config.ocr.minCharacters) break;
+  }
+
+  return best;
+}
+
+/** One Tesseract pass at one segmentation mode. */
+async function runTesseract(absolutePath, psm) {
   const result = await run(
     config.ocr.tesseractPath,
     [
@@ -265,10 +334,8 @@ async function ocrImage(absolutePath) {
       // Only when configured: passing an empty --tessdata-dir makes tesseract
       // look in the wrong place and report every language as missing.
       ...(config.ocr.tessdataDir ? ['--tessdata-dir', config.ocr.tessdataDir] : []),
-      // 1 = automatic page segmentation with orientation and script detection.
-      // A scanned page fed at the default setting is frequently read upside down.
       '--psm',
-      '1',
+      psm,
     ],
     { timeoutMs: config.ocr.timeoutMs, input: absolutePath },
   );
@@ -369,11 +436,10 @@ export async function attemptOcr(absolutePath, { filename, mimeType, enabled = c
   // page, a photograph of a wall, a document in a script the language data does
   // not cover. Indexing a handful of stray characters looks like success.
   //
-  // Letters and digits, not total length: a blank page's sidecar comes back as a
-  // couple of dozen characters of whitespace and page separators, which clears a
-  // length floor and is then recorded as a successful OCR. Unicode classes, so
-  // Arabic counts as letters.
-  const meaningful = (trimmed.match(/[\p{L}\p{N}]/gu) ?? []).length;
+  // The same measure the image path uses to decide whether a segmentation mode
+  // read the page, so "not worth indexing" and "try the next mode" cannot drift
+  // apart and leave a document rejected by one rule that the other accepted.
+  const meaningful = meaningfulCharacters(trimmed);
 
   if (meaningful < config.ocr.minCharacters) {
     return { ok: false, reason: 'ocr_found_no_text', detail: `${meaningful} letters or digits` };
@@ -395,3 +461,10 @@ export async function attemptOcr(absolutePath, { filename, mimeType, enabled = c
 export function resetOcrDetection() {
   detected = null;
 }
+
+/*
+ * Shared with the recognition pilot, which spawns the same engine for word
+ * boxes rather than text. One runner, so the stdin delivery, the hard timeout
+ * and the no-shell rule cannot drift between the two callers.
+ */
+export { run as runCommand };
