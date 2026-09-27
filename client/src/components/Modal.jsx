@@ -71,6 +71,13 @@ function useModalBehaviour(open, panelRef, bodyRef, onClose) {
 
     function onKeyDown(event) {
       if (event.key === 'Escape') {
+        // An open popup inside the dialog owns Escape first: dismissing a
+        // dropdown must not close the dialog and discard a half-filled form.
+        // The event is let through, the popup closes itself, and the next
+        // Escape reaches here with the popup closed.
+        if (event.target instanceof Element && event.target.closest('[role="combobox"][aria-expanded="true"]')) {
+          return;
+        }
         event.stopPropagation();
         closeRef.current?.();
         return;
