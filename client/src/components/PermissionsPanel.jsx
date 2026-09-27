@@ -4,9 +4,9 @@ import { Shield, Trash2, Plus, Unlink, Link as LinkIcon, X } from 'lucide-react'
 import { api, ApiError } from '../api.js';
 import { Button, Card, Spinner, Alert, TextField } from './ui.jsx';
 import PermissionIcons, { VERBS } from './PermissionIcons.jsx';
+import { RoleBadge, RolePicker } from './RoleBadge.jsx';
 import { useDialogs } from './DialogProvider.jsx';
 import { Modal } from './Modal.jsx';
-import { roleDisplay } from '../help/content.js';
 
 /**
  * Folder permission editor.
@@ -269,10 +269,15 @@ export default function PermissionsPanel({ folderId, folderName, onClose, onChan
                       {entry.principalType === 'group' ? 'مجموعة' : 'مستخدم'}
                     </span>
                     {/* Where the grant came from. Recorded at grant time, so it
-                        stays true even after the role itself is edited. */}
+                        stays true even after the role itself is edited — which
+                        is exactly what the badge's tooltip says. */}
                     {entry.fromRole ? (
-                      <span className="ms-2 rounded border border-border px-1.5 py-0.5 text-[11px] text-text-muted">
-                        من دور: {entry.fromRole}
+                      <span className="ms-2 inline-flex align-middle">
+                        <RoleBadge
+                          role={roles.find((role) => role.roleId === entry.fromRoleId) ?? null}
+                          name={entry.fromRole}
+                          hint="نُسخت الصلاحيات من هذا الدور لحظة المنح؛ تعديل الدور لاحقاً لا يغيّر هذا الإدخال."
+                        />
                       </span>
                     ) : null}
                     {!entry.isActive ? (
@@ -348,16 +353,36 @@ export default function PermissionsPanel({ folderId, folderName, onClose, onChan
  * Keyed by the entry it is editing, so opening a second one re-seeds the
  * checkboxes instead of carrying the first one's state across.
  */
+/**
+ * A verb's three states, in RTL reading order: the affirmative first.
+ *
+ * «بلا» is not "off" — it means this entry says nothing about the verb, so
+ * whatever a higher folder grants or denies still applies. That third meaning
+ * is what the old pair of checkboxes could not draw.
+ */
+const VERB_STATES = [
+  { key: 'allow', label: 'سماح', active: 'bg-green-500/10 font-medium text-green-600' },
+  { key: 'none', label: 'بلا', active: 'bg-surface-muted font-medium text-text' },
+  { key: 'deny', label: 'منع', active: 'bg-red-500/10 font-medium text-red-600' },
+];
+
 function VerbEditor({ entry, busy, onCancel, onSave, roles = [] }) {
   const [allowBits, setAllowBits] = useState(entry.allowBits ?? 0);
   const [denyBits, setDenyBits] = useState(entry.denyBits ?? 0);
   const [roleId, setRoleId] = useState(entry.fromRoleId ?? '');
 
-  const toggle = (bits, setBits, bit, otherBits, setOtherBits) => {
-    setBits(bits ^ bit);
-    // A verb cannot be both allowed and denied — deny would win and the allow
-    // would be a lie on screen.
-    if ((otherBits & bit) !== 0) setOtherBits(otherBits & ~bit);
+  /*
+   * One verb is in exactly one of three states — allowed, unstated, denied.
+   * The two-checkbox rendering hid that: a pair of boxes reads as independent
+   * switches, with the mutual exclusion happening off-screen after the click.
+   * A segmented control per verb makes the three states the control itself.
+   */
+  const stateOf = (bit) =>
+    (denyBits & bit) !== 0 ? 'deny' : (allowBits & bit) !== 0 ? 'allow' : 'none';
+
+  const setState = (bit, state) => {
+    setAllowBits(state === 'allow' ? allowBits | bit : allowBits & ~bit);
+    setDenyBits(state === 'deny' ? denyBits | bit : denyBits & ~bit);
   };
 
   const emptying = allowBits === 0 && denyBits === 0;
@@ -400,65 +425,88 @@ function VerbEditor({ entry, busy, onCancel, onSave, roles = [] }) {
         grant came from; the checkboxes stay editable afterwards, because the
         bits are copied at grant time and the entry is what the server enforces.
         Editing the role later never changes a grant already made.
+
+        Chips, not a dropdown: five roles read as five sentences in a select,
+        and the one being considered hid the other four. As chips every option
+        is visible at once, the icon carries the meaning, and the description
+        appears on hover instead of being prose inside the control.
       */}
       {roles.length > 0 ? (
-        <label className="mb-3 block">
-          <span className="mb-1 block text-xs text-text-muted">ابدأ من دور (اختياري)</span>
-          <select
+        <div className="mb-3">
+          <span className="mb-1.5 block text-xs text-text-muted">ابدأ من دور (اختياري)</span>
+          <RolePicker
+            roles={roles}
             value={roleId}
+            fallbackName={entry.fromRole}
             disabled={busy}
-            onChange={(event) => {
-              const chosen = event.target.value;
+            onChange={(chosen, role) => {
               setRoleId(chosen);
-              const role = roles.find((r) => String(r.roleId) === chosen);
               if (!role) return;
               setAllowBits(role.permissionBits);
               // A role grants; it never denies. Leaving a stale deny in place
               // would silently cancel part of what was just chosen.
               setDenyBits(0);
             }}
-            className="w-full max-w-sm rounded-lg border border-border bg-control px-2 py-1.5 text-sm"
-          >
-            <option value="">بدون دور — حدّد الصلاحيات يدوياً</option>
-            {roles.map((role) => {
-              const display = roleDisplay(role);
-              return (
-                <option key={role.roleId} value={role.roleId}>
-                  {display.name}
-                  {display.description ? ` — ${display.description}` : ''}
-                </option>
-              );
-            })}
-          </select>
-        </label>
+          />
+        </div>
       ) : null}
 
-      <div className="grid gap-2 sm:grid-cols-2">
-        {VERBS.map((verb) => (
-          <div key={verb.key} className="flex items-center justify-between gap-2 rounded bg-surface px-2 py-1.5">
-            <span className="text-sm text-text" title={verb.hint}>
-              {verb.label}
-            </span>
-            <div className="flex items-center gap-3">
-              <label className="flex items-center gap-1 text-xs text-text-muted">
-                <input
-                  type="checkbox"
-                  checked={(allowBits & verb.bit) !== 0}
-                  onChange={() => toggle(allowBits, setAllowBits, verb.bit, denyBits, setDenyBits)}
-                />
-                سماح
-              </label>
-              <label className="flex items-center gap-1 text-xs text-red-600">
-                <input
-                  type="checkbox"
-                  checked={(denyBits & verb.bit) !== 0}
-                  onChange={() => toggle(denyBits, setDenyBits, verb.bit, allowBits, setAllowBits)}
-                />
-                منع
-              </label>
+      <div className="space-y-1.5">
+        {VERBS.map((verb) => {
+          const Icon = verb.icon;
+          const current = stateOf(verb.bit);
+
+          return (
+            <div
+              key={verb.key}
+              className="flex items-center justify-between gap-3 rounded-lg bg-surface px-3 py-2"
+            >
+              {/* The same icon the tables draw for this verb, so the editor and
+                  the matrix it produces speak one visual language. */}
+              <span className="flex min-w-0 items-center gap-2.5">
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                  <Icon size={14} />
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-sm text-text">{verb.label}</span>
+                  <span className="block truncate text-[11px] text-text-muted">{verb.hint}</span>
+                </span>
+              </span>
+
+              {/* A radiogroup, because the three states are exclusive: a screen
+                  reader should announce "one of three", not three toggles. */}
+              <div
+                role="radiogroup"
+                aria-label={verb.label}
+                className="flex shrink-0 overflow-hidden rounded-lg border border-border"
+              >
+                {VERB_STATES.map((state, index) => (
+                  <button
+                    key={state.key}
+                    type="button"
+                    role="radio"
+                    aria-checked={current === state.key}
+                    disabled={busy}
+                    onClick={() => setState(verb.bit, state.key)}
+                    className={`px-3 py-1 text-xs transition-colors focus:outline-none
+                      focus:ring-2 focus:ring-primary/40 disabled:cursor-not-allowed
+                      ${index > 0 ? 'border-s border-border' : ''}
+                      ${current === state.key ? state.active : 'text-text-muted hover:bg-surface-muted/60'}`}
+                  >
+                    {state.label}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
+      </div>
+
+      {/* What will actually be stored, drawn exactly as the table will draw it. */}
+      <div className="mt-3 flex flex-wrap items-center gap-3 rounded-lg bg-surface-muted/40 px-3 py-2">
+        <span className="text-xs text-text-muted">الناتج:</span>
+        <PermissionIcons bits={allowBits} />
+        {denyBits !== 0 ? <PermissionIcons bits={denyBits} tone="deny" /> : null}
       </div>
     </Modal>
   );

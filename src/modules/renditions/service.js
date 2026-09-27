@@ -727,16 +727,43 @@ async function rasterisePdfFirstPage(pdfPath) {
  * straight back to PENDING. One request an hour made that invisible; a preview
  * pane that asks as the user moves down the list does not.
  */
+/**
+ * How old a claim must be before a waiting viewer may take it back.
+ *
+ * Far shorter than STALE_CLAIM_MS, and for the same reason the extraction queue
+ * draws the same distinction: that constant is the background loop guessing
+ * whether a worker died, and it has to outlast the slowest legitimate job. This
+ * is somebody sitting in front of a spinner, asking. A preview of a two-page
+ * scan takes about 170ms; a minute is far beyond any honest run and still short
+ * enough that nobody waits on a dead worker.
+ */
+const STALE_RECLAIM_ON_REQUEST_MS = 60 * 1000;
+
 export async function getRenditionJob({ documentId, versionNumber, kind, fileId = null }) {
   const result = await sql`
-    SELECT status, attempts, last_error FROM dbo.rendition_queue
+    SELECT status, attempts, last_error, started_at,
+           CASE WHEN status = ${QUEUE.RUNNING}
+                 AND (
+                       started_at IS NULL
+                       OR DATEDIFF(second, started_at, SYSUTCDATETIME()) > ${Math.floor(STALE_RECLAIM_ON_REQUEST_MS / 1000)}
+                     )
+                THEN 1 ELSE 0 END AS is_abandoned
+      FROM dbo.rendition_queue
      WHERE document_id = ${documentId} AND version_number = ${versionNumber} AND kind = ${kind}
        AND (file_id = ${fileId} OR (file_id IS NULL AND ${fileId} IS NULL))
   `.execute(db);
 
   const row = result.rows[0];
   return row
-    ? { status: Number(row.status), attempts: Number(row.attempts), lastError: row.last_error }
+    ? {
+        status: Number(row.status),
+        attempts: Number(row.attempts),
+        lastError: row.last_error,
+        // A claim nobody is honouring. Indistinguishable from work in progress
+        // from the outside, and the difference decides whether a viewer waits or
+        // is served.
+        abandoned: Number(row.is_abandoned) === 1,
+      }
     : null;
 }
 

@@ -298,6 +298,29 @@ export const config = Object.freeze({
     dpi: integer('CLASSIFICATION_DPI', 300, { min: 72, max: 600 }),
   }),
 
+  correspondence: Object.freeze({
+    /**
+     * The mail-room module (الوارد والصادر). OFF by default so the rest of the
+     * system can go live without it; the stored setting
+     * `correspondence.enabled` overrides this at runtime, the same switch
+     * pattern as the recognition pilot.
+     */
+    enabled: boolean('CORRESPONDENCE_ENABLED', false),
+    /**
+     * The group whose members staff the mail room — they register letters,
+     * forward them, and run المتابعة. 0 means no group is designated yet, so
+     * only super admins can register. Normally set from the administration
+     * screen; the env var exists for recovery like every other setting.
+     */
+    mailroomGroup: integer('CORRESPONDENCE_MAILROOM_GROUP', 0, { min: 0 }),
+    /**
+     * Where the mail room's scans land: the تسجيل كتاب screen uploads here and
+     * lists this branch's unregistered documents so no letter sits scanned but
+     * off the book. 0 means not configured; the screen says so.
+     */
+    intakeFolder: integer('CORRESPONDENCE_INTAKE_FOLDER', 0, { min: 0 }),
+  }),
+
   mail: Object.freeze({
     /** Empty means no SMTP. The reset flow then falls back to the log transport. */
     host: optional('MAIL_HOST', ''),
@@ -325,6 +348,22 @@ export const config = Object.freeze({
     /** Ghostscript rasterises the first PDF page for a thumbnail. */
     ghostscriptPath: optional('RENDITIONS_GHOSTSCRIPT_PATH', 'gs'),
     timeoutMs: integer('RENDITIONS_TIMEOUT_MS', 120_000, { min: 5000 }),
+  }),
+
+  admin: Object.freeze({
+    /**
+     * The first administrator. `npm run create-admin` and the storage restore
+     * read these so an install can be scripted from .env alone; the command's
+     * --username / --password / --name flags still win when given. An empty
+     * password means one is generated and printed once, and the account is
+     * flagged must_change_password — the safe default for a real install.
+     * Nothing at request time reads these: a running system authenticates
+     * against dbo.users only, so changing them later has no effect on an
+     * account that already exists.
+     */
+    username: optional('ADMIN_USERNAME', 'admin'),
+    password: optional('ADMIN_PASSWORD', ''),
+    displayName: optional('ADMIN_DISPLAY_NAME', 'مدير النظام'),
   }),
 
   logging: Object.freeze({

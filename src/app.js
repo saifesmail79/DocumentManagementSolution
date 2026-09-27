@@ -36,6 +36,10 @@ import { settingsRoutes } from './modules/settings/routes.js';
 import { collaborationRoutes } from './modules/collaboration/routes.js';
 import { integrationRoutes, shareRoutes } from './modules/integration/routes.js';
 import { classificationRoutes, classificationAdminRoutes } from './modules/classification/routes.js';
+import {
+  correspondenceRoutes,
+  correspondenceAdminRoutes,
+} from './modules/correspondence/routes.js';
 
 const log = moduleLogger('server');
 
@@ -125,6 +129,12 @@ export async function buildApp({ logger: withLogger = true } = {}) {
   // off, so registering them on a production install changes nothing there.
   await app.register(classificationRoutes, { prefix: '/api' });
   await app.register(classificationAdminRoutes, { prefix: '/api/admin/classification' });
+
+  // The correspondence register (الوارد والصادر). Same isolation contract:
+  // every route answers "disabled" while its stored switch is off. Not under
+  // /api/admin/mail — that prefix already means SMTP diagnostics.
+  await app.register(correspondenceRoutes, { prefix: '/api/correspondence' });
+  await app.register(correspondenceAdminRoutes, { prefix: '/api/admin/correspondence' });
 
   // Public: the one route that serves document bytes without a session. It
   // enforces its own expiry, password and download cap.

@@ -18,11 +18,15 @@ import {
   Activity,
   BarChart3,
   Bell,
+  BookOpen,
   CheckSquare,
   Clock,
+  FilePlus,
   FolderTree,
   GitBranch,
+  Inbox,
   KeyRound,
+  Mailbox,
   ScanSearch,
   ScrollText,
   Search,
@@ -31,6 +35,7 @@ import {
   SlidersHorizontal,
   Star,
   Tags,
+  Timer,
   Trash2,
   Users,
   UsersRound,
@@ -52,6 +57,26 @@ export const ADMIN_TABS = [
   { key: 'audit', label: 'سجل التدقيق', icon: ScrollText },
   { key: 'diagnostics', label: 'التشخيص', icon: Activity },
   { key: 'classification', label: 'التعرّف التلقائي (تجريبي)', icon: ScanSearch },
+  { key: 'correspondence', label: 'المراسلات', icon: Mailbox },
+];
+
+/** The correspondence views, in the order they are shown. */
+/**
+ * The correspondence screens.
+ *
+ * `requires` names a capability the viewer must hold, and it is declared here
+ * rather than inside the page because two places consume this list: the page
+ * that draws the tabs and the tile menu that launches into them. The page knew
+ * the rule and the tile menu did not, so a clerk was offered three tiles and two
+ * of them silently dropped them back on the first — a tile promising a
+ * destination it cannot open is worse than no tile, because the reader concludes
+ * the screen is broken rather than that it was never theirs.
+ */
+export const CORRESPONDENCE_TABS = [
+  { key: 'queue', label: 'الوارد إليّ', icon: Inbox },
+  { key: 'intake', label: 'تسجيل كتاب', icon: FilePlus, requires: 'registrar' },
+  { key: 'register', label: 'السجل', icon: BookOpen, requires: 'registrar' },
+  { key: 'followup', label: 'المتابعة', icon: Timer, requires: 'registrar' },
 ];
 
 /** The personal views, in the order they are shown. */
@@ -88,6 +113,14 @@ export const MODULES = [
     description: 'ما يخصّك: المفضلة، المفتوح مؤخراً، والمتابَع، وما ينتظر موافقتك.',
     subgroup: 'ما يخصّني',
     tabs: MY_TABS,
+  },
+  {
+    key: 'correspondence',
+    to: '/correspondence',
+    label: 'المراسلات',
+    icon: Mailbox,
+    description: 'الوارد والصادر: تسجيل الكتب، إحالتها إلى الأقسام، ومتابعة إنجازها.',
+    tabs: CORRESPONDENCE_TABS,
   },
   {
     key: 'search',
@@ -191,6 +224,21 @@ export function reorder(modules, fromIndex, toIndex) {
   const moved = keys.splice(fromIndex, 1)[0];
   keys.splice(toIndex, 0, moved);
   return keys;
+}
+
+/**
+ * The tabs of one module that this viewer may actually open.
+ *
+ * `capabilities` is whatever the module's own status endpoint reports — for
+ * correspondence, `{ registrar: true }`. A tab with no `requires` is for
+ * everyone; a tab whose capability is absent or false is not offered.
+ *
+ * Both the module's page and the tile menu call this, which is the whole point:
+ * the rule about who sees السجل lives in one expression, so the launcher cannot
+ * offer a screen the page will refuse to open.
+ */
+export function visibleTabs(module, capabilities = {}) {
+  return (module?.tabs ?? []).filter((tab) => !tab.requires || Boolean(capabilities[tab.requires]));
 }
 
 /** The module a path belongs to, for the breadcrumb and the active tile. */

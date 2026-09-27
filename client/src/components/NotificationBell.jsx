@@ -27,6 +27,7 @@ const KIND_LABELS = {
   'approval.escalated': 'تأخّر اعتماد',
   'document.expiring': 'اقتراب انتهاء',
   'document.shared': 'مشاركة وثيقة',
+  'mail.assigned': 'إحالة كتاب',
 };
 
 /** 20rem, matching the w-80 the panel used to carry as a class. */

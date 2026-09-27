@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Star, Clock, Bell, FileText, Folder, CheckSquare } from 'lucide-react';
 
 import { MY_TABS as TABS } from '../navigation.js';
-import { api } from '../api.js';
+import { api, ApiError } from '../api.js';
 import { formatDate } from '../format.js';
 import { Card, Spinner, EmptyState, Alert, ReadOnlyBadge, Button } from '../components/ui.jsx';
 import { useDialogs } from '../components/DialogProvider.jsx';
@@ -23,7 +23,10 @@ export default function MyDocuments() {
   const [searchParams, setSearchParams] = useSearchParams();
   const requested = searchParams.get('tab');
   const tab = TABS.some((entry) => entry.key === requested) ? requested : 'favourites';
-  const setTab = (key) => setSearchParams(key === 'favourites' ? {} : { tab: key });
+  // Replace rather than push: a tab is a view of this page, not a place of its
+  // own, so the back button returns to wherever this page was opened from
+  // instead of first stepping back through every tab that was clicked.
+  const setTab = (key) => setSearchParams(key === 'favourites' ? {} : { tab: key }, { replace: true });
 
   return (
     <div className="space-y-4">
@@ -207,8 +210,13 @@ function Approvals() {
     try {
       await api.decideApproval(requestId, decision, note);
       await load();
-    } catch {
-      setError('تعذر تسجيل القرار.');
+    } catch (caught) {
+      setError(
+        caught instanceof ApiError && caught.code === 'no_document_access'
+          ? 'لم يُسجَّل القرار: لا تملك صلاحية قراءة هذه الوثيقة، ولا يُقبل اعتماد أو رفض دون قراءتها. '
+            + 'اطلب من مدير النظام منحك صلاحية «قراءة» على مجلدها.'
+          : 'تعذر تسجيل القرار.',
+      );
     } finally {
       setBusy(false);
     }
@@ -248,9 +256,18 @@ function Approvals() {
             ) : null}
           </div>
 
+          {/* Access is verified when the request starts, but a grant can be
+              withdrawn while it waits. Saying so here beats two buttons that
+              the server will refuse. */}
+          {!request.canRead ? (
+            <p className="mt-2 text-xs text-amber-600">
+              لا تملك صلاحية قراءة هذه الوثيقة، فلا يمكنك اعتمادها أو رفضها حتى تُمنح صلاحية «قراءة» على مجلدها.
+            </p>
+          ) : null}
+
           <div className="mt-3 flex flex-row gap-2">
             <Button
-              disabled={busy}
+              disabled={busy || !request.canRead}
               onClick={() => decide(request.requestId, 'approved')}
               className="!px-3 !py-1 text-xs"
             >
@@ -258,7 +275,7 @@ function Approvals() {
             </Button>
             <Button
               variant="danger"
-              disabled={busy}
+              disabled={busy || !request.canRead}
               onClick={() => decide(request.requestId, 'rejected')}
               className="!px-3 !py-1 text-xs"
             >

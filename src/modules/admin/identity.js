@@ -221,8 +221,34 @@ export async function setUserActive({ userId, active, actorId }) {
   // kind of detail that later becomes a bug.
   if (!active) await revokeAllSessions(userId);
 
+  /*
+   * Approvals waiting on this person, reported with the deactivation.
+   *
+   * A pending step assigned to them *personally* can now never be decided:
+   * eligibility is checked against the approver on every decision, escalation
+   * only notifies, and reassignment does not exist — deliberately, because a
+   * silently moved approval is a decision made by someone nobody expected. So
+   * the request would sit open forever, and the first anyone learned of it
+   * would be a document stuck "بانتظار الاعتماد" with no explanation. Told at
+   * the moment of deactivation, the administrator can cancel or re-request the
+   * affected approvals while the context is still in front of them. Steps
+   * assigned to a group are unaffected — its other members still qualify.
+   */
+  let blockedApprovals = 0;
+  if (!active) {
+    const stuck = await sql`
+      SELECT COUNT(*) AS n
+        FROM dbo.approval_requests r
+        JOIN dbo.approval_steps s ON s.template_id = r.template_id
+       WHERE r.status = 'pending'
+         AND s.approver_id = ${userId}
+         AND s.step_order >= r.current_step
+    `.execute(db);
+    blockedApprovals = Number(stuck.rows[0]?.n ?? 0);
+  }
+
   log.info({ userId: String(userId), active, actorId: String(actorId) }, 'user activation changed');
-  return { ok: true };
+  return { ok: true, blockedApprovals };
 }
 
 export async function setSuperAdmin({ userId, isSuperAdmin, actorId }) {

@@ -136,6 +136,13 @@ export async function bulkUpdateMetadata({ userId, documentIds, typeId, labelId,
       results.push({ documentId: document.documentId, ok: false, reason: 'forbidden' });
       continue;
     }
+    // The move and delete loops in this very file refuse held documents, and
+    // this loop had legalHold in hand from the same loadBatch and ignored it.
+    // Field values have no history — overwriting them is destruction.
+    if (document.legalHold) {
+      results.push({ documentId: document.documentId, ok: false, reason: 'legal_hold' });
+      continue;
+    }
 
     await db.transaction().execute(async (trx) => {
       if (typeId !== undefined || labelId !== undefined) {

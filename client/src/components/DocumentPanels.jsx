@@ -948,6 +948,31 @@ export function ApprovalPanel({ documentId, canRead, onChanged, onCount }) {
 
   const live = requests.find((r) => r.status === 'pending');
 
+  /**
+   * The refusal for approvers who cannot read the document names them step by
+   * step, so whoever fixes it knows exactly which grant to make. A bare "could
+   * not start" would send them hunting through every group on the path.
+   */
+  function describeStartFailure(caught) {
+    if (!(caught instanceof ApiError)) return 'تعذر بدء الاعتماد.';
+    if (caught.code === 'no_template') return 'لا يوجد مسار اعتماد لهذا النوع.';
+    if (caught.code === 'already_pending') return 'يوجد طلب اعتماد قائم بالفعل.';
+    if (caught.code === 'approver_cannot_read') {
+      const lines = (caught.body?.blocked ?? []).map((entry) => {
+        const names = entry.members.map((member) => member.name).join('، ');
+        return entry.approverType === 'group'
+          ? `• الخطوة ${entry.step} — ${entry.approver}: ${names}`
+          : `• الخطوة ${entry.step} — ${entry.approver}`;
+      });
+      return [
+        'لم يُحفظ الطلب: في هذا المسار مَن لا يملك صلاحية قراءة الوثيقة، ولا يُقبل اعتماد أو رفض دون قراءتها.',
+        ...lines,
+        'امنحهم صلاحية «قراءة» على مجلد الوثيقة، أو اختر مساراً آخر، ثم أعد المحاولة.',
+      ].join('\n');
+    }
+    return 'تعذر بدء الاعتماد.';
+  }
+
   async function start(templateId) {
     setBusy(true);
     setError(null);
@@ -956,13 +981,7 @@ export function ApprovalPanel({ documentId, canRead, onChanged, onCount }) {
       await load();
       await onChanged?.();
     } catch (caught) {
-      setError(
-        caught instanceof ApiError && caught.code === 'no_template'
-          ? 'لا يوجد مسار اعتماد لهذا النوع.'
-          : caught instanceof ApiError && caught.code === 'already_pending'
-            ? 'يوجد طلب اعتماد قائم بالفعل.'
-            : 'تعذر بدء الاعتماد.',
-      );
+      setError(describeStartFailure(caught));
     } finally {
       setBusy(false);
     }

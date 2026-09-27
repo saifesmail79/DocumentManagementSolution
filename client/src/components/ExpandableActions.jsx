@@ -123,8 +123,26 @@ export default function ExpandableActions({
   // Whether the pointer or focus is still here, read a frame after it was set.
   const wanted = useRef(false);
 
-  useEffect(() => () => {
-    mounted.current = false;
+  /*
+   * Liveness is asserted on mount, not only withdrawn on unmount.
+   *
+   * This effect used to be cleanup-only, which reads as equivalent and is not.
+   * StrictMode mounts, tears down, and remounts every component in development;
+   * the teardown ran the cleanup and set this flag false, and nothing ever set
+   * it back — so `mounted.current` was false for the entire life of every row
+   * in the dev server, while being true in a production build.
+   *
+   * The flag guards the `finally` that stops the spinner, so an action would
+   * complete, the server would answer, and the button would spin for ever.
+   * Anything that remounts a component — a changed key, a reordered list,
+   * Suspense — reproduces it outside StrictMode too. A liveness flag must be
+   * re-asserted every time the component becomes live.
+   */
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
   }, []);
 
   /** Re-reads the trigger's position. Called on every open, since rows move. */

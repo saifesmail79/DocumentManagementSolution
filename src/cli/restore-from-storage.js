@@ -193,20 +193,27 @@ async function main() {
   let issuedPassword = null;
 
   if (!adminId) {
-    const password = `Dms-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36).slice(-4)}`;
+    // Same source as `npm run create-admin`: ADMIN_* in .env. A password set
+    // there is used as-is; otherwise one is generated, printed once, and the
+    // account must change it on first login.
+    const { username, displayName } = config.admin;
+    const generated = config.admin.password === '';
+    const password = generated
+      ? `Dms-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36).slice(-4)}`
+      : config.admin.password;
     if (!dryRun) {
       const principal = await sql`
         INSERT INTO dbo.principals (principal_type, display_name)
-        OUTPUT INSERTED.principal_id AS pid VALUES ('user', N'مدير النظام')
+        OUTPUT INSERTED.principal_id AS pid VALUES ('user', ${displayName})
       `.execute(db);
       adminId = principal.rows[0].pid;
       await sql`
         INSERT INTO dbo.users (user_id, username, password_hash, is_super_admin, must_change_password)
-        VALUES (${adminId}, 'admin', ${await hashPassword(password)}, 1, 1)
+        VALUES (${adminId}, ${username}, ${await hashPassword(password)}, 1, ${generated ? 1 : 0})
       `.execute(db);
-      issuedPassword = password;
+      if (generated) issuedPassword = password;
     }
-    console.log(`admin account: creating 'admin' (مدير النظام)`);
+    console.log(`admin account: creating '${username}' (${displayName})${generated ? '' : ' with the password from ADMIN_PASSWORD'}`);
   } else {
     console.log(`admin account: reusing existing '${adminRow.rows[0].username}'`);
   }
@@ -354,6 +361,7 @@ async function main() {
         'SET IDENTITY_INSERT dbo.documents ON;'
           + ' INSERT INTO dbo.documents'
           + ' (document_id, folder_id, title, current_version, is_deleted, deleted_at, deleted_by,'
+          + '  legal_hold, legal_hold_reason,'
           + '  created_by, created_at, updated_at, extraction_status)'
           + ` VALUES (${number(documentId)}, ${number(folderId)}, ${text(title)},`
           + ` ${multiFile ? 0 : 1}, ${entry?.isDeleted ? 1 : 0},`
@@ -364,6 +372,12 @@ async function main() {
           // the constraint would reject outright.
           + ` ${entry?.isDeleted ? text(stamp) : 'NULL'},`
           + ` ${entry?.isDeleted ? number(adminId) : 'NULL'},`
+          // The hold comes back with the row. Restored without it, every hold
+          // in the system would be silently lifted by the recovery — and a
+          // held document that was in the bin would meet the purge sweep
+          // unprotected on the first tick after the restore.
+          + ` ${entry?.legalHold ? 1 : 0},`
+          + ` ${entry?.legalHold && entry?.legalHoldReason ? text(entry.legalHoldReason) : 'NULL'},`
           + ` ${number(adminId)}, ${text(stamp)}, ${text(stamp)}, 0);`
           + ' SET IDENTITY_INSERT dbo.documents OFF;',
       )

@@ -121,6 +121,33 @@ export const EDITABLE = Object.freeze({
    * this: queueing at upload, the worker's ticks, and the routes.
    */
   'classification.enabled': { type: 'bool', fallback: () => config.classification.enabled },
+  /*
+   * The correspondence module (الوارد والصادر). Same switch pattern as the
+   * pilot: off in the environment by default, turned on per install from the
+   * administration screen, and everything the module does reads it.
+   */
+  'correspondence.enabled': { type: 'bool', fallback: () => config.correspondence.enabled },
+  /*
+   * The principal id of the mail-room group. Registering, forwarding and
+   * annulling letters is limited to its members (and super admins). Stored as
+   * an int because settings have no principal type; the administration screen
+   * writes it from a group picker, not a text box.
+   */
+  'correspondence.mailroom_group': {
+    type: 'int',
+    fallback: () => config.correspondence.mailroomGroup,
+    min: 0,
+  },
+  /*
+   * The folder id the تسجيل كتاب screen scans and uploads into, and whose
+   * unregistered documents it lists. Written from a folder picker on the
+   * administration screen, not this table's text box.
+   */
+  'correspondence.intake_folder': {
+    type: 'int',
+    fallback: () => config.correspondence.intakeFolder,
+    min: 0,
+  },
 });
 
 function parse(raw, type) {

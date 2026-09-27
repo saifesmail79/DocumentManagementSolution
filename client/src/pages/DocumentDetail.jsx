@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   FileText,
   Download,
@@ -15,6 +15,7 @@ import {
   CheckCircle2,
   Share2,
   ScanSearch,
+  Mailbox,
 } from 'lucide-react';
 
 import { api, ApiError } from '../api.js';
@@ -22,6 +23,8 @@ import { formatDate, formatBytes } from '../format.js';
 import { Button, Card, Spinner, Alert, TextField, ReadOnlyBadge } from '../components/ui.jsx';
 import SearchabilityNotice, { EXTRACTION } from '../components/SearchabilityNotice.jsx';
 import { previewMode, PreviewBody } from '../components/DocumentPreview.jsx';
+import TabIntro from '../components/TabIntro.jsx';
+import { useHelpTopic } from '../help/HelpContext.jsx';
 import {
   TagPanel,
   CommentPanel,
@@ -32,6 +35,7 @@ import {
   VersionPanel,
 } from '../components/DocumentPanels.jsx';
 import ClassificationPanel from '../components/ClassificationPanel.jsx';
+import CorrespondencePanel from '../components/CorrespondencePanel.jsx';
 import { useAuth } from '../auth.jsx';
 
 /**
@@ -67,6 +71,9 @@ const SECTIONS = [
   // Shown only while the recognition pilot is switched on; the panel reports
   // the switch's state and the tab is dropped when it is off.
   { key: 'classification', label: 'التعرّف', icon: ScanSearch, pilot: true },
+  // Same contract for the correspondence register: the panel reports whether
+  // the module's switch is on, and the tab exists only while it is.
+  { key: 'correspondence', label: 'المراسلة', icon: Mailbox, mail: true },
 ];
 
 /**
@@ -90,11 +97,30 @@ export default function DocumentDetail() {
   const [error, setError] = useState(null);
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [tab, setTab] = useState('document');
+  // A link may name the tab to land on — «سجّل» in the intake screen opens the
+  // registration form directly rather than leaving the reader on the viewer.
+  const [searchParams] = useSearchParams();
+  const requestedTab = searchParams.get('tab');
+  const [tab, setTab] = useState(
+    SECTIONS.some((section) => section.key === requestedTab) ? requestedTab : 'document',
+  );
   // The recognition pilot's tab exists only while its switch is on. Hidden
   // until the panel reports that it is: a production install, where the
   // switch is off, never shows the tab at all — not even for a moment.
   const [pilotEnabled, setPilotEnabled] = useState(false);
+  // The correspondence tab follows the same rule, from its own switch.
+  const [mailEnabled, setMailEnabled] = useState(false);
+
+  /*
+   * The help follows the open tab, as it does on the administration screen.
+   *
+   * Ten tabs used to share the page's one topic, so the button beside الحالة
+   * opened a description of the page as a whole and said nothing about legal
+   * holds or check-out — precisely where the behaviour is least guessable. The
+   * document tab keeps the page topic, because for that tab the page IS the
+   * subject.
+   */
+  useHelpTopic(tab === 'document' ? 'document' : `document.${tab}`);
 
   /*
    * How many items each section holds, reported by the panels themselves.
@@ -216,6 +242,8 @@ export default function DocumentDetail() {
               invalid_title: 'العنوان غير صالح.',
               invalid_value: `قيمة غير صالحة للحقل: ${caught.body?.detail ?? ''}`,
               required_field: `حقل مطلوب: ${caught.body?.detail ?? ''}`,
+              legal_hold:
+                'الوثيقة مجمّدة بحجز قانوني: لا تُعدَّل بياناتها ما دام قائماً — راجع تبويب «الحالة».',
             }[caught.code] ?? 'تعذر حفظ التعديلات.'
           : 'تعذر حفظ التعديلات.',
       );
@@ -352,7 +380,10 @@ export default function DocumentDetail() {
         shape of a document is readable from the strip without opening anything.
       */}
       <div className="flex flex-row flex-wrap gap-1 border-b border-border">
-        {SECTIONS.filter((section) => !section.pilot || pilotEnabled).map((section) => {
+        {SECTIONS.filter(
+          (section) =>
+            (!section.pilot || pilotEnabled) && (!section.mail || mailEnabled),
+        ).map((section) => {
           const state = sectionState[section.key] ?? {};
           const active = tab === section.key;
           const filled = state.count > 0 || state.has;
@@ -394,6 +425,21 @@ export default function DocumentDetail() {
           );
         })}
       </div>
+
+      {/*
+        The open tab's one-line answer, on screen before anyone asks.
+
+        One card that follows the tab, not a copy inside every panel: the intro
+        belongs to whichever tab is open, and nine mounted-but-hidden copies
+        would be eight more places for the text to drift. The document tab is
+        exempt — the viewer needs the height, and "this is the document" is not
+        an answer anyone is missing.
+      */}
+      {tab !== 'document' ? (
+        <div className="max-w-3xl">
+          <TabIntro topic={`document.${tab}`} />
+        </div>
+      ) : null}
 
       {/*
         Every panel stays mounted and inactive ones are hidden.
@@ -602,6 +648,17 @@ export default function DocumentDetail() {
           onOpen={(id) => navigate(`/documents/${id}`)}
           onCount={counter('classification')}
           onEnabled={setPilotEnabled}
+        />
+      </div>
+
+      {/* Same arrangement for the correspondence register. */}
+      <div className={tab === 'correspondence' ? 'max-w-3xl' : 'hidden'}>
+        <CorrespondencePanel
+          documentId={documentId}
+          documentTitle={document.title}
+          canRead={document.canRead}
+          onCount={counter('correspondence')}
+          onEnabled={setMailEnabled}
         />
       </div>
     </div>

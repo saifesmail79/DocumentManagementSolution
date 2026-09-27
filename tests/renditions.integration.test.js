@@ -578,6 +578,80 @@ describe('renditions (real LibreOffice and Ghostscript)', { skip: SKIP }, () => 
    * A thumbnail is a legible low-resolution copy of the document, not metadata,
    * so it is gated on READ rather than on BROWSE.
    */
+  /**
+   * A viewer asking for a rendition whose job was abandoned mid-flight.
+   *
+   * ─── The failure this guards ────────────────────────────────────────────
+   *
+   * The route answers 202 for anything already queued, and deliberately does NOT
+   * re-queue a RUNNING job — resetting one would hand the same file to a second
+   * worker. But a claim left behind by a worker that died is not in flight, and
+   * it was being treated as though it were: every poll got 202 while nothing on
+   * the server was working, so the viewer span on "جارٍ تحضير المعاينة…" until
+   * the background loop's fifteen-minute sweep noticed.
+   *
+   * That is exactly what happened to a two-page TIFF whose preview takes 170ms.
+   */
+  test('a viewer waiting on an abandoned rendition job gets it re-queued', async () => {
+    const documentId = await upload(cookie, 'arabic-scan.png', 'image/png');
+
+    // What a killed worker leaves: claimed, never finished, long past any honest run.
+    await sql`
+      UPDATE dbo.rendition_queue
+         SET status = 1, attempts = 1, started_at = DATEADD(minute, -30, SYSUTCDATETIME())
+       WHERE document_id = ${documentId} AND kind = 'thumbnail'
+    `.execute(db);
+
+    const queued = await app.inject({
+      method: 'GET',
+      url: `/api/documents/${documentId}/rendition/thumbnail`,
+      headers: { cookie },
+    });
+    assert.equal(queued.statusCode, 202, 'still queued, but it must not be left as it was');
+
+    const row = await sql`
+      SELECT status FROM dbo.rendition_queue
+       WHERE document_id = ${documentId} AND kind = 'thumbnail'
+    `.execute(db);
+    assert.equal(Number(row.rows[0].status), 0, 'the abandoned claim was not taken back');
+
+    // And it now actually renders, rather than spinning until the sweep.
+    await drainAtProductionBound();
+    const served = await app.inject({
+      method: 'GET',
+      url: `/api/documents/${documentId}/rendition/thumbnail`,
+      headers: { cookie },
+    });
+    assert.equal(served.statusCode, 200, await queueError(documentId, 'thumbnail'));
+  });
+
+  /**
+   * The other half of the rule, and the reason the guard exists at all: a job a
+   * worker really is running must be left alone, or two workers convert one file.
+   */
+  test('a rendition job that just started is left alone', async () => {
+    const documentId = await upload(cookie, 'arabic-scan.png', 'image/png');
+
+    await sql`
+      UPDATE dbo.rendition_queue
+         SET status = 1, attempts = 1, started_at = SYSUTCDATETIME()
+       WHERE document_id = ${documentId} AND kind = 'thumbnail'
+    `.execute(db);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/documents/${documentId}/rendition/thumbnail`,
+      headers: { cookie },
+    });
+    assert.equal(response.statusCode, 202);
+
+    const row = await sql`
+      SELECT status FROM dbo.rendition_queue
+       WHERE document_id = ${documentId} AND kind = 'thumbnail'
+    `.execute(db);
+    assert.equal(Number(row.rows[0].status), 1, 'a live claim must not be reset by a viewer');
+  });
+
   test('a rendition is served over HTTP and gated on READ', async () => {
     const documentId = await upload(cookie, 'arabic-scan.png', 'image/png');
     await render(documentId);

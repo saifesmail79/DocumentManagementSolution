@@ -28,8 +28,10 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // A relative specifier, not a joined absolute path: on Windows the latter
 // reaches the ESM loader as the scheme "c:" and is rejected outright.
-const { MODULES, ADMIN_TABS, MY_TABS, visibleModules, moduleForPath, applyOrder, reorder } =
-  await import('../client/src/navigation.js');
+const {
+  MODULES, ADMIN_TABS, MY_TABS, CORRESPONDENCE_TABS,
+  visibleModules, moduleForPath, applyOrder, reorder, visibleTabs,
+} = await import('../client/src/navigation.js');
 
 const appSource = await readFile(path.join(ROOT, 'client/src/App.jsx'), 'utf8');
 
@@ -257,5 +259,79 @@ describe('starting the application', () => {
     // file. Nothing fails, and the table simply never appears.
     const orphans = files.filter((name) => !manifest.includes(name));
     assert.deepEqual(orphans, [], `migration files missing from the manifest: ${orphans.join(', ')}`);
+  });
+});
+
+describe('tabs a viewer may actually open', () => {
+  const correspondence = MODULES.find((module) => module.key === 'correspondence');
+
+  /**
+   * The launcher offered three correspondence tiles to everyone while the page
+   * let only the mail room open two of them, so an ordinary clerk pressed السجل
+   * and landed on الوارد إليّ — every time, with nothing to say why. A tile is a
+   * promise about a destination; one that silently goes elsewhere teaches the
+   * reader that the screen is broken rather than that it was never theirs.
+   *
+   * The rule now lives in the registry and both consume it, so this checks the
+   * rule itself: it must actually withhold something, and the right things.
+   */
+  test('a clerk is offered only the correspondence screen that is theirs', () => {
+    const forClerk = visibleTabs(correspondence, { enabled: true, registrar: false });
+    assert.deepEqual(forClerk.map((tab) => tab.key), ['queue']);
+  });
+
+  test('the mail room is offered all three', () => {
+    const forRegistrar = visibleTabs(correspondence, { enabled: true, registrar: true });
+    assert.deepEqual(
+      forRegistrar.map((tab) => tab.key),
+      CORRESPONDENCE_TABS.map((tab) => tab.key),
+    );
+  });
+
+  test('an unanswered status withholds the restricted screens rather than guessing', () => {
+    // The status request can fail; showing everyone the register on a network
+    // hiccup is the one outcome worse than showing too little.
+    for (const capabilities of [{}, undefined, { enabled: true }]) {
+      assert.deepEqual(visibleTabs(correspondence, capabilities).map((t) => t.key), ['queue']);
+    }
+  });
+
+  test('a module whose tabs carry no requirement is unaffected', () => {
+    // الإدارة is gated at the module level, not per tab; every tab it has is
+    // available to anyone who can see the module at all.
+    const admin = MODULES.find((module) => module.key === 'admin');
+    assert.equal(visibleTabs(admin, {}).length, ADMIN_TABS.length);
+
+    const my = MODULES.find((module) => module.key === 'my');
+    assert.equal(visibleTabs(my, {}).length, MY_TABS.length);
+  });
+
+  /**
+   * The page must not restate the rule.
+   *
+   * It had its own copy — `entry.key === 'queue' || status.registrar` — which is
+   * exactly how it and the launcher came to disagree. A second copy anywhere is
+   * the bug returning.
+   */
+  test('the correspondence page reads the shared rule rather than its own', async () => {
+    const source = await readFile(path.join(ROOT, 'client/src/pages/Correspondence.jsx'), 'utf8');
+
+    assert.match(source, /visibleTabs\(/, 'the page must consume the shared rule');
+    assert.doesNotMatch(
+      source,
+      /status\.registrar/,
+      'the page is re-testing the capability itself instead of asking the registry',
+    );
+  });
+
+  test('the tile menu asks who the viewer is before offering sub-tiles', async () => {
+    const source = await readFile(path.join(ROOT, 'client/src/pages/Home.jsx'), 'utf8');
+
+    assert.match(source, /visibleTabs\(/, 'the menu must filter the tabs it offers');
+    assert.match(
+      source,
+      /correspondence\.status\(\)/,
+      'the menu cannot filter by a capability it never asked the server for',
+    );
   });
 });

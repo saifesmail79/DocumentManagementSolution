@@ -403,8 +403,12 @@ export default function Browse() {
     try {
       await api.deleteDocument(documentId);
       await refresh();
-    } catch {
-      setError('تعذر حذف الوثيقة.');
+    } catch (caught) {
+      setError(
+        caught?.code === 'legal_hold'
+          ? 'الوثيقة تحت حجز قانوني ولا تُحذف ما دام قائماً — يرفعه مدير النظام من تبويب «الحالة».'
+          : 'تعذر حذف الوثيقة.',
+      );
     } finally {
       setBusy(false);
     }

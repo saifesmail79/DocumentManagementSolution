@@ -102,6 +102,13 @@ const TRUNCATION_ORDER = [
   // The recognition pilot's tables. Both reference documents only.
   'classification_queue',
   'classification_pages',
+  // The correspondence register. Transfers reference letters and units; letters
+  // reference documents and units; units reference principals and folders — so
+  // all of them go before documents, folders and principals.
+  'correspondence_transfers',
+  'correspondence',
+  'correspondence_counters',
+  'correspondence_units',
   'extraction_queue',
   'document_tags',
   'tags',

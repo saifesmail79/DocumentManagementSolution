@@ -26,8 +26,35 @@ import { moduleLogger } from '../../lib/logger.js';
 import { PERM, has } from '../tree/service.js';
 import { notify, notifyMany, KIND } from '../notifications/service.js';
 import { documentPermission } from '../collaboration/service.js';
+import { emitEvent } from '../integration/service.js';
 
 const log = moduleLogger('workflow');
+
+/**
+ * Queues an approval event for subscribed webhooks.
+ *
+ * The two approval events were in the subscription list from the start, and
+ * nothing ever emitted them: a receiver subscribed to approvals waited for
+ * ever. Best effort, like the document events — an approval must not fail
+ * because a receiver could not be told about it.
+ */
+async function emitApprovalEvent({ event, document, actorId, data }) {
+  try {
+    const actor = await sql`SELECT username FROM dbo.users WHERE user_id = ${actorId}`.execute(db);
+    await emitEvent({
+      event,
+      payload: {
+        documentId: String(document.document_id),
+        folderId: document.folder_id === null ? null : String(document.folder_id),
+        title: document.title,
+        actor: actor.rows[0]?.username ?? null,
+        ...data,
+      },
+    });
+  } catch (error) {
+    log.warn({ err: error, event }, 'could not queue webhook deliveries');
+  }
+}
 
 // ── Templates ────────────────────────────────────────────────────────────
 
@@ -246,6 +273,57 @@ export async function setTemplateActive({ templateId, active }) {
 
 // ── Requests ─────────────────────────────────────────────────────────────
 
+/**
+ * Every active user who would be asked to act on one of the template's steps
+ * but cannot read documents in the folder, grouped by step.
+ *
+ * ─── Why the request checks this before it exists ───────────────────────────
+ *
+ * The right to decide comes from the template — being the step's principal, or
+ * a member of it — and the right to see the document comes from the folder's
+ * ACL. Nothing ties the two together, so a template could route a document to
+ * people who cannot open it, and they could approve it unseen. The rule is that
+ * nobody approves or rejects what they cannot read, and the cheapest place to
+ * enforce it is before the request is saved: a request that would stall at
+ * step 3 because its approver is blind to the document should never start.
+ *
+ * Every member counts, not just one. Any of them may be the one who acts, and
+ * a require_all step needs all of them. Inactive members are already excluded
+ * by fn_expand_group_members, since they cannot act anyway.
+ *
+ * @returns {Promise<Array<{step: number, approverId: string, approver: string,
+ *   approverType: string, members: Array<{userId: string, name: string}>}>>}
+ */
+async function approversWithoutRead({ templateId, folderId }) {
+  const result = await sql`
+    SELECT s.step_order, s.approver_id, ap.display_name AS approver, ap.principal_type,
+           m.principal_id AS user_id, mp.display_name AS member
+      FROM dbo.approval_steps s
+      JOIN dbo.principals ap ON ap.principal_id = s.approver_id
+     CROSS APPLY dbo.fn_expand_group_members(s.approver_id) m
+      JOIN dbo.principals mp ON mp.principal_id = m.principal_id
+     CROSS APPLY dbo.fn_effective_permission(m.principal_id, ${folderId}) p
+     WHERE s.template_id = ${templateId}
+       AND (p.perm_bits & ${PERM.READ}) = 0
+     ORDER BY s.step_order, mp.display_name
+  `.execute(db);
+
+  const bySteps = new Map();
+  for (const row of result.rows) {
+    const order = Number(row.step_order);
+    const entry = bySteps.get(order) ?? {
+      step: order,
+      approverId: String(row.approver_id),
+      approver: row.approver,
+      approverType: row.principal_type,
+      members: [],
+    };
+    entry.members.push({ userId: String(row.user_id), name: row.member });
+    bySteps.set(order, entry);
+  }
+  return [...bySteps.values()];
+}
+
 /** Starts an approval on a document. */
 export async function requestApproval({ userId, documentId, templateId = null, note = null }) {
   const bits = await documentPermission(userId, documentId);
@@ -268,6 +346,14 @@ export async function requestApproval({ userId, documentId, templateId = null, n
   const steps = await stepsOf(resolved);
   if (steps.length === 0) return { ok: false, reason: 'no_template' };
 
+  // Nobody approves or rejects what they cannot read. Refused here, before the
+  // request exists, rather than discovered one step at a time after it does.
+  const blocked = await approversWithoutRead({
+    templateId: resolved,
+    folderId: document.rows[0].folder_id,
+  });
+  if (blocked.length > 0) return { ok: false, reason: 'approver_cannot_read', blocked };
+
   try {
     const requestId = await db.transaction().execute(async (trx) => {
       const inserted = await sql`
@@ -284,6 +370,14 @@ export async function requestApproval({ userId, documentId, templateId = null, n
       document: document.rows[0],
       kind: KIND.APPROVAL_REQUESTED,
       title: `طلب موافقة: ${document.rows[0].title}`,
+    });
+
+    // Once per request, not once per step: the help text promises exactly that.
+    await emitApprovalEvent({
+      event: 'approval.requested',
+      document: document.rows[0],
+      actorId: userId,
+      data: { requestId: String(requestId), templateId: String(resolved), step: steps[0].order },
     });
 
     log.info({ requestId: String(requestId), documentId: String(documentId) }, 'approval requested');
@@ -330,6 +424,13 @@ export async function decide({ userId, requestId, decision, note = null }) {
   `.execute(db);
 
   if (Number(eligible.rows[0].n) === 0) return { ok: false, reason: 'not_your_step' };
+
+  // Eligibility comes from the template; the right to see the document comes
+  // from the folder. A decision needs both. Access held when the request
+  // started can have been revoked since, and an approver who cannot open the
+  // document must not be able to sign it off — or reject it — unseen.
+  const access = await documentPermission(userId, request.document_id);
+  if (access === null || !has(access, PERM.READ)) return { ok: false, reason: 'no_document_access' };
 
   const outcome = await db.transaction().execute(async (trx) => {
     try {
@@ -388,6 +489,15 @@ export async function decide({ userId, requestId, decision, note = null }) {
 
   await announce({ outcome, request, steps, step, actorId: userId });
 
+  // Every decision, with the decision itself in the payload — `outcome` says
+  // what it did to the request (advanced, approved, rejected, awaiting_others).
+  await emitApprovalEvent({
+    event: 'approval.decided',
+    document: { document_id: request.document_id, folder_id: request.folder_id, title: request.title },
+    actorId: userId,
+    data: { requestId: String(requestId), step: step.order, decision, outcome },
+  });
+
   log.info({ requestId: String(requestId), decision, outcome }, 'approval decision recorded');
   return { ok: true, outcome };
 }
@@ -420,13 +530,19 @@ export async function myPendingApprovals({ userId }) {
            d.title, d.folder_id, f.name AS folder_name,
            requester.display_name AS requested_by,
            s.sla_hours,
-           DATEDIFF(hour, r.requested_at, SYSUTCDATETIME()) AS hours_waiting
+           DATEDIFF(hour, r.requested_at, SYSUTCDATETIME()) AS hours_waiting,
+           -- Whether the approver can still open the document. Access is
+           -- checked when the request starts, but a grant can be withdrawn
+           -- while it waits; the task list says so instead of offering
+           -- buttons that will be refused.
+           CASE WHEN (p.perm_bits & ${PERM.READ}) <> 0 THEN 1 ELSE 0 END AS can_read
       FROM dbo.approval_requests r
       JOIN dbo.documents d ON d.document_id = r.document_id
       JOIN dbo.folders   f ON f.folder_id  = d.folder_id
       JOIN dbo.principals requester ON requester.principal_id = r.requested_by
       JOIN dbo.approval_steps s
         ON s.template_id = r.template_id AND s.step_order = r.current_step
+     CROSS APPLY dbo.fn_effective_permission(${userId}, d.folder_id) p
      WHERE r.status = 'pending'
        AND s.approver_id IN (SELECT principal_id FROM dbo.fn_expand_principals(${userId}))
        -- Someone who has already acted on this step should not see it again.
@@ -450,6 +566,7 @@ export async function myPendingApprovals({ userId }) {
     step: Number(row.current_step),
     hoursWaiting: Number(row.hours_waiting),
     overdue: row.sla_hours !== null && Number(row.hours_waiting) > Number(row.sla_hours),
+    canRead: Number(row.can_read) === 1,
   }));
 }
 

@@ -33,6 +33,8 @@ const parseFolderId = (value) => {
 };
 
 const STATUS = {
+  // 423 Locked: the caller may hold EditMeta — the held document itself refuses.
+  legal_hold: 423,
   invalid_name: 400,
   invalid_rank: 400,
   invalid_colour: 400,

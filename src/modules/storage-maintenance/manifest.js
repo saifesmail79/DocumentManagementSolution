@@ -58,7 +58,7 @@ async function collect(year, month) {
            c.storage_path, c.original_filename,
            c.file_size_bytes, c.sha256, c.mime_type, c.uploaded_at,
            uploader.display_name AS uploaded_by,
-           d.title, d.is_deleted, d.created_at, d.folder_id,
+           d.title, d.is_deleted, d.legal_hold, d.legal_hold_reason, d.created_at, d.folder_id,
            f.name AS folder_name, f.mpath,
            t.name AS type_name,
            s.name AS sensitivity_name
@@ -155,6 +155,17 @@ async function collect(year, month) {
     uploadedBy: row.uploaded_by,
     uploadedAt: row.uploaded_at,
     isDeleted: Number(row.is_deleted) === 1,
+    /*
+     * The hold rides in the manifest because the manifest is the recovery path.
+     *
+     * A restore that rebuilt every row but this one would come back with every
+     * hold silently cleared — and a previously-held, binned document would meet
+     * the purge sweep unprotected on the first tick after the recovery. The one
+     * scenario a hold exists for, litigation, is also the scenario in which a
+     * database is most likely to be rebuilt under pressure.
+     */
+    legalHold: Number(row.legal_hold) === 1,
+    legalHoldReason: row.legal_hold_reason ?? null,
   }));
 }
 

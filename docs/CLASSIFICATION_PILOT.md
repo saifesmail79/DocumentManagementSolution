@@ -40,9 +40,12 @@ The administration tab says which tool is missing.
    رقم / العدد, تاريخ, الموضوع, and إلى / الجهة / القسم — the pilot matches
    fields to header roles by name and shows which it matched.
 2. Upload **30 to 50 real scans per type**, from the customer's scanner and
-   paper, choosing the type at upload and typing the header values into those
-   fields. These are the training samples *and* the answer key; no separate
-   labelling exists.
+   paper. Then open each document, and on its **البيانات** tab choose the type
+   and type the header values into those fields, exactly as printed. The
+   browser upload dialog asks for neither; the document page is where both
+   are set. These are the training samples *and* the answer key; no separate
+   labelling exists. (The API accepts `typeId` and `fields` at upload, which a
+   scripted bulk load can use.)
 3. Switch the pilot on (above).
 4. Administration › التعرّف التلقائي (تجريبي) › **احسب للوثائق الناقصة**.
    Documents uploaded after the switch was on are queued automatically; this

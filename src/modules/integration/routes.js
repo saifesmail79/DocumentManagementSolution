@@ -38,6 +38,7 @@ import {
   deleteWebhook,
   updateWebhook,
   setWebhookActive,
+  rotateWebhookSecret,
   createShareLink,
   listShareLinks,
   revokeShareLink,
@@ -335,11 +336,21 @@ export async function integrationRoutes(app) {
         return reply.code(422).send({ error: 'rendition_failed', reason: job.lastError });
       }
 
-      // Queued rather than 404'd for good: a missing rendition usually means the
-      // worker has not reached it, and asking is a reasonable trigger. Only when
-      // nothing is already in flight — resetting a RUNNING job would hand the
-      // same file to a second worker.
-      if (!job || job.status === QUEUE.DONE) {
+      /*
+       * Queued rather than 404'd for good: a missing rendition usually means the
+       * worker has not reached it, and asking is a reasonable trigger. Not when a
+       * job is genuinely in flight — resetting a RUNNING job would hand the same
+       * file to a second worker.
+       *
+       * But a claim left behind by a worker that died is not in flight, and it
+       * used to be treated as though it were: the route answered 202 to every
+       * poll while nothing on the server was working on it, so the viewer span
+       * on "جارٍ تحضير المعاينة…" until the background loop's fifteen-minute
+       * sweep noticed. A two-page TIFF preview takes 170ms. Nobody should watch a
+       * spinner for fifteen minutes over that, least of all with no way to tell
+       * the difference between slow and dead.
+       */
+      if (!job || job.status === QUEUE.DONE || job.abandoned) {
         await enqueueRendition(db, documentId, versionNumber, kind, fileId).catch(() => {});
       }
 
@@ -455,6 +466,24 @@ export async function integrationRoutes(app) {
       });
 
       return reply.code(201).send(result);
+    });
+
+    admin.post('/webhooks/:webhookId/secret', async (request, reply) => {
+      const webhookId = parseId(request.params.webhookId);
+      const result = await rotateWebhookSecret({ webhookId });
+      if (!result.ok) return send(reply, result);
+
+      await record({
+        actor: request.user,
+        action: ACTION.WEBHOOK_CHANGED,
+        targetType: 'webhook',
+        targetId: webhookId,
+        // The secret itself stays out of the trail, as with API keys.
+        detail: 'secret rotated',
+        request,
+      });
+
+      return result;
     });
 
     admin.patch('/webhooks/:webhookId', async (request, reply) => {

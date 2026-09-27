@@ -7,14 +7,18 @@
  * back door if the guard that disables it ever fails, and this system is
  * installed by someone with a shell on the box anyway.
  *
+ *   npm run create-admin
  *   npm run create-admin -- --username admin --name "مدير النظام"
  *   npm run create-admin -- --username admin --password "..." --name "Admin"
  *
- * With no --password, one is generated and printed once.
+ * Each flag falls back to ADMIN_USERNAME / ADMIN_PASSWORD / ADMIN_DISPLAY_NAME
+ * from .env, so a scripted install needs no flags at all. With no password from
+ * either place, one is generated and printed once.
  */
 
 import { randomBytes } from 'node:crypto';
 
+import { config } from '../config/index.js';
 import { db, sql, closeDatabase } from '../db/index.js';
 import { hashPassword, checkPassword } from '../modules/auth/passwords.js';
 import { logger } from '../lib/logger.js';
@@ -49,17 +53,20 @@ function generatePassword() {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const username = typeof args.username === 'string' ? args.username.trim() : '';
-  const displayName = typeof args.name === 'string' ? args.name.trim() : username;
+  const username = typeof args.username === 'string' ? args.username.trim() : config.admin.username;
+  const displayName =
+    typeof args.name === 'string' ? args.name.trim() : config.admin.displayName || username;
 
   if (!username) {
     console.error('Usage: npm run create-admin -- --username <name> [--password <pw>] [--name "<display>"]');
+    console.error('       or set ADMIN_USERNAME / ADMIN_PASSWORD / ADMIN_DISPLAY_NAME in .env');
     process.exitCode = 1;
     return;
   }
 
-  const generated = typeof args.password !== 'string';
-  const password = generated ? generatePassword() : args.password;
+  const supplied = typeof args.password === 'string' ? args.password : config.admin.password;
+  const generated = supplied === '';
+  const password = generated ? generatePassword() : supplied;
 
   const policy = await checkPassword(password, { username });
   if (!policy.ok) {

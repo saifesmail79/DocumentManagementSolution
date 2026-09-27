@@ -74,7 +74,7 @@ export async function checkIn({ userId, documentId, isSuperAdmin = false }) {
   return { ok: true, forced: String(found.rows[0].locked_by) !== String(userId) };
 }
 
-async function lockHolder(documentId) {
+export async function lockHolder(documentId) {
   const result = await sql`
     SELECT p.display_name, d.locked_at
       FROM dbo.documents d
@@ -106,11 +106,19 @@ export async function setLifecycle({ userId, documentId, state }) {
     return { ok: false, reason: has(bits, PERM.BROWSE) ? 'forbidden' : 'not_found' };
   }
 
-  await sql`
+  /*
+   * Guarded in the WHERE rather than by a prior SELECT: the state a document
+   * held when the hold was placed is part of what the hold preserves — there is
+   * no lifecycle history, so an overwritten state is gone — and a single
+   * conditional UPDATE cannot race a hold being placed between check and write.
+   */
+  const updated = await sql`
     UPDATE dbo.documents
        SET lifecycle_state = ${state}, updated_at = SYSUTCDATETIME(), updated_by = ${userId}
-     WHERE document_id = ${documentId}
+     WHERE document_id = ${documentId} AND legal_hold = 0
   `.execute(db);
+
+  if (Number(updated.numAffectedRows ?? 0) === 0) return { ok: false, reason: 'legal_hold' };
 
   return { ok: true };
 }
@@ -235,13 +243,20 @@ export async function restoreVersion({ userId, documentId, versionNumber, commen
 
   const source = await sql`
     SELECT v.storage_path, v.original_filename, v.file_size_bytes, v.sha256, v.mime_type,
-           d.current_version, d.title, d.created_at
+           d.current_version, d.title, d.created_at, d.legal_hold
       FROM dbo.document_versions v
       JOIN dbo.documents d ON d.document_id = v.document_id
      WHERE v.document_id = ${documentId} AND v.version_number = ${versionNumber}
   `.execute(db);
 
   const version = source.rows[0];
+
+  // Same rule as addVersion, same reason: nothing is destroyed, but
+  // current_version moves, and current_version is what "the document" means to
+  // every download, preview and share link. Frozen means frozen.
+  if (version && Number(version.legal_hold) === 1) {
+    return { ok: false, reason: 'legal_hold' };
+  }
   if (!version) {
     // A multi-file document has no version rows at all, so "restore version N"
     // misses for a reason that has nothing to do with N. Reported distinctly, or

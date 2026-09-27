@@ -79,8 +79,12 @@ export default function RecycleBin() {
         + 'أو شغّله فوراً من «الإدارة ← التشخيص ← التخزين».',
       );
       await load();
-    } catch {
-      setError('تعذر الحذف النهائي.');
+    } catch (caught) {
+      setError(
+        caught?.code === 'legal_hold'
+          ? 'الوثيقة تحت حجز قانوني — لا تُمحى ما دام قائماً، حتى من سلة المحذوفات.'
+          : 'تعذر الحذف النهائي.',
+      );
     } finally {
       setBusy(false);
     }
@@ -134,6 +138,15 @@ export default function RecycleBin() {
                             المحتوى مُحي
                           </span>
                         ) : null}
+                        {document.legalHold ? (
+                          <span
+                            title="لا يُمحى ما دام الحجز قائماً، ويتخطاه التنظيف التلقائي"
+                            className="flex items-center gap-1 rounded border border-red-200 bg-red-50 px-1.5 py-0.5 text-[11px] text-red-600"
+                          >
+                            <ShieldAlert size={11} />
+                            حجز قانوني
+                          </span>
+                        ) : null}
                       </div>
                     </td>
                     <td className="px-4 py-3 text-right">
@@ -164,11 +177,16 @@ export default function RecycleBin() {
                         {document.restorable ? (
                           <button
                             onClick={() => purge(document)}
-                            disabled={busy}
-                            title="حذف نهائي"
+                            // A held document's erase button is disabled with the
+                            // reason on hover, not hidden: hiding it says the
+                            // feature is gone, disabling it says the document is
+                            // protected — which is the truth worth teaching.
+                            disabled={busy || document.legalHold}
+                            title={document.legalHold ? 'تحت حجز قانوني — لا يُمحى حتى يُرفع' : 'حذف نهائي'}
                             aria-label="حذف نهائي"
                             className="rounded border border-border p-1.5 text-red-400
-                              transition-colors hover:bg-red-50 hover:text-red-600"
+                              transition-colors hover:bg-red-50 hover:text-red-600
+                              disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
                           >
                             <Trash2 size={14} />
                           </button>

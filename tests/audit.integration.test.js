@@ -262,6 +262,63 @@ describe('audit, reset and maintenance', { skip: CONFIGURED ? false : target.rea
     assert.ok(response.json().entries.every((e) => e.action === 'login.succeeded'));
   });
 
+  /**
+   * The category views. "Show me the security events" must return security
+   * events and nothing else — a view labelled الأمن that quietly includes
+   * uploads, or quietly drops logins, is worse than no view at all.
+   */
+  test('the security category returns security events and nothing else', async () => {
+    const { CATEGORY } = await import('../src/modules/audit/service.js');
+    const security = new Set(CATEGORY.security);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/admin/audit?category=security',
+      headers: { cookie: bossCookie },
+    });
+
+    assert.equal(response.statusCode, 200);
+    const entries = response.json().entries;
+    // Logins were recorded by the tests above, so the view cannot be empty.
+    assert.ok(entries.length > 0, 'sign-ins must appear in the security view');
+    for (const entry of entries) {
+      assert.ok(security.has(entry.action), `${entry.action} is not a security action`);
+    }
+
+    // And the documents view is disjoint from it: the upload recorded earlier
+    // appears there and no login does.
+    const documents = await app.inject({
+      method: 'GET',
+      url: '/api/admin/audit?category=documents',
+      headers: { cookie: bossCookie },
+    });
+    const documentActions = documents.json().entries.map((e) => e.action);
+    assert.ok(documentActions.includes('document.created'));
+    assert.ok(!documentActions.some((action) => security.has(action)));
+  });
+
+  test('an unknown category is refused rather than silently widened', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/admin/audit?category=nonsense',
+      headers: { cookie: bossCookie },
+    });
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.json().error, 'invalid_category');
+  });
+
+  test('every audit action belongs to exactly one category', async () => {
+    const { ACTION, CATEGORY } = await import('../src/modules/audit/service.js');
+
+    const all = Object.values(ACTION).sort();
+    const categorised = Object.values(CATEGORY).flat().sort();
+
+    // Both directions at once: an action in no category vanishes from every
+    // view, and one in two categories double-reports under headings that claim
+    // to partition the trail.
+    assert.deepEqual(categorised, all, 'the categories must partition ACTION exactly');
+  });
+
   test('the trail is super-admin only', async () => {
     const response = await app.inject({
       method: 'GET',

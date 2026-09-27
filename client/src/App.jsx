@@ -21,6 +21,7 @@ import Admin from './pages/Admin.jsx';
 import DocumentDetail from './pages/DocumentDetail.jsx';
 import RecycleBin from './pages/RecycleBin.jsx';
 import MyDocuments from './pages/MyDocuments.jsx';
+import Correspondence from './pages/Correspondence.jsx';
 import Home from './pages/Home.jsx';
 import NotificationBell from './components/NotificationBell.jsx';
 import { HelpProvider } from './help/HelpContext.jsx';
@@ -130,8 +131,14 @@ function Shell() {
               >
                 <KeyRound size={16} />
               </button>
+              {/* Back to the root as well as out: shared machines sign in as
+                  someone else next, and the new person should start at the
+                  menu, not deep inside whatever page the last person left. */}
               <button
-                onClick={signOut}
+                onClick={() => {
+                  navigate('/', { replace: true });
+                  signOut();
+                }}
                 title="خروج"
                 aria-label="خروج"
                 className="rounded-lg border border-border bg-surface p-2 text-text-muted
@@ -203,6 +210,7 @@ function Shell() {
               <Route path="/search" element={<Search />} />
               <Route path="/recycle-bin" element={<RecycleBin />} />
               <Route path="/my" element={<MyDocuments />} />
+              <Route path="/correspondence" element={<Correspondence />} />
               <Route path="/admin" element={<Admin />} />
               <Route path="/password" element={<ChangePassword />} />
               <Route path="*" element={<Navigate to="/" replace />} />

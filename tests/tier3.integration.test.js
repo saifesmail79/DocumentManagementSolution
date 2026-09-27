@@ -8,6 +8,8 @@
 
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
+import { createServer } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -300,9 +302,89 @@ describe('Tier 3 features', { skip: CONFIGURED ? false : target.reason }, () => 
     const blocked = await call('POST', '/api/bulk/delete', aliceCookie, { documentIds: [documentId] });
     assert.equal(blocked.json().results[0].reason, 'legal_hold');
 
+    /*
+     * Every road, not just the batch one.
+     *
+     * This test used to check bulk delete alone, and passed for months while
+     * the row's own delete button binned held documents without a word — the
+     * rule lived in one path and the test only walked that path. A hold is a
+     * promise about the document, so every way of deleting it must refuse:
+     * the single delete, the permanent purge, and the sweep that actually
+     * destroys bytes.
+     */
+    const single = await call('DELETE', `/api/documents/${documentId}`, aliceCookie);
+    assert.equal(single.statusCode, 423, `the row delete must refuse a held document: ${single.body}`);
+    assert.equal(single.json().error, 'legal_hold');
+
+    /*
+     * Frozen means frozen, not merely undeletable.
+     *
+     * Metadata has no history table — an overwritten title or field value is
+     * destroyed as finally as an erased blob. And a new or restored version
+     * moves current_version, which is what every download, preview and share
+     * link serves: content the hold was meant to freeze would change while it
+     * stands. So the hold refuses every mutation, and this test walks each one.
+     */
+    const retitled = await call('PATCH', `/api/documents/${documentId}/metadata`, aliceCookie, {
+      title: 'عنوان جديد فوق الحجز',
+    });
+    assert.equal(retitled.statusCode, 423, `metadata must be frozen under hold: ${retitled.body}`);
+
+    const bulkMeta = await call('POST', '/api/bulk/metadata', aliceCookie, {
+      documentIds: [documentId],
+      fields: {},
+    });
+    assert.equal(
+      bulkMeta.json().results?.[0]?.reason,
+      'legal_hold',
+      `bulk metadata must refuse too: ${bulkMeta.body}`,
+    );
+
+    const relifed = await call('POST', `/api/documents/${documentId}/lifecycle`, aliceCookie, {
+      state: 'obsolete',
+    });
+    assert.ok(
+      [409, 423].includes(relifed.statusCode),
+      `lifecycle must be frozen under hold: ${relifed.statusCode} ${relifed.body}`,
+    );
+
+    const stillActive = await sql`
+      SELECT lifecycle_state FROM dbo.documents WHERE document_id = ${documentId}
+    `.execute(db);
+    assert.notEqual(stillActive.rows[0].lifecycle_state, 'obsolete', 'the state must not have moved');
+
+    // Force it into the bin behind the API's back, standing in for any past or
+    // future path that forgets the rule — the sweep must hold the line alone.
+    await sql`
+      UPDATE dbo.documents
+         SET is_deleted = 1, deleted_at = DATEADD(year, -1, SYSUTCDATETIME()), deleted_by = ${id.alice}
+       WHERE document_id = ${documentId}
+    `.execute(db);
+
+    const purgeBlocked = await call('POST', `/api/documents/${documentId}/purge`, aliceCookie);
+    assert.equal(purgeBlocked.statusCode, 423, 'permanent purge must refuse a held document');
+
+    const { purgeDeletedDocuments } = await import('../src/modules/storage-maintenance/purge.js');
+    const sweep = await purgeDeletedDocuments({ dryRun: true });
+    assert.equal(sweep.purged, 0, 'the sweep must skip held documents, however long they sit');
+
+    // Back out of the bin so the release-and-delete half below starts clean.
+    await sql`
+      UPDATE dbo.documents SET is_deleted = 0, deleted_at = NULL, deleted_by = NULL
+       WHERE document_id = ${documentId}
+    `.execute(db);
+
     await call('POST', `/api/documents/${documentId}/legal-hold`, bossCookie, { hold: false });
     const allowed = await call('POST', '/api/bulk/delete', aliceCookie, { documentIds: [documentId] });
     assert.equal(allowed.json().succeeded, 1);
+
+    // And once the hold is gone, the sweep may have it like anything else.
+    await sql`
+      UPDATE dbo.documents SET deleted_at = DATEADD(year, -1, SYSUTCDATETIME())
+       WHERE document_id = ${documentId}
+    `.execute(db);
+    const collectable = await purgeDeletedDocuments({ dryRun: true });
+    assert.ok(collectable.purged >= 1, 'a released document is ordinary again');
   });
 
   test('placing a hold is recorded with its reason', async () => {
@@ -481,6 +563,103 @@ describe('Tier 3 features', { skip: CONFIGURED ? false : target.reason }, () => 
     assert.equal(entry.overdue, true);
   });
 
+  // ── Approvers must be able to read what they decide on ─────────────────
+
+  /*
+   * Eligibility to approve comes from the template, the right to open the
+   * document from the folder ACL, and nothing used to connect them: a step
+   * could be assigned to people who could not see the document, and they
+   * could approve it blind. The rule is now enforced at both ends — before
+   * the request is saved, and again when a decision is recorded.
+   */
+  test('an approval is refused, and not saved, when an approver cannot read the document', async () => {
+    await makeUser('blind');
+    // One member who can read (bob) and one who cannot: any of them may be the
+    // one who acts, so a single blind member is enough to refuse the request.
+    await makeGroup('لجنة بلا اطلاع', [id.bob, id.blind]);
+
+    const template = await call('POST', '/api/approval-templates', bossCookie, {
+      name: 'مسار بلا اطلاع',
+      steps: [{ approverId: String(id.bob) }, { approverId: String(id['لجنة بلا اطلاع']) }],
+    });
+    assert.equal(template.statusCode, 201, template.body);
+    const templateId = template.json().templateId;
+
+    const documentId = await upload(aliceCookie, 'cabinet', 'unseen.txt', 'محتوى لا يراه المعتمد');
+    const refused = await call('POST', `/api/documents/${documentId}/approvals`, aliceCookie, { templateId });
+    assert.equal(refused.statusCode, 409, refused.body);
+
+    const body = refused.json();
+    assert.equal(body.error, 'approver_cannot_read');
+    // The message names the step, the approver and exactly who lacks access —
+    // bob is on the same step and must not be listed.
+    assert.equal(body.blocked.length, 1);
+    assert.equal(body.blocked[0].step, 2);
+    assert.equal(body.blocked[0].approver, 'لجنة بلا اطلاع');
+    assert.equal(body.blocked[0].approverType, 'group');
+    assert.deepEqual(body.blocked[0].members.map((m) => m.name), ['blind']);
+
+    const saved = await sql`
+      SELECT COUNT(*) AS n FROM dbo.approval_requests WHERE document_id = ${documentId}
+    `.execute(db);
+    assert.equal(Number(saved.rows[0].n), 0, 'a refused request must not be saved');
+
+    // Granting the missing access is the fix the message asks for.
+    await sql`
+      INSERT INTO dbo.access_control_entries (folder_id, principal_id, allow_bits, deny_bits)
+      VALUES (${id.cabinet}, ${id.blind}, ${PERM.BROWSE | PERM.READ}, 0)
+    `.execute(db);
+    const accepted = await call('POST', `/api/documents/${documentId}/approvals`, aliceCookie, { templateId });
+    assert.equal(accepted.statusCode, 201, accepted.body);
+  });
+
+  test('a decision is refused once the approver can no longer read the document', async () => {
+    await makeUser('fleeting');
+    await sql`
+      INSERT INTO dbo.access_control_entries (folder_id, principal_id, allow_bits, deny_bits)
+      VALUES (${id.cabinet}, ${id.fleeting}, ${PERM.BROWSE | PERM.READ}, 0)
+    `.execute(db);
+    const fleetingCookie = await signIn('fleeting');
+
+    const template = await call('POST', '/api/approval-templates', bossCookie, {
+      name: 'اعتماد يفقد صلاحيته',
+      steps: [{ approverId: String(id.fleeting) }],
+    });
+    assert.equal(template.statusCode, 201, template.body);
+
+    const documentId = await upload(aliceCookie, 'cabinet', 'revoked.txt', 'محتوى');
+    const requested = await call('POST', `/api/documents/${documentId}/approvals`, aliceCookie, {
+      templateId: template.json().templateId,
+    });
+    assert.equal(requested.statusCode, 201, requested.body);
+    const requestId = requested.json().requestId;
+
+    // The grant is withdrawn while the request waits.
+    await sql`DELETE FROM dbo.access_control_entries WHERE principal_id = ${id.fleeting}`.execute(db);
+
+    // The task list still shows the request, but says the buttons will not work.
+    const queue = (await call('GET', '/api/approvals/pending', fleetingCookie)).json();
+    const entry = queue.requests.find((r) => r.requestId === requestId);
+    assert.ok(entry, 'the request still waits on this approver');
+    assert.equal(entry.canRead, false);
+
+    const refused = await call('POST', `/api/approvals/${requestId}/decision`, fleetingCookie, {
+      decision: 'approved',
+    });
+    assert.equal(refused.statusCode, 403, refused.body);
+    assert.equal(refused.json().error, 'no_document_access');
+
+    const decisions = await sql`
+      SELECT COUNT(*) AS n FROM dbo.approval_decisions WHERE request_id = ${requestId}
+    `.execute(db);
+    assert.equal(Number(decisions.rows[0].n), 0, 'a refused decision must not be recorded');
+
+    const still = await sql`
+      SELECT status FROM dbo.approval_requests WHERE request_id = ${requestId}
+    `.execute(db);
+    assert.equal(still.rows[0].status, 'pending');
+  });
+
   // ── QR ─────────────────────────────────────────────────────────────────
 
   test('a QR code is produced and requires Read', async () => {
@@ -566,18 +745,133 @@ describe('Tier 3 features', { skip: CONFIGURED ? false : target.reason }, () => 
     const key = created.json().key;
     assert.ok(key.startsWith('dms_'));
 
-    const { resolveApiKey } = await import('../src/modules/integration/service.js');
+    /*
+     * Over the wire, not through the function.
+     *
+     * This test used to call resolveApiKey() directly — and passed for as long
+     * as the function existed, while no request path ever invoked it. The
+     * administration screen issued keys that could authenticate nothing, and
+     * the test named "authenticates" never noticed, because it tested the
+     * resolver instead of the door. The same storage-versus-effect failure as
+     * the settings that saved and did nothing.
+     */
+    const viaKey = (headers = {}) =>
+      app.inject({
+        method: 'GET',
+        url: '/api/folders/tree',
+        headers: { authorization: `Bearer ${key}`, ...headers },
+      });
 
-    const resolved = await resolveApiKey(key);
-    assert.equal(resolved.username, 'alice');
-    // A service account must never be held up by a password-change gate.
-    assert.equal(resolved.mustChangePassword, false);
+    const opened = await viaKey();
+    assert.equal(opened.statusCode, 200, `the key must open the door itself: ${opened.body}`);
+
+    // As alice, with alice's permissions — a key inherits its user's view of
+    // the tree, it does not become a skeleton key.
+    const me = await app.inject({
+      method: 'GET',
+      url: '/api/auth/me',
+      headers: { authorization: `Bearer ${key}` },
+    });
+    assert.equal(me.json().user?.username, 'alice');
 
     const listed = (await call('GET', '/api/api-keys', bossCookie)).json();
     const entry = listed.keys.find((k) => k.name === 'تكامل الماسح');
     await call('DELETE', `/api/api-keys/${entry.keyId}`, bossCookie);
 
-    assert.equal(await resolveApiKey(key), null, 'a revoked key stops resolving');
+    const afterRevoke = await viaKey();
+    assert.equal(afterRevoke.statusCode, 401, 'a revoked key must stop working at the door');
+
+    // A bad key does not fall through to any cookie that happens to ride along:
+    // revocation must be testable from the caller's side.
+    const withCookieToo = await viaKey({ cookie: aliceCookie });
+    assert.equal(withCookieToo.statusCode, 401, 'a presented key gets the key’s answer, including no');
+  });
+
+  /**
+   * The lock's one promise, on the ordinary path.
+   *
+   * restoreVersion checked the lock; addVersion — the way every new version
+   * actually arrives — did not, so the promise held on the rare path and broke
+   * on the common one. Two people editing "their" copy and the second upload
+   * silently winning is precisely the collision check-out exists to prevent.
+   */
+  test('a checked-out document refuses new versions from anyone else', async () => {
+    const documentId = await upload(aliceCookie, 'cabinet', 'quarterly.txt', 'النسخة الأولى');
+
+    assert.equal(
+      (await call('POST', `/api/documents/${documentId}/checkout`, aliceCookie)).statusCode,
+      200,
+    );
+
+    const boundary = '----dmslock';
+    const payload = Buffer.concat([
+      Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="v2.txt"\r\n`
+          + 'Content-Type: text/plain\r\n\r\n',
+        'utf8',
+      ),
+      Buffer.from('نسخة منافسة', 'utf8'),
+      Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8'),
+    ]);
+    const postVersion = (cookie) =>
+      app.inject({
+        method: 'POST',
+        url: `/api/documents/${documentId}/versions`,
+        headers: { cookie, 'content-type': `multipart/form-data; boundary=${boundary}` },
+        payload,
+      });
+
+    const blocked = await postVersion(bobCookie);
+    assert.equal(blocked.statusCode, 423, `bob must be refused while alice holds the lock: ${blocked.body}`);
+    assert.equal(blocked.json().error, 'locked');
+    assert.ok(blocked.json().lockedBy?.name, 'the refusal names who holds it');
+
+    // The holder is not locked out of their own checkout.
+    const own = await postVersion(aliceCookie);
+    assert.equal(own.statusCode, 201, own.body);
+
+    await call('POST', `/api/documents/${documentId}/checkin`, aliceCookie);
+    const released = await postVersion(bobCookie);
+    assert.equal(released.statusCode, 201, 'check-in reopens the document');
+  });
+
+  /**
+   * Deactivating someone reports the approvals that will now never complete.
+   *
+   * A step assigned to a person — not a group — has exactly one eligible
+   * approver, and reassignment deliberately does not exist. Without this count
+   * the first sign of trouble is a document stuck "بانتظار الاعتماد" weeks
+   * later, with the cause long scrolled out of anyone's memory.
+   */
+  test('deactivating a personal approver reports the approvals it strands', async () => {
+    await makeUser('lonely-approver');
+    // An approver has to be able to read the document, or the request is
+    // refused before it exists and there is nothing to strand.
+    await sql`
+      INSERT INTO dbo.access_control_entries (folder_id, principal_id, allow_bits, deny_bits)
+      VALUES (${id.cabinet}, ${id['lonely-approver']}, ${PERM.BROWSE | PERM.READ}, 0)
+    `.execute(db);
+
+    const template = await call('POST', '/api/approval-templates', bossCookie, {
+      name: 'اعتماد فردي',
+      steps: [{ approverId: String(id['lonely-approver']), requireAll: false }],
+    });
+    assert.equal(template.statusCode, 201, template.body);
+
+    const documentId = await upload(aliceCookie, 'cabinet', 'stranded.txt', 'بانتظار موافقة');
+    const request = await call('POST', `/api/documents/${documentId}/approvals`, aliceCookie, {
+      templateId: template.json().templateId,
+    });
+    assert.equal(request.statusCode, 201, request.body);
+
+    const deactivated = await call('POST', `/api/admin/users/${id['lonely-approver']}/active`, bossCookie, {
+      active: false,
+    });
+    assert.equal(deactivated.statusCode, 200, deactivated.body);
+    assert.ok(
+      Number(deactivated.json().blockedApprovals) >= 1,
+      `the response must count the stranded approvals: ${deactivated.body}`,
+    );
   });
 
   test('only the hash of an API key is stored', async () => {
@@ -613,6 +907,132 @@ describe('Tier 3 features', { skip: CONFIGURED ? false : target.reason }, () => 
     assert.equal(deliveries.rows[0].event, 'document.created');
     // Queued, not sent inline — a dead receiver must not slow the upload.
     assert.equal(Number(deliveries.rows[0].status), 0);
+  });
+
+  /*
+   * The secret used to be stored only as a hash, so nothing could sign with
+   * it and deliveries carried no signature while the screen promised one. A
+   * real listener stands in for the receiver here, and the signature is
+   * recomputed from the documented recipe rather than from the service's own
+   * helper, so this fails if the recipe and the code ever part ways.
+   */
+  test('a delivery is signed with the secret, and the documented recipe verifies it', async () => {
+    const received = [];
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk) => {
+        body += chunk;
+      });
+      req.on('end', () => {
+        received.push({ headers: req.headers, body });
+        res.writeHead(200).end();
+      });
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+
+    try {
+      const created = await call('POST', '/api/webhooks', bossCookie, {
+        name: 'مستقبِل يتحقق',
+        url: `http://127.0.0.1:${port}/hook`,
+        events: ['document.created'],
+      });
+      assert.equal(created.statusCode, 201, created.body);
+      const { webhookId, secret } = created.json();
+
+      const documentId = await upload(aliceCookie, 'cabinet', 'signed.txt', 'محتوى موقّع');
+
+      const { deliverPending } = await import('../src/modules/integration/service.js');
+      await deliverPending({ max: 100 });
+
+      const delivery = await sql`
+        SELECT delivery_id, status FROM dbo.webhook_deliveries WHERE webhook_id = ${webhookId}
+      `.execute(db);
+      assert.equal(Number(delivery.rows[0].status), 2, 'the delivery reached the listener');
+
+      const hit = received.find((r) => r.headers['x-dms-event'] === 'document.created');
+      assert.ok(hit, 'the listener saw the delivery');
+      assert.equal(JSON.parse(hit.body).data.documentId, String(documentId));
+      assert.equal(hit.headers['x-dms-delivery'], String(delivery.rows[0].delivery_id));
+
+      // The recipe from docs/WEBHOOKS.md, computed independently of the service.
+      const timestamp = hit.headers['x-dms-timestamp'];
+      assert.match(timestamp, /^[0-9]+$/);
+      assert.ok(Math.abs(Number(timestamp) - Date.now() / 1000) < 60, 'the timestamp is now');
+      const expected = 'v1=' + createHmac('sha256', secret).update(`${timestamp}.${hit.body}`).digest('hex');
+      assert.equal(hit.headers['x-dms-signature'], expected);
+
+      // Rotation returns a new secret once, and the list shows the hook as signed.
+      const rotated = await call('POST', `/api/webhooks/${webhookId}/secret`, bossCookie, {});
+      assert.equal(rotated.statusCode, 200, rotated.body);
+      assert.ok(rotated.json().secret && rotated.json().secret !== secret);
+      let listed = (await call('GET', '/api/webhooks', bossCookie)).json();
+      assert.equal(listed.webhooks.find((w) => w.webhookId === webhookId).signed, true);
+
+      // A hook from before 0017 has no secret: it is marked, and delivers unsigned.
+      await sql`UPDATE dbo.webhooks SET secret = NULL WHERE webhook_id = ${webhookId}`.execute(db);
+      listed = (await call('GET', '/api/webhooks', bossCookie)).json();
+      assert.equal(listed.webhooks.find((w) => w.webhookId === webhookId).signed, false);
+
+      received.length = 0;
+      await upload(aliceCookie, 'cabinet', 'unsigned.txt', 'محتوى بلا توقيع');
+      await deliverPending({ max: 100 });
+      const unsigned = received.find((r) => r.headers['x-dms-event'] === 'document.created');
+      assert.ok(unsigned, 'still delivered');
+      assert.equal(unsigned.headers['x-dms-signature'], undefined);
+      assert.equal(unsigned.headers['x-dms-timestamp'], undefined);
+
+      await call('DELETE', `/api/webhooks/${webhookId}`, bossCookie);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  test('approval events reach subscribed webhooks with the request and the decision in the payload', async () => {
+    const created = await call('POST', '/api/webhooks', bossCookie, {
+      name: 'متابع الاعتماد',
+      url: 'http://127.0.0.1:9/approvals',
+      events: ['approval.requested', 'approval.decided'],
+    });
+    assert.equal(created.statusCode, 201, created.body);
+    const webhookId = created.json().webhookId;
+
+    const template = await call('POST', '/api/approval-templates', bossCookie, {
+      name: 'مسار يُبلَّغ عنه',
+      steps: [{ approverId: String(id.bob) }],
+    });
+    assert.equal(template.statusCode, 201, template.body);
+
+    const documentId = await upload(aliceCookie, 'cabinet', 'hooked.txt', 'محتوى');
+    const requested = await call('POST', `/api/documents/${documentId}/approvals`, aliceCookie, {
+      templateId: template.json().templateId,
+    });
+    assert.equal(requested.statusCode, 201, requested.body);
+    const requestId = requested.json().requestId;
+
+    const decided = await call('POST', `/api/approvals/${requestId}/decision`, bobCookie, {
+      decision: 'approved',
+    });
+    assert.equal(decided.statusCode, 200, decided.body);
+
+    const rows = await sql`
+      SELECT event, payload FROM dbo.webhook_deliveries
+       WHERE webhook_id = ${webhookId} ORDER BY delivery_id
+    `.execute(db);
+    const events = rows.rows.map((row) => ({ event: row.event, data: JSON.parse(row.payload).data }));
+
+    assert.deepEqual(events.map((e) => e.event), ['approval.requested', 'approval.decided']);
+    assert.equal(events[0].data.requestId, requestId);
+    assert.equal(events[0].data.documentId, String(documentId));
+    assert.equal(events[0].data.actor, 'alice');
+    assert.equal(events[0].data.step, 1);
+    assert.equal(events[1].data.requestId, requestId);
+    assert.equal(events[1].data.decision, 'approved');
+    assert.equal(events[1].data.outcome, 'approved');
+    assert.equal(events[1].data.actor, 'bob');
+
+    // Paused so the deliveries above do not keep retrying under later tests.
+    await call('POST', `/api/webhooks/${webhookId}/active`, bossCookie, { active: false });
   });
 
   test('an unknown webhook event is refused', async () => {
@@ -669,7 +1089,7 @@ describe('Tier 3 features', { skip: CONFIGURED ? false : target.reason }, () => 
     assert.equal(Number(afterResume.rows[0].n), countBefore + 1, 'exactly one new delivery after resume');
   });
 
-  test('editing a webhook changes url and events; bad inputs are rejected; secret_hash is preserved', async () => {
+  test('editing a webhook changes url and events; bad inputs are rejected; the secret is preserved', async () => {
     const created = await call('POST', '/api/webhooks', bossCookie, {
       name: 'خطاف قابل للتعديل',
       url: 'http://127.0.0.1:9/original',
@@ -678,11 +1098,12 @@ describe('Tier 3 features', { skip: CONFIGURED ? false : target.reason }, () => 
     assert.equal(created.statusCode, 201);
     const hookId = created.json().webhookId;
 
-    // Read the secret_hash before the edit so we can confirm it is unchanged.
+    // Read the secret before the edit so we can confirm it is unchanged.
     const before = await sql`
-      SELECT secret_hash FROM dbo.webhooks WHERE webhook_id = ${hookId}
+      SELECT secret FROM dbo.webhooks WHERE webhook_id = ${hookId}
     `.execute(db);
-    const secretHashBefore = before.rows[0].secret_hash;
+    const secretBefore = before.rows[0].secret;
+    assert.equal(secretBefore, created.json().secret, 'the secret is kept for signing, not hashed');
 
     // Valid edit: change url and add another event.
     const edited = await call('PATCH', `/api/webhooks/${hookId}`, bossCookie, {
@@ -697,12 +1118,12 @@ describe('Tier 3 features', { skip: CONFIGURED ? false : target.reason }, () => 
     assert.equal(entry.url, 'https://example.test/updated');
     assert.ok(entry.events.includes('document.updated'));
 
-    // The secret_hash must be unchanged — the receiver keeps verifying with the
+    // The secret must be unchanged — the receiver keeps verifying with the
     // secret it received at creation time.
     const after = await sql`
-      SELECT secret_hash FROM dbo.webhooks WHERE webhook_id = ${hookId}
+      SELECT secret FROM dbo.webhooks WHERE webhook_id = ${hookId}
     `.execute(db);
-    assert.equal(after.rows[0].secret_hash, secretHashBefore);
+    assert.equal(after.rows[0].secret, secretBefore);
 
     // A bad url must be rejected.
     const badUrl = await call('PATCH', `/api/webhooks/${hookId}`, bossCookie, {

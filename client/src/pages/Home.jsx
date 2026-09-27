@@ -41,7 +41,7 @@ import { ChevronUp, ExternalLink, GripVertical, RotateCcw, X } from 'lucide-reac
 
 import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
-import { applyOrder, reorder, visibleModules } from '../navigation.js';
+import { applyOrder, reorder, visibleModules, visibleTabs } from '../navigation.js';
 import { useHelpTopic } from '../help/HelpContext.jsx';
 import { useBranding } from '../branding.js';
 import { Alert } from '../components/ui.jsx';
@@ -78,6 +78,36 @@ export default function Home() {
         // one load is a far smaller failure than a home page that will not draw.
         if (!cancelled) setOrder([]);
       });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /*
+   * What this viewer may actually open inside a module.
+   *
+   * Some sub-screens are not everyone's: السجل and المتابعة belong to the mail
+   * room. Without asking, the menu offered all three correspondence tiles to
+   * every clerk and two of them dropped the reader back on the first — a tile
+   * that promises a destination and silently goes elsewhere teaches people the
+   * screen is broken, when the truth is it was never theirs.
+   *
+   * Failing to answer means no extra capabilities, so the menu shows the tabs
+   * everyone has rather than hiding a module behind a request that did not come
+   * back.
+   */
+  const [capabilities, setCapabilities] = useState({});
+
+  useEffect(() => {
+    let cancelled = false;
+
+    api
+      .correspondence.status()
+      .then((status) => {
+        if (!cancelled) setCapabilities((current) => ({ ...current, ...status }));
+      })
+      .catch(() => {});
 
     return () => {
       cancelled = true;
@@ -163,12 +193,22 @@ export default function Home() {
             index={index}
             total={modules.length}
             isActive={openKey === module.key}
+            // How many letters wait on this person's departments. On the tile
+            // itself, so the menu says "something is for you" before anything
+            // is opened — the bell says it too, but the bell is small and this
+            // is where the eye starts.
+            badge={module.key === 'correspondence' ? capabilities.queueCount : null}
+            expandable={visibleTabs(module, capabilities).length >= 2}
             isDragging={dragKey === module.key}
             isOver={overKey === module.key && dragKey !== module.key}
             onSelect={() => {
-              // A module with nothing to expand goes straight there: a panel
-              // holding a single link is a click that buys nothing.
-              if (!module.tabs?.length) {
+              /*
+                A module with nothing to expand goes straight there: a panel
+                holding a single link is a click that buys nothing — and for a
+                clerk who may only open الوارد إليّ, correspondence IS a single
+                link, so it opens rather than expanding onto one tile.
+              */
+              if (visibleTabs(module, capabilities).length < 2) {
                 navigate(module.to);
                 return;
               }
@@ -193,7 +233,18 @@ export default function Home() {
 
       {(() => {
         const open = modules.find((module) => module.key === openKey);
-        return open ? <ModulePanel module={open} onClose={() => setOpenKey(null)} /> : null;
+        return open ? (
+          <ModulePanel
+            module={open}
+            tabs={visibleTabs(open, capabilities)}
+            badges={
+              open.key === 'correspondence' && capabilities.queueCount
+                ? { queue: capabilities.queueCount }
+                : {}
+            }
+            onClose={() => setOpenKey(null)}
+          />
+        ) : null;
       })()}
     </div>
   );
@@ -204,6 +255,8 @@ function ModuleTile({
   index,
   total,
   isActive,
+  badge,
+  expandable,
   isDragging,
   isOver,
   onSelect,
@@ -256,7 +309,7 @@ function ModuleTile({
         event.preventDefault();
         onMove(delta);
       }}
-      aria-expanded={module.tabs?.length ? isActive : undefined}
+      aria-expanded={expandable ? isActive : undefined}
       aria-label={`${module.label} — الموضع ${index + 1} من ${total}. اضغط Ctrl مع الأسهم لنقلها.`}
       className={`group relative flex min-h-[120px] cursor-grab flex-col items-center justify-center
         rounded-lg p-4 transition-all duration-300 hover:scale-105 focus:outline-none focus:ring-2
@@ -286,11 +339,20 @@ function ModuleTile({
       />
 
       <div
-        className={`mb-3 rounded-lg bg-primary p-4 shadow-lg transition-all group-hover:shadow-xl ${
+        className={`relative mb-3 rounded-lg bg-primary p-4 shadow-lg transition-all group-hover:shadow-xl ${
           isActive ? 'ring-2 ring-primary/50 ring-offset-2' : ''
         }`}
       >
         <Icon className="h-8 w-8 text-on-primary sm:h-10 sm:w-10" />
+        {badge ? (
+          <span
+            className="num absolute -top-2 -start-2 flex h-5 min-w-5 items-center justify-center
+              rounded-full bg-red-600 px-1 text-[11px] font-bold text-white shadow"
+            aria-label={`${badge} بانتظارك`}
+          >
+            {badge > 99 ? '99+' : badge}
+          </span>
+        ) : null}
       </div>
 
       <span className="text-center text-sm font-semibold text-text sm:text-base">
@@ -305,7 +367,7 @@ function ModuleTile({
   );
 }
 
-function ModulePanel({ module, onClose }) {
+function ModulePanel({ module, tabs, badges = {}, onClose }) {
   const navigate = useNavigate();
   const Icon = module.icon;
 
@@ -357,10 +419,11 @@ function ModulePanel({ module, onClose }) {
       </div>
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
-        {module.tabs.map((tab) => (
+        {tabs.map((tab) => (
           <SubItemTile
             key={tab.key}
             tab={tab}
+            badge={badges[tab.key] ?? null}
             // The tab is carried in the URL so the tile lands on the screen it
             // names, and so that screen can be linked to and bookmarked at all.
             to={`${module.to}?tab=${tab.key}`}
@@ -371,7 +434,7 @@ function ModulePanel({ module, onClose }) {
   );
 }
 
-function SubItemTile({ tab, to }) {
+function SubItemTile({ tab, to, badge = null }) {
   const navigate = useNavigate();
   const Icon = tab.icon;
 
@@ -389,6 +452,15 @@ function SubItemTile({ tab, to }) {
           <Icon className="h-4 w-4 text-on-primary" />
         </div>
         <span className="text-sm font-medium text-text">{tab.label}</span>
+        {badge ? (
+          <span
+            className="num flex h-5 min-w-5 items-center justify-center rounded-full bg-red-600
+              px-1 text-[11px] font-bold text-white"
+            aria-label={`${badge} بانتظارك`}
+          >
+            {badge > 99 ? '99+' : badge}
+          </span>
+        ) : null}
       </button>
 
       {/*

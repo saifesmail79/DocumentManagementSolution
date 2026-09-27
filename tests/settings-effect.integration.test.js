@@ -460,8 +460,23 @@ describe('settings take effect', { skip: CONFIGURED ? false : target.reason }, (
     const { readFile } = await import('node:fs/promises');
     const adminSource = await readFile(new URL('../client/src/pages/Admin.jsx', import.meta.url), 'utf8');
 
+    /*
+     * Three keys are deliberately absent from the settings table, each owned by
+     * a screen that can do more than a text box: the storage root by its guided
+     * move-and-reconcile card, the mailroom group by a picker that lists the
+     * groups instead of asking for an id, and the intake folder by a folder
+     * picker on the correspondence tab. All three are named here so "not in the
+     * table" stays a decision on the record rather than an omission that looks
+     * like one.
+     */
+    const ownedElsewhere = new Set([
+      'storage.root',
+      'correspondence.mailroom_group',
+      'correspondence.intake_folder',
+    ]);
+
     const missing = Object.keys(settings.EDITABLE)
-      .filter((key) => key !== 'storage.root') // owned by its own guided card
+      .filter((key) => !ownedElsewhere.has(key))
       .filter((key) => !adminSource.includes(`'${key}'`));
 
     assert.deepEqual(missing, [], `settings with no place on the screen: ${missing.join(', ')}`);

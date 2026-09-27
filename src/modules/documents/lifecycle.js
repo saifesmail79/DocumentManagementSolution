@@ -110,6 +110,7 @@ export async function listRecycleBin({ userId, folderId = null, limit = 100 }) {
   const result = await sql`
     SELECT TOP (${pageSize})
            d.document_id, d.title, d.folder_id, d.deleted_at, d.current_version,
+           d.legal_hold,
            f.name AS folder_name,
            deleter.display_name AS deleted_by,
            -- Either axis counts as content. A multi-file document has no
@@ -141,6 +142,10 @@ export async function listRecycleBin({ userId, folderId = null, limit = 100 }) {
     // After the purge sweep the row survives as a tombstone with no file. It is
     // listed so the deletion is still visible, but it cannot be restored.
     restorable: Number(row.has_content) === 1,
+    // Said in the listing, not only on the click: a حذف نهائي button that looks
+    // available and then refuses teaches people the screen is broken, when the
+    // truth is the document is protected.
+    legalHold: Number(row.legal_hold) === 1,
   }));
 }
 
@@ -192,12 +197,16 @@ export async function restoreDocument({ userId, documentId }) {
  */
 export async function purgeNow({ userId, documentId }) {
   const found = await sql`
-    SELECT folder_id, is_deleted FROM dbo.documents WHERE document_id = ${documentId}
+    SELECT folder_id, is_deleted, legal_hold FROM dbo.documents WHERE document_id = ${documentId}
   `.execute(db);
 
   const document = found.rows[0];
   if (!document) return { ok: false, reason: 'not_found' };
   if (Number(document.is_deleted) !== 1) return { ok: false, reason: 'not_deleted' };
+
+  // A hold placed after the document was binned still protects it: the bin is
+  // exactly where the wrongly-deleted evidence a hold exists for would be.
+  if (Number(document.legal_hold) === 1) return { ok: false, reason: 'legal_hold' };
 
   const bits = await permissionBits(userId, document.folder_id);
   if (!has(bits, PERM.DELETE)) {

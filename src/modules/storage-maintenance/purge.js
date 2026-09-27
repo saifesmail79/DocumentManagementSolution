@@ -86,6 +86,18 @@ export async function purgeDeletedDocuments({
       JOIN dbo.documents d ON d.document_id = c.document_id
      WHERE d.is_deleted = 1
        AND d.deleted_at < DATEADD(day, ${-Math.abs(graceDays)}, SYSUTCDATETIME())
+       /*
+        * The last line of defence for a legal hold.
+        *
+        * The delete paths refuse held documents, but this sweep is the only
+        * thing in the system that destroys bytes, so it enforces the rule
+        * itself rather than trusting every road that leads here — a held
+        * document binned before the delete paths learned to refuse, or by any
+        * path yet to be written, sits in the bin unharmed until the hold is
+        * lifted. Erasing evidence during litigation is not a bug that gets a
+        * second chance.
+        */
+       AND d.legal_hold = 0
      ORDER BY d.deleted_at
   `.execute(db);
 
@@ -174,14 +186,17 @@ export async function recycleBinState({ graceDays } = {}) {
   if (graceDays === undefined) graceDays = await effectiveGraceDays();
   const rows = await sql`
     SELECT
-      SUM(CASE WHEN content.blobs > 0
+      SUM(CASE WHEN content.blobs > 0 AND d.legal_hold = 0
                 AND d.deleted_at < DATEADD(day, ${-Math.abs(graceDays)}, SYSUTCDATETIME())
                THEN 1 ELSE 0 END) AS eligible,
-      SUM(CASE WHEN content.blobs > 0
+      SUM(CASE WHEN content.blobs > 0 AND d.legal_hold = 0
                 AND d.deleted_at >= DATEADD(day, ${-Math.abs(graceDays)}, SYSUTCDATETIME())
                THEN 1 ELSE 0 END) AS waiting,
+      -- Held documents are neither eligible nor waiting: time does not move for
+      -- them, and reporting one as "eligible" forever would read as a stuck sweep.
+      SUM(CASE WHEN content.blobs > 0 AND d.legal_hold = 1 THEN 1 ELSE 0 END) AS held,
       SUM(CASE WHEN content.blobs = 0 THEN 1 ELSE 0 END) AS tombstones,
-      MIN(CASE WHEN content.blobs > 0
+      MIN(CASE WHEN content.blobs > 0 AND d.legal_hold = 0
                 AND d.deleted_at >= DATEADD(day, ${-Math.abs(graceDays)}, SYSUTCDATETIME())
                THEN d.deleted_at END) AS oldest_waiting
       FROM dbo.documents d
@@ -200,6 +215,7 @@ export async function recycleBinState({ graceDays } = {}) {
     graceDays,
     eligible: Number(row.eligible ?? 0),
     waiting: Number(row.waiting ?? 0),
+    held: Number(row.held ?? 0),
     // Kept for the audit trail and unrestorable: nothing will ever collect them,
     // and they no longer hold a folder open.
     tombstones: Number(row.tombstones ?? 0),

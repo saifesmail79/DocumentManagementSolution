@@ -14,6 +14,7 @@ import {
   UserPlus,
   UserMinus,
   Search,
+  FileText,
 } from 'lucide-react';
 
 import { api, ApiError } from '../api.js';
@@ -32,11 +33,13 @@ import {
   ReportsTab,
 } from '../components/AdminTabs.jsx';
 import ClassificationTab from '../components/ClassificationTab.jsx';
+import CorrespondenceAdminTab from '../components/CorrespondenceAdminTab.jsx';
 import { useHelpTopic } from '../help/HelpContext.jsx';
 import { SETTING_HELP, PERMISSION_BITS, roleDisplay } from '../help/content.js';
 import HelpTip from '../components/HelpTip.jsx';
 import TabIntro from '../components/TabIntro.jsx';
-import PermissionIcons from '../components/PermissionIcons.jsx';
+import PermissionIcons, { VERBS } from '../components/PermissionIcons.jsx';
+import { RoleBadge } from '../components/RoleBadge.jsx';
 import StorageRootCard from '../components/StorageRootCard.jsx';
 import FolderPermissionsTab from '../components/FolderPermissionsTab.jsx';
 import ColourField, { normaliseHex } from '../components/ColourField.jsx';
@@ -61,7 +64,9 @@ export default function Admin() {
   const [searchParams, setSearchParams] = useSearchParams();
   const requested = searchParams.get('tab');
   const tab = TABS.some((entry) => entry.key === requested) ? requested : 'users';
-  const setTab = (key) => setSearchParams(key === 'users' ? {} : { tab: key });
+  // Replaced, not pushed, so the back button leaves the page rather than
+  // retracing every tab that was clicked (see MyDocuments).
+  const setTab = (key) => setSearchParams(key === 'users' ? {} : { tab: key }, { replace: true });
 
   // Nine screens behind one route, so the help button follows the tab rather
   // than describing all nine at once. Declared before the guard below, because a
@@ -112,6 +117,7 @@ export default function Admin() {
       {tab === 'audit' ? <AuditTab /> : null}
       {tab === 'diagnostics' ? <DiagnosticsTab /> : null}
       {tab === 'classification' ? <ClassificationTab /> : null}
+      {tab === 'correspondence' ? <CorrespondenceAdminTab /> : null}
     </div>
   );
 }
@@ -494,7 +500,26 @@ function UsersTab() {
                             confirmLabel: deactivating ? 'تعطيل' : 'تفعيل',
                             variant: deactivating ? 'danger' : 'info',
                           });
-                          if (confirmed) await act(() => api.admin.setActive(item.userId, !item.isActive));
+                          if (!confirmed) return;
+                          await act(
+                            () => api.admin.setActive(item.userId, !item.isActive),
+                            /*
+                              Approvals waiting on this person personally can now
+                              never be decided — eligibility is checked against
+                              the approver, and reassignment deliberately does
+                              not exist. Said here, while the administrator still
+                              has the context, rather than discovered weeks later
+                              as a document stuck "بانتظار الاعتماد".
+                            */
+                            (result) => {
+                              if (deactivating && result?.blockedApprovals > 0) {
+                                setError(
+                                  `تنبيه: ${result.blockedApprovals} طلب اعتماد ينتظر موافقة هذا الشخص شخصياً `
+                                  + 'ولن يكتمل الآن. ألغِ تلك الطلبات أو أعد طلبها بمسار آخر من صفحات وثائقها.',
+                                );
+                              }
+                            },
+                          );
                         }}
                         isActive={item.isActive}
                       />
@@ -1126,7 +1151,11 @@ function GroupsTab() {
 function PermissionPicker({ bits, onChange, disabled }) {
   return (
     <div className="flex flex-wrap gap-x-4 gap-y-2">
-      {PERMISSION_BITS.map((verb) => (
+      {PERMISSION_BITS.map((verb) => {
+        // The icon the tables draw for this verb, so a role's definition and
+        // the matrix its grants produce read as the same six symbols.
+        const Icon = VERBS.find((entry) => entry.bit === verb.bit)?.icon;
+        return (
         <span key={verb.bit} className="flex items-center gap-1">
           <label className="flex items-center gap-1.5 text-sm text-text">
             <input
@@ -1135,6 +1164,7 @@ function PermissionPicker({ bits, onChange, disabled }) {
               disabled={disabled}
               onChange={() => onChange(bits ^ verb.bit)}
             />
+            {Icon ? <Icon size={13} className="text-primary" /> : null}
             {verb.label}
           </label>
           {/* Six words with six very different consequences — "إدارة الصلاحيات"
@@ -1142,7 +1172,8 @@ function PermissionPicker({ bits, onChange, disabled }) {
               checkbox label cannot say that. */}
           <HelpTip text={verb.help} label={`شرح صلاحية: ${verb.label}`} />
         </span>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -1322,42 +1353,23 @@ function RolesTab() {
           </thead>
           <tbody className="divide-y divide-border/50">
             {roles.map((role) => {
-              const display = roleDisplay(role);
-
               return (
                 <tr key={role.roleId} className="hover:bg-surface-muted/30">
                   <td className="px-4 py-3 text-right">
                     {/*
-                      Spaced by flex `gap`, not by a margin on each chip.
-
-                      `ms-2` is `margin-inline-start`, and inline-start is
-                      resolved against the element's OWN direction — so putting
-                      it on the `dir="ltr"` identifier below moved the gap to
-                      that chip's left, away from the badge, and the two ran
-                      together. `gap` sits between items whatever direction each
-                      one declares, which is the only version of this that
-                      cannot be got wrong.
+                      The row states the role; the hover explains it. Name and
+                      icon stay visible, while the description and the stored
+                      English identifier — a sentence and a code that made every
+                      row three lines tall — moved into the badge's tooltip.
                     */}
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-medium text-text">{display.name}</span>
+                      <RoleBadge role={role} variant="row" />
                       {role.isSystem ? (
                         <span className="rounded border border-border px-1.5 py-0.5 text-[11px] text-text-muted">
                           نظامي
                         </span>
                       ) : null}
-                      {/* The stored English name, kept discoverable for anyone
-                          matching this screen against the API or the docs. */}
-                      {display.identifier ? (
-                        <span dir="ltr" className="text-[11px] text-text-muted/70">
-                          {display.identifier}
-                        </span>
-                      ) : null}
                     </div>
-                    {display.description ? (
-                      <span className="mt-0.5 block text-[11px] text-text-muted">
-                        {display.description}
-                      </span>
-                    ) : null}
                   </td>
                   <td className="px-4 py-3 text-right">
                     <PermissionIcons bits={role.permissionBits} />
@@ -1428,6 +1440,7 @@ const SETTING_LABELS = {
   'auth.password_require_uppercase': 'إلزام حرف لاتيني كبير (A-Z)',
   'auth.password_require_digit': 'إلزام رقم',
   'auth.password_require_symbol': 'إلزام رمز (! @ # %)',
+  'correspondence.enabled': 'وحدة المراسلات',
   'ocr.enabled': 'المسح الضوئي للنصوص (OCR)',
   'extraction.enabled': 'استخراج نص الوثائق',
   'classification.enabled': 'التعرّف التلقائي على الوثائق (تجريبي)',
@@ -1478,6 +1491,11 @@ const SETTING_SECTIONS = [
     title: 'المعالجة',
     hint: 'الاستخراج والتعرّف الضوئي اللذان يجعلان محتوى الوثائق قابلاً للبحث.',
     keys: ['ocr.enabled', 'extraction.enabled', 'classification.enabled'],
+  },
+  {
+    title: 'المراسلات',
+    hint: 'مفتاح تشغيل سجل الوارد والصادر. الأقسام وقلم الوارد تُعرَّف في «الإدارة ← المراسلات».',
+    keys: ['correspondence.enabled'],
   },
   {
     title: 'عام',
@@ -2577,11 +2595,24 @@ function MetadataTab() {
  * Arabic for a list the server extends independently would go stale silently —
  * so the label carries the English and the help explains the vocabulary once.
  */
+/**
+ * The trail's three audiences, offered as one-click views.
+ *
+ * The keys are the server's CATEGORY names; membership lives there, beside the
+ * action constants, so this list only names and draws what the server defines.
+ */
+const AUDIT_CATEGORIES = [
+  { key: '', label: 'كل الأحداث', icon: ScrollText },
+  { key: 'security', label: 'الأمن', icon: Shield },
+  { key: 'documents', label: 'الوثائق', icon: FileText },
+  { key: 'configuration', label: 'الإعدادات', icon: SlidersHorizontal },
+];
+
 function AuditTab() {
   const [entries, setEntries] = useState(null);
   const [actions, setActions] = useState([]);
   const [auditUsers, setAuditUsers] = useState([]);
-  const [filters, setFilters] = useState({ action: '', from: '', to: '', actor: '' });
+  const [filters, setFilters] = useState({ action: '', from: '', to: '', actor: '', category: '' });
   const [cursor, setCursor] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -2595,6 +2626,7 @@ function AuditTab() {
         const params = new URLSearchParams();
         if (active.action) params.set('action', active.action);
         if (active.actor) params.set('actor', active.actor);
+        if (active.category) params.set('category', active.category);
 
         /*
          * Both bounds carry a time, and both are local.
@@ -2639,7 +2671,7 @@ function AuditTab() {
       .users('', { includeInactive: true })
       .then((list) => setAuditUsers(Array.isArray(list) ? list : []))
       .catch(() => setAuditUsers([]));
-    fetchPage({ action: '', from: '', to: '', actor: '' });
+    fetchPage({ action: '', from: '', to: '', actor: '', category: '' });
   }, [fetchPage]);
 
   function apply(event) {
@@ -2657,6 +2689,47 @@ function AuditTab() {
       {error ? <Alert tone="error">{error}</Alert> : null}
 
       <Card className="p-4">
+        {/*
+          The views, before the filters. «الأمن» answers "who signed in, who was
+          given power, who could suddenly see what" without asking anyone to know
+          which action identifiers those are; the fine-grained filters below still
+          apply within whichever view is selected. A chip acts immediately —
+          switching views is navigation, not form entry.
+        */}
+        <div className="mb-3 flex flex-wrap gap-1.5 border-b border-border pb-3">
+          {AUDIT_CATEGORIES.map((view) => {
+            const selected = filters.category === view.key;
+            const Icon = view.icon;
+            return (
+              <button
+                key={view.key || 'all'}
+                type="button"
+                disabled={busy}
+                aria-pressed={selected}
+                onClick={() => {
+                  // The action filter is cleared with the view: an action from
+                  // another category ANDed with this one can only return an
+                  // empty page, with nothing on screen explaining why.
+                  const next = { ...filters, category: view.key, action: '' };
+                  setFilters(next);
+                  setCursor(null);
+                  fetchPage(next);
+                }}
+                className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs
+                  transition-colors focus:outline-none focus:ring-2 focus:ring-primary/40
+                  disabled:cursor-not-allowed disabled:opacity-50 ${
+                    selected
+                      ? 'border-primary bg-primary/10 font-medium text-primary'
+                      : 'border-border text-text-muted hover:bg-surface-muted hover:text-text'
+                  }`}
+              >
+                <Icon size={13} />
+                {view.label}
+              </button>
+            );
+          })}
+        </div>
+
         <form onSubmit={apply} className="flex flex-wrap items-end gap-3">
           <label className="block">
             <span className="mb-1.5 flex items-center gap-1 text-sm font-medium text-text">
@@ -2722,13 +2795,13 @@ function AuditTab() {
           <Button type="submit" disabled={busy}>
             تصفية
           </Button>
-          {filters.action || filters.from || filters.to || filters.actor ? (
+          {filters.action || filters.from || filters.to || filters.actor || filters.category ? (
             <Button
               type="button"
               variant="secondary"
               disabled={busy}
               onClick={() => {
-                const cleared = { action: '', from: '', to: '', actor: '' };
+                const cleared = { action: '', from: '', to: '', actor: '', category: '' };
                 setFilters(cleared);
                 setCursor(null);
                 fetchPage(cleared);
@@ -2864,7 +2937,15 @@ function PurgeSummary({ result }) {
               للمراجعة فقط، ولا تمنع حذف المجلد.
             </li>
           ) : null}
-          {bin.waiting === 0 && bin.tombstones === 0 ? <li>• سلة المحذوفات فارغة.</li> : null}
+          {bin.held > 0 ? (
+            <li>
+              • <span className="num">{bin.held}</span> وثيقة محذوفة تحت حجز قانوني: يتخطاها التنظيف
+              مهما طال بقاؤها، حتى يُرفع الحجز عنها.
+            </li>
+          ) : null}
+          {bin.waiting === 0 && bin.tombstones === 0 && !bin.held ? (
+            <li>• سلة المحذوفات فارغة.</li>
+          ) : null}
         </ul>
       ) : null}
 

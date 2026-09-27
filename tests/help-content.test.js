@@ -67,6 +67,68 @@ describe('help content', () => {
     assert.deepEqual(missing, [], `administration tabs with no help: ${missing.join(', ')}`);
   });
 
+  /**
+   * The document page's tabs, held to the same rule as the administration ones.
+   *
+   * These went unchecked because the check above names ADMIN_TABS and nothing
+   * else — so ten tabs shipped sharing one page-level topic, and someone stood
+   * in front of حجز قانوني with a help button that had nothing to say about it.
+   * The SECTIONS literal is scraped from the page itself, so a tab added there
+   * arrives already owing a topic.
+   */
+  test('every document tab has its own topic', async () => {
+    const source = await readFile(path.join(ROOT, 'client/src/pages/DocumentDetail.jsx'), 'utf8');
+    const block = source.match(/const SECTIONS = \[([\s\S]*?)\n\];/);
+    assert.ok(block, 'could not find SECTIONS in DocumentDetail.jsx');
+
+    const keys = [...block[1].matchAll(/key: '([^']+)'/g)].map((match) => match[1]);
+    assert.ok(keys.length >= 9, `expected the full tab set, found ${keys.length}`);
+
+    const missing = keys
+      // The document tab is the page, and uses the page's own topic.
+      .filter((key) => key !== 'document')
+      .filter((key) => !HELP_TOPICS[`document.${key}`]);
+
+    assert.deepEqual(missing, [], `document tabs with no help: ${missing.join(', ')}`);
+  });
+
+  /**
+   * The general guarantee behind the two checks above: any topic a screen asks
+   * for by name must exist. This is what catches the NEXT screen — one that is
+   * neither an administration tab nor a document tab — before its help button
+   * opens onto the fallback and nobody notices.
+   */
+  test('every topic any screen names actually exists', async () => {
+    const { readdir } = await import('node:fs/promises');
+
+    async function* walk(dir) {
+      for (const entry of await readdir(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) yield* walk(full);
+        else if (/\.(jsx?|tsx?)$/.test(entry.name)) yield full;
+      }
+    }
+
+    const missing = [];
+    for await (const file of walk(path.join(ROOT, 'client/src'))) {
+      const source = await readFile(file, 'utf8');
+      // Literal topic names only: useHelpTopic('x') and <TabIntro topic="x">.
+      // Template-built names (admin.${tab}, document.${tab}) are covered by the
+      // per-list checks above, which is why those lists are scraped rather than
+      // trusted.
+      const named = [
+        ...source.matchAll(/useHelpTopic\('([^']+)'\)/g),
+        ...source.matchAll(/TabIntro topic="([^"]+)"/g),
+      ].map((match) => match[1]);
+
+      for (const topic of named) {
+        if (!HELP_TOPICS[topic]) missing.push(`${path.relative(ROOT, file)}: ${topic}`);
+      }
+    }
+
+    assert.deepEqual(missing, [], `screens naming topics that do not exist:\n${missing.join('\n')}`);
+  });
+
   test('every editable setting has help, and none describes a setting that is gone', async () => {
     const { EDITABLE } = await import('../src/modules/settings/service.js');
 

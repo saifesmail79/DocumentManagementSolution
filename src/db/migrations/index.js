@@ -40,6 +40,8 @@ import { m0013PerFileRenditions } from './0013-per-file-renditions.js';
 import { m0014StorageReconciliation } from './0014-storage-reconciliation.js';
 import { m0015UserPreferences } from './0015-user-preferences.js';
 import { m0016ClassificationPilot } from './0016-classification-pilot.js';
+import { m0017WebhookSigningSecret } from './0017-webhook-signing-secret.js';
+import { m0018Correspondence } from './0018-correspondence.js';
 
 /**
  * @typedef {object} Migration
@@ -67,4 +69,6 @@ export const MIGRATIONS = [
   m0014StorageReconciliation,
   m0015UserPreferences,
   m0016ClassificationPilot,
+  m0017WebhookSigningSecret,
+  m0018Correspondence,
 ];

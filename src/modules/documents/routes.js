@@ -35,6 +35,10 @@ const STATUS = {
   duplicate: 409,
   not_deleted: 409,
   content_purged: 410,
+  // 423 Locked: the document exists and the caller may even hold Delete — the
+  // resource itself is what refuses.
+  legal_hold: 423,
+  locked: 423,
   // 415: the request is well-formed and the file kind itself is the objection.
   blocked_extension: 415,
   empty_file: 400,
@@ -431,7 +435,15 @@ export async function documentRoutes(app) {
       comment: firstValue(part.fields?.comment),
     });
 
-    if (!result.ok) return reply.code(STATUS[result.reason] ?? 400).send({ error: result.reason });
+    if (!result.ok) {
+      return reply.code(STATUS[result.reason] ?? 400).send({
+        error: result.reason,
+        // Who holds the lock, when that is the reason — a refusal that names
+        // the person turns a dead end into a conversation.
+        lockedBy: result.lockedBy,
+        allowed: result.allowed,
+      });
+    }
 
     await record({
       actor: request.user,
@@ -582,7 +594,15 @@ export async function documentRoutes(app) {
     if (documentId === null) return reply.code(400).send({ error: 'invalid_document_id' });
 
     const result = await restoreDocument({ userId: request.user.userId, documentId });
-    if (!result.ok) return reply.code(STATUS[result.reason] ?? 400).send({ error: result.reason });
+    if (!result.ok) {
+      return reply.code(STATUS[result.reason] ?? 400).send({
+        error: result.reason,
+        // Who holds the lock, when that is the reason — a refusal that names
+        // the person turns a dead end into a conversation.
+        lockedBy: result.lockedBy,
+        allowed: result.allowed,
+      });
+    }
 
     await record({
       actor: request.user,
@@ -603,7 +623,15 @@ export async function documentRoutes(app) {
     if (documentId === null) return reply.code(400).send({ error: 'invalid_document_id' });
 
     const result = await purgeNow({ userId: request.user.userId, documentId });
-    if (!result.ok) return reply.code(STATUS[result.reason] ?? 400).send({ error: result.reason });
+    if (!result.ok) {
+      return reply.code(STATUS[result.reason] ?? 400).send({
+        error: result.reason,
+        // Who holds the lock, when that is the reason — a refusal that names
+        // the person turns a dead end into a conversation.
+        lockedBy: result.lockedBy,
+        allowed: result.allowed,
+      });
+    }
 
     await record({
       actor: request.user,
@@ -640,7 +668,15 @@ export async function documentRoutes(app) {
     if (documentId === null) return reply.code(400).send({ error: 'invalid_document_id' });
 
     const result = await deleteDocument({ userId: request.user.userId, documentId });
-    if (!result.ok) return reply.code(STATUS[result.reason] ?? 400).send({ error: result.reason });
+    if (!result.ok) {
+      return reply.code(STATUS[result.reason] ?? 400).send({
+        error: result.reason,
+        // Who holds the lock, when that is the reason — a refusal that names
+        // the person turns a dead end into a conversation.
+        lockedBy: result.lockedBy,
+        allowed: result.allowed,
+      });
+    }
 
     await record({
       actor: request.user,

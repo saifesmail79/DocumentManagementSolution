@@ -85,6 +85,94 @@ export const ACTION = Object.freeze({
 
   BLOB_PURGED: 'storage.blob_purged',
   SETTING_CHANGED: 'settings.changed',
+
+  // The correspondence register. Registration and annulment are the acts a
+  // paper وارد/صادر book exists to witness, so they must be in the trail;
+  // routing answers "who sent this to that department".
+  MAIL_REGISTERED: 'mail.registered',
+  MAIL_ROUTED: 'mail.routed',
+  MAIL_ANNULLED: 'mail.annulled',
+  MAIL_UNIT_CHANGED: 'mail.unit_changed',
+  MAIL_COUNTER_SET: 'mail.counter_set',
+});
+
+/**
+ * The trail carved into the three questions it actually gets asked.
+ *
+ * "Who signed in, who was given power, who could suddenly see what" is a
+ * security review; "what happened to this document" is a filing question; "who
+ * changed how the system behaves" is change management. One flat list answers
+ * all three badly, so the viewer offers each as a category and the membership
+ * lives HERE, next to the constants — a new action added above without a home
+ * below fails the categorisation test rather than silently vanishing from
+ * every category view.
+ */
+export const CATEGORY = Object.freeze({
+  security: [
+    ACTION.LOGIN_SUCCEEDED,
+    ACTION.LOGIN_FAILED,
+    ACTION.LOGOUT,
+    ACTION.PASSWORD_CHANGED,
+    ACTION.PASSWORD_RESET_REQUESTED,
+    ACTION.PASSWORD_RESET_COMPLETED,
+    ACTION.PASSWORD_RESET_BY_ADMIN,
+    ACTION.USER_CREATED,
+    ACTION.USER_UPDATED,
+    ACTION.USER_ACTIVATED,
+    ACTION.USER_DEACTIVATED,
+    ACTION.USER_SUPER_ADMIN_CHANGED,
+    ACTION.USER_UNLOCKED,
+    ACTION.GROUP_CREATED,
+    ACTION.GROUP_UPDATED,
+    ACTION.GROUP_ACTIVATED,
+    ACTION.GROUP_DEACTIVATED,
+    ACTION.GROUP_MEMBER_ADDED,
+    ACTION.GROUP_MEMBER_REMOVED,
+    ACTION.ROLE_CREATED,
+    ACTION.ROLE_UPDATED,
+    ACTION.ROLE_DELETED,
+    ACTION.ACE_SET,
+    ACTION.ACE_REMOVED,
+    ACTION.INHERITANCE_CHANGED,
+    ACTION.API_KEY_ISSUED,
+    ACTION.API_KEY_REVOKED,
+    // A share link hands document access to whoever holds the URL, which makes
+    // creating one a security event, not a filing one.
+    ACTION.SHARE_LINK_CREATED,
+  ],
+  documents: [
+    ACTION.FOLDER_CREATED,
+    ACTION.FOLDER_DELETED,
+    ACTION.DOCUMENT_CREATED,
+    ACTION.DOCUMENT_VERSION_ADDED,
+    ACTION.DOCUMENT_DOWNLOADED,
+    ACTION.DOCUMENT_DELETED,
+    ACTION.DOCUMENT_RESTORED,
+    ACTION.DOCUMENT_PURGE_REQUESTED,
+    ACTION.DOCUMENT_METADATA_CHANGED,
+    ACTION.APPROVAL_REQUESTED,
+    ACTION.APPROVAL_DECIDED,
+    ACTION.VERSION_RESTORED,
+    ACTION.LEGAL_HOLD_CHANGED,
+    // The completion of DOCUMENT_PURGE_REQUESTED: the moment the content is
+    // actually destroyed. It belongs with the document's lifecycle — a
+    // documents view that shows the request but hides the destruction would
+    // give an incomplete account of exactly the event that matters most.
+    ACTION.BLOB_PURGED,
+    // Register events belong with the document's story: what happened to
+    // letter 483/2026 is a filing question, not a configuration one.
+    ACTION.MAIL_REGISTERED,
+    ACTION.MAIL_ROUTED,
+    ACTION.MAIL_ANNULLED,
+  ],
+  configuration: [
+    ACTION.SETTING_CHANGED,
+    ACTION.METADATA_DEFINITION_CHANGED,
+    ACTION.WEBHOOK_CHANGED,
+    ACTION.APPROVAL_TEMPLATE_CHANGED,
+    ACTION.MAIL_UNIT_CHANGED,
+    ACTION.MAIL_COUNTER_SET,
+  ],
 });
 
 /**
@@ -136,6 +224,7 @@ export async function record({ actor, action, targetType, targetId, folderId, de
 export async function listAudit({
   actorUserId = null,
   action = null,
+  actions = null,
   targetType = null,
   targetId = null,
   folderId = null,
@@ -148,6 +237,11 @@ export async function listAudit({
   const cursorIso = cursor?.occurredAt ? new Date(cursor.occurredAt).toISOString() : null;
   const cursorId = cursor?.auditId ?? null;
 
+  // A category's member list, from CATEGORY above. Null means no restriction;
+  // an empty list would render as `IN ()`, which SQL Server refuses, so it is
+  // treated the same as null — the route validates the category name anyway.
+  const inList = Array.isArray(actions) && actions.length > 0 ? actions : null;
+
   const result = await sql`
     SELECT TOP (${pageSize + 1})
            a.audit_id, a.occurred_at, a.actor_user_id, a.actor_username, a.action,
@@ -157,6 +251,7 @@ export async function listAudit({
       LEFT JOIN dbo.folders f ON f.folder_id = a.folder_id
      WHERE (${actorUserId} IS NULL OR a.actor_user_id = ${actorUserId})
        AND (${action} IS NULL OR a.action = ${action})
+       AND (${inList === null ? sql`1 = 1` : sql`a.action IN (${sql.join(inList.map((value) => sql`${value}`))})`})
        AND (${targetType} IS NULL OR a.target_type = ${targetType})
        AND (${targetId} IS NULL OR a.target_id = ${targetId})
        AND (${folderId} IS NULL OR a.folder_id = ${folderId})

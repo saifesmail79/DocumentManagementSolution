@@ -516,7 +516,8 @@ function readValue(row) {
  */
 export async function updateDocumentMetadata({ userId, documentId, title, typeId, labelId, fields }) {
   const found = await sql`
-    SELECT folder_id, title FROM dbo.documents WHERE document_id = ${documentId} AND is_deleted = 0
+    SELECT folder_id, title, legal_hold FROM dbo.documents
+     WHERE document_id = ${documentId} AND is_deleted = 0
   `.execute(db);
 
   const document = found.rows[0];
@@ -525,6 +526,17 @@ export async function updateDocumentMetadata({ userId, documentId, title, typeId
   const bits = await permissionBits(userId, document.folder_id);
   if (!has(bits, PERM.EDIT_META)) {
     return { ok: false, reason: has(bits, PERM.BROWSE) ? 'forbidden' : 'not_found' };
+  }
+
+  /*
+   * A held document is frozen, and for this operation the freeze is not even a
+   * policy choice: there is no metadata history anywhere in the schema, so an
+   * overwritten title or field value is destroyed as finally as an erased blob.
+   * A hold that guards the bytes while the fields they are filed under can be
+   * rewritten guards half the evidence.
+   */
+  if (Number(document.legal_hold) === 1) {
+    return { ok: false, reason: 'legal_hold' };
   }
 
   const newTitle = title === undefined ? null : String(title).trim();

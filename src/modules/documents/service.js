@@ -659,7 +659,7 @@ export async function isMultiFileDocument(documentId, executor = db) {
  */
 export async function addVersion({ userId, documentId, stream, filename, mimeType, comment }) {
   const found = await sql`
-    SELECT d.document_id, d.folder_id, d.title, d.current_version, d.created_at
+    SELECT d.document_id, d.folder_id, d.title, d.current_version, d.created_at, d.legal_hold
       FROM dbo.documents d
      WHERE d.document_id = ${documentId} AND d.is_deleted = 0
   `.execute(db);
@@ -668,6 +668,35 @@ export async function addVersion({ userId, documentId, stream, filename, mimeTyp
   if (!document) {
     stream.resume();
     return { ok: false, reason: 'not_found' };
+  }
+
+  /*
+   * A held document is frozen, additions included.
+   *
+   * The old version would survive a new upload — versions are immutable — but
+   * `current_version` would move, and everything that serves "the document"
+   * serves current_version: the download button, the preview, a share link. A
+   * hold that lets the answer to "what does this document say?" change while it
+   * stands is not preserving anything anyone means by the word.
+   */
+  if (Number(document.legal_hold) === 1) {
+    stream.resume();
+    return { ok: false, reason: 'legal_hold' };
+  }
+
+  /*
+   * The check-out lock's one promise is exactly this refusal.
+   *
+   * "حجز للتعديل يمنع الآخرين من رفع إصدار جديد" — and restoreVersion enforced
+   * it while this function, the ordinary way a new version arrives, did not. A
+   * lock that stops the rare path and waves the common one through protects
+   * nobody's work; two people editing "their" copy and the second upload
+   * silently winning is the precise collision check-out exists to prevent.
+   */
+  const { isLockedByOther, lockHolder } = await import('./state.js');
+  if (await isLockedByOther({ userId, documentId })) {
+    stream.resume();
+    return { ok: false, reason: 'locked', lockedBy: await lockHolder(documentId) };
   }
 
   const bits = await permissionBits(userId, document.folder_id);
@@ -922,7 +951,8 @@ export async function getDocument({ userId, documentId }) {
  */
 export async function deleteDocument({ userId, documentId }) {
   const found = await sql`
-    SELECT folder_id FROM dbo.documents WHERE document_id = ${documentId} AND is_deleted = 0
+    SELECT folder_id, legal_hold FROM dbo.documents
+     WHERE document_id = ${documentId} AND is_deleted = 0
   `.execute(db);
 
   const document = found.rows[0];
@@ -931,6 +961,20 @@ export async function deleteDocument({ userId, documentId }) {
   const bits = await permissionBits(userId, document.folder_id);
   if (!has(bits, PERM.DELETE)) {
     return { ok: false, reason: has(bits, PERM.BROWSE) ? 'forbidden' : 'not_found' };
+  }
+
+  /*
+   * Legal hold outranks the Delete permission, administrators included — that
+   * is the whole point of a hold.
+   *
+   * The bulk path has said so from the start; this path did not, so the same
+   * document that a batch refused to touch went quietly into the bin from its
+   * own row menu. A rule that must always hold has to sit on every road to the
+   * action, or it is not a rule — it is a property of whichever button was
+   * pressed.
+   */
+  if (Number(document.legal_hold) === 1) {
+    return { ok: false, reason: 'legal_hold' };
   }
 
   await sql`

@@ -16,7 +16,7 @@
  * one document — never a folder, never a subtree.
  */
 
-import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
+import { randomBytes, createHash, createHmac, timingSafeEqual } from 'node:crypto';
 
 import { db, sql } from '../../db/index.js';
 import { config } from '../../config/index.js';
@@ -181,26 +181,72 @@ function validateWebhook({ name, url, events }) {
   return { ok: true, clean, parsedUrl, selected };
 }
 
+// ── Signing ──────────────────────────────────────────────────────────────
+//
+// The secret is stored readable, unlike an API key. A key is presented to this
+// system, so a hash is enough to recognise it; a webhook secret is used by this
+// system to sign what it sends, and nothing can sign with a hash. Migration
+// 0017 has the history.
+//
+// Every delivery carries X-DMS-Timestamp (Unix seconds) and X-DMS-Signature
+// (`v1=` followed by hex HMAC-SHA256 over `${timestamp}.${body}`). The timestamp
+// is inside the signed text so a captured delivery cannot be replayed later
+// without the receiver noticing; a receiver should refuse a stale one.
+
+/** A fresh signing secret: shown once to the administrator, kept for signing. */
+const newSecret = () => randomBytes(32).toString('base64url');
+
+export const SIGNATURE_VERSION = 'v1';
+
+/**
+ * The X-DMS-Signature value for one delivery.
+ *
+ * Exported so the test that stands in for a receiver verifies the same bytes
+ * this sends, rather than a second reading of the recipe. docs/WEBHOOKS.md
+ * spells the recipe out for receivers written elsewhere.
+ */
+export function signDelivery({ secret, timestamp, body }) {
+  const digest = createHmac('sha256', secret).update(`${timestamp}.${body}`, 'utf8').digest('hex');
+  return `${SIGNATURE_VERSION}=${digest}`;
+}
+
 export async function createWebhook({ name, url, events, createdBy }) {
   const v = validateWebhook({ name, url, events });
   if (!v.ok) return v;
 
-  // Returned once. The receiver uses it to verify the HMAC on every delivery.
-  const secret = randomBytes(24).toString('base64url');
+  const secret = newSecret();
 
   const result = await sql`
-    INSERT INTO dbo.webhooks (name, url, events, secret_hash, created_by)
+    INSERT INTO dbo.webhooks (name, url, events, secret, created_by)
     OUTPUT INSERTED.webhook_id AS wid
-    VALUES (${v.clean}, ${v.parsedUrl.toString()}, ${v.selected.join(',')}, ${hash(secret)}, ${createdBy})
+    VALUES (${v.clean}, ${v.parsedUrl.toString()}, ${v.selected.join(',')}, ${secret}, ${createdBy})
   `.execute(db);
 
   return { ok: true, webhookId: String(result.rows[0].wid), secret };
 }
 
 /**
- * Updates the three mutable webhook fields (name, url, events). The secret_hash
- * is deliberately left untouched — the receiver keeps verifying with the secret
- * it already has, and rotating it would silently break every running consumer.
+ * Replaces the signing secret and returns the new one — once, as at creation.
+ *
+ * Rotation is the only way a webhook created before 0017 gains a signature,
+ * and the way out when a secret has leaked. Deliveries are signed at send
+ * time, so anything still queued goes out under the new secret: the receiver
+ * has to be updated before the next sweep or it will refuse them.
+ */
+export async function rotateWebhookSecret({ webhookId }) {
+  const secret = newSecret();
+  const result = await sql`
+    UPDATE dbo.webhooks SET secret = ${secret} WHERE webhook_id = ${webhookId}
+  `.execute(db);
+
+  return Number(result.numAffectedRows ?? 0) > 0 ? { ok: true, secret } : { ok: false, reason: 'not_found' };
+}
+
+/**
+ * Updates the three mutable webhook fields (name, url, events). The secret is
+ * deliberately left untouched — the receiver keeps verifying with the secret
+ * it already has, and rotating it here would silently break every running
+ * consumer. Rotation is its own, explicit action.
  */
 export async function updateWebhook({ webhookId, name, url, events }) {
   const v = validateWebhook({ name, url, events });
@@ -234,6 +280,9 @@ export async function setWebhookActive({ webhookId, active }) {
 export async function listWebhooks() {
   const result = await sql`
     SELECT w.webhook_id, w.name, w.url, w.events, w.is_active, w.created_at,
+           -- Whether deliveries carry a signature. Only a hook from before 0017
+           -- lacks one; the screen marks it so the secret gets rotated.
+           CASE WHEN w.secret IS NULL THEN 0 ELSE 1 END AS signed,
            (SELECT COUNT(*) FROM dbo.webhook_deliveries d
              WHERE d.webhook_id = w.webhook_id AND d.status = 2) AS delivered,
            (SELECT COUNT(*) FROM dbo.webhook_deliveries d
@@ -248,6 +297,7 @@ export async function listWebhooks() {
     url: row.url,
     events: String(row.events).split(',').filter(Boolean),
     isActive: Number(row.is_active) === 1,
+    signed: Number(row.signed) === 1,
     createdAt: row.created_at,
     delivered: Number(row.delivered),
     failed: Number(row.failed),
@@ -306,7 +356,7 @@ export async function emitEvent({ event, payload }) {
 export async function deliverPending({ max = 20, maxAttempts = 5 } = {}) {
   const pending = await sql`
     SELECT TOP (${max})
-           d.delivery_id, d.webhook_id, d.event, d.payload, d.attempts, w.url
+           d.delivery_id, d.webhook_id, d.event, d.payload, d.attempts, w.url, w.secret
       FROM dbo.webhook_deliveries d
       JOIN dbo.webhooks w ON w.webhook_id = d.webhook_id
      WHERE d.status IN (0, 3)
@@ -322,14 +372,24 @@ export async function deliverPending({ max = 20, maxAttempts = 5 } = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 15_000);
 
+    // Signed at send time, not at queue time, so a rotation covers what is
+    // still waiting. A hook from before 0017 has no secret and goes out
+    // unsigned; the administration screen says so.
+    const headers = {
+      'Content-Type': 'application/json',
+      'X-DMS-Event': row.event,
+      'X-DMS-Delivery': String(row.delivery_id),
+    };
+    if (row.secret) {
+      const timestamp = Math.floor(Date.now() / 1000);
+      headers['X-DMS-Timestamp'] = String(timestamp);
+      headers['X-DMS-Signature'] = signDelivery({ secret: row.secret, timestamp, body: row.payload });
+    }
+
     try {
       const response = await fetch(row.url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-DMS-Event': row.event,
-          'X-DMS-Delivery': String(row.delivery_id),
-        },
+        headers,
         body: row.payload,
         signal: controller.signal,
       });

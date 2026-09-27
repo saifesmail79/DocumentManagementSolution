@@ -58,6 +58,10 @@ const STATUS = {
   already_decided: 409,
   not_pending: 409,
   not_your_step: 403,
+  // The approver can no longer read the document, so the decision is refused.
+  no_document_access: 403,
+  // Someone on the template cannot read the document; the request is not saved.
+  approver_cannot_read: 409,
   no_template: 400,
   steps_required: 400,
   unknown_approver: 400,

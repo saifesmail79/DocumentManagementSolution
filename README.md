@@ -50,15 +50,17 @@ query time; skipping either silently halves recall. All text columns are `NVARCH
 npm install
 cp .env.example .env             # then fill it in — DB_SERVER and STORAGE_ROOT at minimum
 npm run migrate                  # idempotent; safe to re-run
-npm run create-admin -- --username admin --name "مدير النظام"
+npm run create-admin             # reads ADMIN_USERNAME / ADMIN_PASSWORD / ADMIN_DISPLAY_NAME from .env
+npm run create-admin -- --username admin --name "مدير النظام"   # or pass them as flags
 
 npm run install:client
 npm run build:client             # then http://localhost:3040 serves API + UI from one process
 npm run dev                      # or Ctrl+Shift+B in VS Code for API + Vite together
 ```
 
-`create-admin` prints a generated password once. The account is flagged
-`must_change_password`, so it works for a single login and nothing else until replaced.
+`create-admin` takes its defaults from the `ADMIN_*` lines in `.env`; flags override them.
+With no password from either place it generates one and prints it once, and the account is
+flagged `must_change_password`, so it works for a single login and nothing else until replaced.
 
 ### Tests
 

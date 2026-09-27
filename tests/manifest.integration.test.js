@@ -274,6 +274,36 @@ describe('storage manifests and mail', { skip: CONFIGURED ? false : target.reaso
     assert.equal(entry.isDeleted, true);
   });
 
+  /**
+   * A hold survives into the manifest, because the manifest is the recovery
+   * path: a database rebuilt from manifests that dropped this field would come
+   * back with every hold silently lifted — and a held, binned document would
+   * meet the purge sweep unprotected on the first tick after the restore. The
+   * one scenario holds exist for, litigation, is also the one in which a
+   * database is most likely rebuilt under pressure.
+   */
+  test('a legal hold and its reason survive into the manifest', async () => {
+    const documentId = await upload(cookie, 'legal', 'held.txt', 'دليل محجوز');
+    await sql`
+      UPDATE dbo.documents SET legal_hold = 1, legal_hold_reason = ${'قضية رقم ٩٩'}
+       WHERE document_id = ${documentId}
+    `.execute(db);
+
+    const { year, month } = currentPeriod();
+    await manifest.writeManifest(year, month);
+    const written = await manifest.readManifest(year, month);
+    const entry = written.entries.find((e) => e.documentId === String(documentId));
+
+    assert.ok(entry, 'the held document must be listed');
+    assert.equal(entry.legalHold, true, 'the hold itself must be recorded');
+    assert.equal(entry.legalHoldReason, 'قضية رقم ٩٩', 'and the reason with it');
+
+    // An unheld document says so explicitly rather than by omission, so a
+    // restorer never has to guess what an absent field meant in an old file.
+    const other = written.entries.find((e) => e.documentId !== String(documentId));
+    if (other) assert.equal(other.legalHold, false);
+  });
+
   test('regenerating covers every month that holds documents', async () => {
     const result = await manifest.writeAllManifests();
     assert.ok(result.manifests >= 1);

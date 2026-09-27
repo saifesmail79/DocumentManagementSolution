@@ -417,7 +417,7 @@ export function WebhooksTab() {
     setError(null);
     try {
       const result = await api.createWebhook(form);
-      setSecret(result.secret);
+      setSecret({ title: `سر التوقيع لـ "${form.name}"`, value: result.secret });
       setForm({ name: '', url: '', events: [] });
       await load();
     } catch (caught) {
@@ -438,9 +438,12 @@ export function WebhooksTab() {
       {secret ? (
         <Alert tone="success">
           <p className="mb-1.5 text-xs">
-            سر التوقيع يُعرض مرة واحدة — استخدمه للتحقق من صحة الطلبات الواردة:
+            {secret.title} — يُعرض مرة واحدة، انسخه الآن إلى النظام المستقبِل:
           </p>
-          <CopyField value={secret} label="نسخ سر التوقيع" />
+          <CopyField value={secret.value} label="نسخ سر التوقيع" />
+          <p className="mt-1.5 text-[11px]">
+            كل إرسال يحمل الرأسين X-DMS-Timestamp وX-DMS-Signature؛ طريقة التحقق في شرح هذا التبويب.
+          </p>
         </Alert>
       ) : null}
 
@@ -507,6 +510,18 @@ export function WebhooksTab() {
                         موقوف
                       </span>
                     ) : null}
+                    {/* Created before deliveries were signed: the secret it was
+                        issued with is unrecoverable, so it sends unsigned until
+                        the secret is rotated. Red, because a receiver that
+                        verifies signatures is rejecting everything from it. */}
+                    {!hook.signed ? (
+                      <span
+                        title="أُنشئ قبل اعتماد التوقيع، فإرسالاته تخرج بلا توقيع حتى يُصدَر له سر"
+                        className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-medium text-red-700"
+                      >
+                        بلا توقيع
+                      </span>
+                    ) : null}
                   </span>
                   <span className="block text-[11px] text-text-muted" dir="ltr">
                     {hook.events.join(', ')}
@@ -526,6 +541,36 @@ export function WebhooksTab() {
                   <ExpandableActions
                     isActive={hook.isActive}
                     onEdit={() => setEditingHook(hook)}
+                    customActions={[
+                      {
+                        key: 'rotate-secret',
+                        icon: KeyRound,
+                        title: hook.signed ? 'تدوير سر التوقيع' : 'إصدار سر التوقيع',
+                        bgClass: 'bg-violet-500/10',
+                        textClass: 'text-violet-600',
+                        hoverClass: 'hover:bg-violet-500/20',
+                        onClick: async () => {
+                          const confirmed = await confirm({
+                            title: hook.signed ? 'تدوير سر التوقيع' : 'إصدار سر التوقيع',
+                            message: hook.signed
+                              ? `السر الحالي لـ "${hook.name}" يتوقف عن العمل فوراً.`
+                              : `إرسالات "${hook.name}" تخرج موقّعة من الآن.`,
+                            detail:
+                              'السر الجديد يُعرض مرة واحدة. حدّث النظام المستقبِل قبل الإرسال التالي وإلا رفض ما يصله.',
+                            confirmLabel: hook.signed ? 'تدوير' : 'إصدار',
+                            variant: 'warning',
+                          });
+                          if (!confirmed) return;
+                          try {
+                            const result = await api.rotateWebhookSecret(hook.webhookId);
+                            setSecret({ title: `سر التوقيع الجديد لـ "${hook.name}"`, value: result.secret });
+                            await load();
+                          } catch (caught) {
+                            setError(describeError(caught, 'تعذر إصدار سر التوقيع.'));
+                          }
+                        },
+                      },
+                    ]}
                     onToggleActive={async () => {
                       if (hook.isActive) {
                         const confirmed = await confirm({

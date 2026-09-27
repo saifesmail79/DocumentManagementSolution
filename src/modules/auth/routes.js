@@ -12,6 +12,7 @@ import { config } from '../../config/index.js';
 import { moduleLogger } from '../../lib/logger.js';
 import { login, changePassword } from './service.js';
 import { resolveSession, touchSession, revokeSession, revokeAllSessions } from './sessions.js';
+import { resolveApiKey } from '../integration/service.js';
 import { requestReset, checkResetToken, completeReset } from './reset.js';
 import { record, ACTION } from '../audit/service.js';
 
@@ -39,6 +40,28 @@ export function registerAuth(app) {
    * ambient; authorisation is explicit.
    */
   app.addHook('onRequest', async (request) => {
+    /*
+     * API keys, checked before the cookie.
+     *
+     * `resolveApiKey` existed, was tested at the service level, and was wired to
+     * nothing — the administration screen issued keys that could authenticate no
+     * request, and every test passed because the tests called the function
+     * rather than the API. The same failure as the settings that stored and did
+     * nothing, in authentication clothing.
+     *
+     * The Bearer scheme, because it is what every HTTP client library speaks
+     * without configuration. A request that presents a key gets the key's
+     * answer, including "no": falling through to the cookie on a bad key would
+     * let a revoked key keep working from any browser that also has a session,
+     * which would make revocation untestable from the caller's side.
+     */
+    const authorization = request.headers.authorization;
+    if (authorization?.startsWith('Bearer ')) {
+      const viaKey = await resolveApiKey(authorization.slice(7).trim());
+      if (viaKey) request.user = viaKey;
+      return;
+    }
+
     const token = request.cookies?.[config.auth.cookieName];
     if (!token) return;
 

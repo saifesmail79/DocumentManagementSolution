@@ -44,7 +44,7 @@ import { ocrStatus } from '../extraction/ocr.js';
 import { listUnsearchable, listWaiting, workerHealth } from '../extraction/worker.js';
 import { getSetting } from '../settings/service.js';
 import { verifyMail } from '../../lib/mailer.js';
-import { listAudit, auditActions, record, ACTION } from '../audit/service.js';
+import { listAudit, auditActions, record, ACTION, CATEGORY } from '../audit/service.js';
 import {
   purgeDeletedDocuments,
   purgeOrphanedUploads,
@@ -415,7 +415,7 @@ export async function adminRoutes(app) {
 
     /** The audit trail. */
     identity.get('/audit', async (request, reply) => {
-      const { actor, action, targetType, targetId, folderId, from, to, limit, cursor } =
+      const { actor, action, category, targetType, targetId, folderId, from, to, limit, cursor } =
         request.query ?? {};
 
       // A present-but-non-numeric actor id cannot match any user; silently
@@ -425,9 +425,16 @@ export async function adminRoutes(app) {
         return reply.code(400).send({ error: 'invalid_actor' });
       }
 
+      // Same reasoning for the category: a name the server does not know must
+      // refuse, not quietly show everything under a heading that says "security".
+      if (category !== undefined && category !== '' && !CATEGORY[category]) {
+        return reply.code(400).send({ error: 'invalid_category' });
+      }
+
       const page = await listAudit({
         actorUserId: parseId(actor),
         action: action || null,
+        actions: category ? CATEGORY[category] : null,
         targetType: targetType || null,
         targetId: targetId || null,
         folderId: parseId(folderId),

@@ -32,6 +32,9 @@ export const KIND = Object.freeze({
   APPROVAL_ESCALATED: 'approval.escalated',
   DOCUMENT_EXPIRING: 'document.expiring',
   DOCUMENT_SHARED: 'document.shared',
+  // A letter forwarded to a unit lands in every member's inbox: the transfer
+  // IS the notification, so nobody has to remember to watch a folder.
+  MAIL_ASSIGNED: 'mail.assigned',
 });
 
 /**

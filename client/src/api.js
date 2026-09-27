@@ -331,6 +331,9 @@ export const api = {
   setWebhookActive: (webhookId, active) =>
     request(`/api/webhooks/${webhookId}/active`, { method: 'POST', body: { active } }),
   deleteWebhook: (webhookId) => request(`/api/webhooks/${webhookId}`, { method: 'DELETE' }),
+  /** Issues a new signing secret, shown once; the old one stops signing at the next sweep. */
+  rotateWebhookSecret: (webhookId) =>
+    request(`/api/webhooks/${webhookId}/secret`, { method: 'POST', body: {} }),
   exportCsvUrl: (folderId) => `/api/export/metadata.csv${folderId ? `?folderId=${folderId}` : ''}`,
 
   settings: {
@@ -418,6 +421,64 @@ export const api = {
     audit: (params = '') => request(`/api/admin/audit${params ? `?${params}` : ''}`),
     /** The actions actually present in the log, so a filter offers only what exists. */
     auditActions: () => request('/api/admin/audit/actions'),
+  },
+
+  /**
+   * The correspondence register (الوارد والصادر). Every call except `status`
+   * answers "disabled" while the module's switch is off.
+   */
+  correspondence: {
+    status: () => request('/api/correspondence/status'),
+    queue: ({ scope, q } = {}) => {
+      const params = new URLSearchParams();
+      if (scope) params.set('scope', scope);
+      if (q) params.set('q', q);
+      const query = params.toString();
+      return request(`/api/correspondence/queue${query ? `?${query}` : ''}`);
+    },
+    intake: () => request('/api/correspondence/intake'),
+    followUp: () => request('/api/correspondence/followup'),
+    letters: ({ direction, year, status, q } = {}) => {
+      const params = new URLSearchParams();
+      if (direction) params.set('direction', direction);
+      if (year) params.set('year', String(year));
+      if (status) params.set('status', status);
+      if (q) params.set('q', q);
+      const query = params.toString();
+      return request(`/api/correspondence/letters${query ? `?${query}` : ''}`);
+    },
+    letter: (letterId) => request(`/api/correspondence/letters/${letterId}`),
+    forDocument: (documentId) => request(`/api/correspondence/documents/${documentId}/letter`),
+    register: (body) => request('/api/correspondence/register', { method: 'POST', body }),
+    addTransfers: (letterId, transfers) =>
+      request(`/api/correspondence/letters/${letterId}/transfers`, {
+        method: 'POST',
+        body: { transfers },
+      }),
+    annul: (letterId, reason) =>
+      request(`/api/correspondence/letters/${letterId}/annul`, { method: 'POST', body: { reason } }),
+    setStatus: (letterId, status) =>
+      request(`/api/correspondence/letters/${letterId}/status`, { method: 'POST', body: { status } }),
+    receive: (transferId) =>
+      request(`/api/correspondence/transfers/${transferId}/receive`, { method: 'POST', body: {} }),
+    close: (transferId, note) =>
+      request(`/api/correspondence/transfers/${transferId}/close`, { method: 'POST', body: { note } }),
+    cancelTransfer: (transferId, reason) =>
+      request(`/api/correspondence/transfers/${transferId}/cancel`, {
+        method: 'POST',
+        body: { reason },
+      }),
+    units: (all) => request(`/api/admin/correspondence/units${all ? '?all=true' : ''}`),
+    createUnit: (body) => request('/api/admin/correspondence/units', { method: 'POST', body }),
+    updateUnit: (unitId, body) =>
+      request(`/api/admin/correspondence/units/${unitId}`, { method: 'PATCH', body }),
+    setUnitActive: (unitId, active) =>
+      request(`/api/admin/correspondence/units/${unitId}/active`, {
+        method: 'POST',
+        body: { active },
+      }),
+    counters: (year) => request(`/api/admin/correspondence/counters${year ? `?year=${year}` : ''}`),
+    setCounter: (body) => request('/api/admin/correspondence/counters', { method: 'PUT', body }),
   },
 
   /** The document-recognition pilot. Every call answers "disabled" while its switch is off. */
