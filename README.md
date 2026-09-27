@@ -83,12 +83,18 @@ src/
     migrations/
   storage/     Option C path building and the filesystem driver
   lib/         arabic.js — the normalization pipeline
-  modules/     auth, tree, documents, search, extraction, admin, metadata, audit
-  cli/         create-admin
+  modules/     auth, tree, documents, search, extraction, admin, metadata, audit,
+               workflow, integration, renditions, ocr, classification, correspondence
+  cli/         create-admin, restore-from-storage, seed-correspondence-demo
 client/        React + Vite, RTL, Tailwind tokens from the UI standards
 docs/
+  PENDING.md                  open questions for the institute, unbuilt phases, loose ends
   UI_UX_AGENT_STANDARDS.md    RTL-first UI standards — followed strictly
   SCAN_BRIDGE_INTEGRATION.md  the desktop scanner helper's API
+  EXTERNAL_TOOLCHAIN.md       Tesseract, OCRmyPDF, Ghostscript, LibreOffice on Windows
+  CLASSIFICATION_PILOT.md     the document-recognition pilot and what it measured
+  CORRESPONDENCE_TEST_GUIDE.md  walking the mail room end to end with the demo seed
+  WEBHOOKS.md                 subscribing to events and verifying the signature
 tests/
 ```
 
