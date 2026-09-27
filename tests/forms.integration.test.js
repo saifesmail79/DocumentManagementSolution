@@ -452,16 +452,6 @@ describe('official letter formats', { skip: CONFIGURED ? false : target.reason }
     assert.equal(external.json().error, 'template_invalid');
     assert.match(external.json().detail, /image/);
 
-    // A hyperlink is external too, and must be accepted: refusing it refused
-    // the institute's real letterhead (a website and a mail address in the
-    // footer) while blocking nothing that is ever fetched.
-    const linked = await uploadTemplate(
-      boss,
-      { name: 'روابط' },
-      { filename: 'x.docx', buffer: buildDocx({ body: ['{{a}}'], hyperlinkRel: true }) },
-    );
-    assert.equal(linked.statusCode, 201, JSON.stringify(linked.json()));
-
     const entities = await uploadTemplate(
       boss,
       { name: 'كيانات' },
@@ -570,6 +560,19 @@ describe('official letter formats', { skip: CONFIGURED ? false : target.reason }
     // Nothing was stored for any of them.
     const rows = await sql`SELECT COUNT(*) AS n FROM dbo.form_templates`.execute(db);
     assert.equal(Number(rows.rows[0].n), 0);
+  });
+
+  test('a hyperlink relationship is external and is accepted', async () => {
+    // Every institute letterhead carries a website and a mail address in its
+    // footer: external relationships of the hyperlink kind, which nothing ever
+    // fetches. Refusing them refused the real templates while blocking nothing.
+    // Placed after the refusal test above, which counts on no template existing.
+    const linked = await uploadTemplate(
+      boss,
+      { name: 'روابط' },
+      { filename: 'x.docx', buffer: buildDocx({ body: ['{{a}}'], hyperlinkRel: true }) },
+    );
+    assert.equal(linked.statusCode, 201, JSON.stringify(linked.json()));
   });
 
   test('a letterhead Word itself saved is accepted, paragraph ids and English prose and all', async () => {
