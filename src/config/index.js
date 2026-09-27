@@ -343,6 +343,12 @@ export const config = Object.freeze({
     maxConcurrent: integer('FORMS_MAX_CONCURRENT', 2, { min: 1, max: 8 }),
     /** The generate request is text values only. */
     bodyLimitBytes: integer('FORMS_BODY_LIMIT_BYTES', 1024 * 1024, { min: 65_536 }),
+    /**
+     * How long a template upload may send nothing before it is given up. A
+     * browser reading the file from an unreachable network share sends the
+     * headers and then stalls; without this the request stays open for good.
+     */
+    uploadIdleMs: integer('FORMS_UPLOAD_IDLE_MS', 30_000, { min: 5000 }),
   }),
 
   signing: Object.freeze({

@@ -18,10 +18,11 @@ export class ApiError extends Error {
   }
 }
 
-async function request(path, { method = 'GET', body, headers = {}, raw } = {}) {
+async function request(path, { method = 'GET', body, headers = {}, raw, signal } = {}) {
   const response = await fetch(path, {
     method,
     credentials: 'include',
+    signal,
     headers: body && !raw ? { 'Content-Type': 'application/json', ...headers } : headers,
     body: raw ? body : body ? JSON.stringify(body) : undefined,
   });
@@ -438,11 +439,12 @@ export const api = {
     adminStatus: () => request('/api/admin/forms/status'),
     adminTemplates: () => request('/api/admin/forms/templates'),
     /** formData: name, description, typeId, approvalTemplateId, folderIds (JSON array of folder ids), then the .docx as `file`. */
-    adminCreate: (formData) => request('/api/admin/forms/templates', { method: 'POST', body: formData, raw: true }),
+    adminCreate: (formData, { signal } = {}) =>
+      request('/api/admin/forms/templates', { method: 'POST', body: formData, raw: true, signal }),
     adminUpdate: (templateId, body) =>
       request(`/api/admin/forms/templates/${templateId}`, { method: 'PATCH', body }),
-    adminReplaceFile: (templateId, formData) =>
-      request(`/api/admin/forms/templates/${templateId}/file`, { method: 'PUT', body: formData, raw: true }),
+    adminReplaceFile: (templateId, formData, { signal } = {}) =>
+      request(`/api/admin/forms/templates/${templateId}/file`, { method: 'PUT', body: formData, raw: true, signal }),
     adminSetAccess: (templateId, principalIds) =>
       request(`/api/admin/forms/templates/${templateId}/access`, { method: 'PUT', body: { principalIds } }),
     /** The folders a letter from this template may be filed into; [] means any folder the person may upload into. */

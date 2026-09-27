@@ -32,7 +32,10 @@ of 2026-09-27, so you can look before you build.
 
 1. Press **نموذج جديد**: name, description, optional document type, optional
    approval template (starts automatically after each letter), the folders
-   its letters may be filed into (none, one or several), then the file. A file with a stray `{{` or a placeholder
+   its letters may be filed into (none, one or several), then the file.
+   Choose the file from this computer: a file on a network drive may be slow
+   or never open, in which case the dialog says so within seconds and the
+   «إيقاف الرفع» button ends the attempt; copy it locally and try again. A file with a stray `{{` or a placeholder
    named like `{{@x}}` is refused with the reason.
 2. The template starts **disabled**. The fields table lists every placeholder
    found: give each an Arabic label, tick «متعدد الأسطر» for the body, «إلزامي»

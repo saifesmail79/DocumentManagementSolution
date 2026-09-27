@@ -78,6 +78,58 @@ import { api, ApiError } from '../api.js';
 import { formatBytes, formatDate } from '../format.js';
 import { useTree } from '../TreeContext.jsx';
 import { Alert, Button, Card, EmptyState, Spinner, TextField } from './ui.jsx';
+
+/** Mirrors config.forms.maxTemplateBytes on the server. */
+const MAX_TEMPLATE_BYTES = 20 * 1024 * 1024;
+/** How long the browser may take to hand over the first bytes of the chosen file. */
+const FILE_PROBE_MS = 10_000;
+/** What the person reads when an upload is stopped, by them or by the clock. */
+const ABORTED_MESSAGE =
+  'توقف الرفع قبل اكتماله. إن كان الملف على قرص شبكة فانسخه إلى هذا الجهاز أولاً ثم أعد المحاولة.';
+/** The server gave up waiting for the file, or the connection fell; the browser reports neither by name. */
+const DROPPED_MESSAGE =
+  'انقطع الاتصال أثناء رفع الملف ولم يُحفظ النموذج. إن كان الملف على قرص شبكة فانسخه إلى هذا الجهاز ثم أعد المحاولة.';
+
+function withTimeout(promise, ms, code) {
+  let timer;
+  const expiry = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(code);
+      error.code = code;
+      reject(error);
+    }, ms);
+  });
+  return Promise.race([promise, expiry]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Proves the browser can read the file before a single byte is sent.
+ *
+ * A file chosen from a network share can take seconds to open, or never open
+ * at all, and a fetch that is waiting on it looks exactly like a server that
+ * hangs. Reading the first four bytes fails fast and says which it was; they
+ * also say whether this is a Word package at all (a .docx is a zip, and a zip
+ * begins with "PK"), so the obvious mistakes are caught before the upload.
+ * Returns an Arabic message, or null when the file is fine.
+ */
+async function probeFile(file) {
+  if (!file) return 'اختر ملف النموذج بصيغة .docx.';
+  if (!/\.docx$/i.test(file.name)) return 'الصيغة غير مقبولة: النموذج ملف Word بامتداد .docx.';
+  if (file.size > MAX_TEMPLATE_BYTES) return 'الملف أكبر من الحد المسموح به لملفات النماذج.';
+  if (file.size < 4) return 'الملف فارغ.';
+  try {
+    const head = new Uint8Array(await withTimeout(file.slice(0, 4).arrayBuffer(), FILE_PROBE_MS, 'file_unreadable'));
+    if (head[0] !== 0x50 || head[1] !== 0x4b) return 'الملف ليس ملف Word سليماً (.docx).';
+    return null;
+  } catch {
+    return 'تعذر قراءة الملف من موقعه. إن كان على قرص شبكة فانسخه إلى هذا الجهاز ثم اختره من جديد.';
+  }
+}
+
+/** Upload budget: a minute, plus a second per 100 KB, never more than five minutes. */
+function uploadBudgetMs(bytes) {
+  return Math.min(60_000 + Math.ceil(bytes / 102_400) * 1000, 300_000);
+}
 import { Modal } from './Modal.jsx';
 import TabIntro from './TabIntro.jsx';
 import ExpandableActions from './ExpandableActions.jsx';
@@ -105,6 +157,9 @@ function describeError(caught, fallback) {
     no_file: 'اختر ملف النموذج بصيغة .docx.',
     blocked_extension: 'الصيغة غير مقبولة: النموذج ملف Word بامتداد .docx.',
     too_large: 'الملف أكبر من الحد المسموح به لملفات النماذج.',
+    upload_stalled:
+      'توقف وصول الملف إلى الخادم قبل اكتماله. إن كان على قرص شبكة فانسخه إلى هذا الجهاز ثم أعد المحاولة.',
+    upload_aborted: 'أُوقف الرفع قبل اكتماله.',
     template_invalid: 'ملف النموذج غير سليم أو يحتوي ما لا يُقبل.',
     fields_unlabelled: 'لا يُفعَّل النموذج قبل تسمية كل حقوله بالعربية.',
     type_requires_fields: 'نوع الوثيقة يطلب حقولاً إلزامية لا يملؤها أي حقل في النموذج.',
@@ -280,9 +335,21 @@ export default function FormsAdminTab() {
     setNotice(null);
     setDiff(null);
     try {
+      const problem = await probeFile(file);
+      if (problem) {
+        setError(problem);
+        return;
+      }
       const form = new FormData();
       form.append('file', file, file.name);
-      const result = await api.forms.adminReplaceFile(template.templateId, form);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), uploadBudgetMs(file.size));
+      let result;
+      try {
+        result = await api.forms.adminReplaceFile(template.templateId, form, { signal: controller.signal });
+      } finally {
+        clearTimeout(timer);
+      }
       // `deactivated` names the type's required fields that lost their only
       // placeholder; when it is present the server has already set the template
       // inactive, and that outcome is read off the same alert as the rest of the
@@ -297,6 +364,14 @@ export default function FormsAdminTab() {
       );
       await load();
     } catch (caught) {
+      if (caught?.name === 'AbortError') {
+        setError(ABORTED_MESSAGE);
+        return;
+      }
+      if (!(caught instanceof ApiError)) {
+        setError(DROPPED_MESSAGE);
+        return;
+      }
       setError(describeError(caught, 'تعذر استبدال ملف النموذج.'));
     }
   }
@@ -721,11 +796,31 @@ function TemplateDialog({ draft, types, approvals, folderPathMap, onClose, onSav
     }));
   }
 
+  // The upload in flight, so «إيقاف» and closing the dialog can end it.
+  const abortRef = useRef(null);
+
+  function stopUpload() {
+    abortRef.current?.abort();
+  }
+
+  function closeDialog() {
+    stopUpload();
+    onClose();
+  }
+
   async function save() {
     setBusy(true);
     setError(null);
     try {
       if (creating) {
+        // Before anything is sent: a file the browser cannot read, from a
+        // network share it cannot reach, would otherwise look like a server
+        // that never answers.
+        const problem = await probeFile(form.file);
+        if (problem) {
+          setError(problem);
+          return;
+        }
         const body = new FormData();
         // Scalars before the file: the server reads one multipart stream in
         // order and cannot see a field that arrives after the file part.
@@ -739,7 +834,17 @@ function TemplateDialog({ draft, types, approvals, folderPathMap, onClose, onSav
         if (folderIds.length) body.append('folderIds', JSON.stringify(folderIds));
         body.append('file', form.file, form.file.name);
 
-        await api.forms.adminCreate(body);
+        // Bounded and stoppable: the budget grows with the file, and the
+        // «إيقاف» button or closing the dialog aborts it.
+        const controller = new AbortController();
+        abortRef.current = controller;
+        const timer = setTimeout(() => controller.abort(), uploadBudgetMs(form.file.size));
+        try {
+          await api.forms.adminCreate(body, { signal: controller.signal });
+        } finally {
+          clearTimeout(timer);
+          abortRef.current = null;
+        }
         onSaved(`أُضيف النموذج «${form.name.trim()}». سمِّ حقوله ثم حدّد من يستخدمه قبل تفعيله.`);
       } else {
         const result = await api.forms.adminUpdate(draft.templateId, {
@@ -782,6 +887,14 @@ function TemplateDialog({ draft, types, approvals, folderPathMap, onClose, onSav
       }
       onClose();
     } catch (caught) {
+      if (caught?.name === 'AbortError') {
+        setError(ABORTED_MESSAGE);
+        return;
+      }
+      if (creating && !(caught instanceof ApiError)) {
+        setError(DROPPED_MESSAGE);
+        return;
+      }
       setError(
         creating && caught instanceof ApiError && caught.code === 'not_found'
           ? describeMissingReference(caught)
@@ -797,7 +910,7 @@ function TemplateDialog({ draft, types, approvals, folderPathMap, onClose, onSav
   return (
     <Modal
       open={draft !== null}
-      onClose={onClose}
+      onClose={closeDialog}
       title={creating ? 'نموذج جديد' : `تعديل النموذج: ${draft?.name ?? ''}`}
       subtitle={
         creating
@@ -809,10 +922,11 @@ function TemplateDialog({ draft, types, approvals, folderPathMap, onClose, onSav
       footer={
         <>
           <Button icon={Save} onClick={save} disabled={busy || !complete}>
-            حفظ
+            {busy && creating ? 'جارٍ رفع الملف…' : 'حفظ'}
           </Button>
-          <Button variant="secondary" onClick={onClose} disabled={busy}>
-            إلغاء
+          {/* Never disabled: while an upload runs this is the way out of it. */}
+          <Button variant="secondary" onClick={busy ? stopUpload : closeDialog}>
+            {busy && creating ? 'إيقاف الرفع' : 'إلغاء'}
           </Button>
         </>
       }

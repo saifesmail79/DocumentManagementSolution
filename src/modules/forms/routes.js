@@ -95,10 +95,26 @@ const STATUS = {
   conversion_failed: 502,
   blocked_extension: 415,
   too_large: 413,
+  upload_stalled: 408,
+  upload_aborted: 400,
 };
 
 function refuse(reply, result) {
   return reply.code(STATUS[result.reason] ?? 400).send({ ...result, error: result.reason });
+}
+
+/**
+ * Refuses an upload whose bytes will never arrive, and then hangs up.
+ *
+ * The refusal alone is not enough: the request declared a body it never
+ * finished sending, so the connection would otherwise stay open waiting for
+ * the rest, and a browser may not show the answer until the connection ends.
+ * Closing it is what turns a frozen dialog into a message.
+ */
+function refuseAndClose(request, reply, result) {
+  reply.header('Connection', 'close');
+  reply.raw.once('finish', () => request.raw.destroy());
+  return refuse(reply, result);
 }
 
 /** Template ids are int; document and folder ids are bigint and stay strings. */
@@ -181,11 +197,32 @@ async function readTemplateUpload(request) {
   if (!file) return { ok: false, reason: 'no_file' };
 
   const limit = config.forms.maxTemplateBytes;
-  const buffer = await new Promise((resolve, reject) => {
+  const idleMs = config.forms.uploadIdleMs;
+  const outcome = await new Promise((resolve) => {
     const chunks = [];
     let bytes = 0;
     let refused = false;
+    let settled = false;
+    let idle = null;
+
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(idle);
+      resolve(value);
+    };
+    // A browser reading the file from a share it cannot reach sends the
+    // headers and then nothing. Waiting for its `end` would hold this request
+    // open for good; after a silence this long the upload is given up and the
+    // route says so, so the person is told rather than left watching.
+    const armIdle = () => {
+      clearTimeout(idle);
+      idle = setTimeout(() => finish({ failed: 'upload_stalled' }), idleMs);
+    };
+    armIdle();
+
     file.file.on('data', (chunk) => {
+      armIdle();
       if (refused) return;
       bytes += chunk.length;
       if (bytes > limit) {
@@ -196,12 +233,15 @@ async function readTemplateUpload(request) {
       }
       chunks.push(chunk);
     });
-    file.file.on('end', () => resolve(refused ? null : Buffer.concat(chunks)));
-    file.file.on('error', reject);
+    file.file.on('end', () => finish({ buffer: refused ? null : Buffer.concat(chunks) }));
+    file.file.on('error', (error) => finish({ failed: 'upload_aborted', error }));
+    // A client that goes away mid-file closes the stream without `end`.
+    file.file.on('close', () => finish({ failed: 'upload_aborted' }));
   });
 
-  if (buffer === null) return { ok: false, reason: 'too_large', detail: `الحد ${limit} بايت` };
-  return { ok: true, fields, filename: file.filename, buffer };
+  if (outcome.failed) return { ok: false, reason: outcome.failed };
+  if (outcome.buffer === null) return { ok: false, reason: 'too_large', detail: `الحد ${limit} بايت` };
+  return { ok: true, fields, filename: file.filename, buffer: outcome.buffer };
 }
 
 /** Mounted under /api/forms. */
@@ -328,7 +368,11 @@ export async function formsAdminRoutes(app) {
 
   app.post('/templates', { preHandler: requireEnabled }, async (request, reply) => {
     const upload = await readTemplateUpload(request);
-    if (!upload.ok) return refuse(reply, upload);
+    if (!upload.ok) {
+      return upload.reason === 'upload_stalled'
+        ? refuseAndClose(request, reply, upload)
+        : refuse(reply, upload);
+    }
 
     const folderIds = parseFolderIdsField(upload.fields.folderIds);
     if (!folderIds.ok) {
@@ -398,7 +442,11 @@ export async function formsAdminRoutes(app) {
     if (templateId === null) return reply.code(400).send({ error: 'invalid_template_id' });
 
     const upload = await readTemplateUpload(request);
-    if (!upload.ok) return refuse(reply, upload);
+    if (!upload.ok) {
+      return upload.reason === 'upload_stalled'
+        ? refuseAndClose(request, reply, upload)
+        : refuse(reply, upload);
+    }
 
     const result = await replaceTemplateFile({
       templateId,
