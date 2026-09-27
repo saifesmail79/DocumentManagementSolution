@@ -26,7 +26,9 @@ import {
   GitBranch,
   Inbox,
   KeyRound,
+  LayoutTemplate,
   Mailbox,
+  PenLine,
   ScanSearch,
   ScrollText,
   Search,
@@ -58,6 +60,7 @@ export const ADMIN_TABS = [
   { key: 'diagnostics', label: 'التشخيص', icon: Activity },
   { key: 'classification', label: 'التعرّف التلقائي (تجريبي)', icon: ScanSearch },
   { key: 'correspondence', label: 'المراسلات', icon: Mailbox },
+  { key: 'forms', label: 'النماذج', icon: LayoutTemplate },
 ];
 
 /** The correspondence views, in the order they are shown. */
@@ -123,6 +126,15 @@ export const MODULES = [
     tabs: CORRESPONDENCE_TABS,
   },
   {
+    key: 'forms',
+    to: '/forms',
+    label: 'النماذج',
+    icon: LayoutTemplate,
+    description: 'إنشاء كتاب رسمي من نموذج معتمد: املأ الحقول فيولّد النظام الكتاب ويودعه في مجلده.',
+    // Only for someone with a usable template: the menu asks the server.
+    requires: 'forms',
+  },
+  {
     key: 'search',
     to: '/search',
     label: 'البحث',
@@ -155,8 +167,15 @@ export const MODULES = [
  * refuses a non-administrator on its own, so a tile that leaked through would
  * produce a refusal rather than access.
  */
-export function visibleModules(user) {
-  return MODULES.filter((module) => !module.superAdmin || user?.isSuperAdmin);
+export function visibleModules(user, capabilities = {}) {
+  return MODULES.filter(
+    (module) =>
+      (!module.superAdmin || user?.isSuperAdmin)
+      // A module that names a capability is offered only to someone who holds
+      // it — the same rule `visibleTabs` applies inside a module. A tile for
+      // a screen the person cannot use teaches them the menu is broken.
+      && (!module.requires || capabilities?.[module.requires] === true),
+  );
 }
 
 /**
@@ -278,5 +297,17 @@ export const MOST_PERMISSIVE_STATUS = Object.freeze({
 });
 
 export function moduleForPath(pathname, user) {
-  return visibleModules(user).find((module) => pathname.startsWith(module.to)) ?? null;
+  /*
+   * Not `visibleModules`: that answers «what may I be offered», which is gated on
+   * capabilities the shell never fetches — so a capability-gated module such as
+   * النماذج matched nothing and its screens lost the breadcrumb segment every
+   * other screen shows. This answers «where am I», about a page the router has
+   * already opened, and the route itself is the access control. الإدارة is still
+   * withheld, because a non-administrator is never on one of its pages.
+   */
+  return (
+    MODULES.find(
+      (module) => pathname.startsWith(module.to) && (!module.superAdmin || user?.isSuperAdmin),
+    ) ?? null
+  );
 }

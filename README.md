@@ -84,7 +84,8 @@ src/
   storage/     Option C path building and the filesystem driver
   lib/         arabic.js — the normalization pipeline
   modules/     auth, tree, documents, search, extraction, admin, metadata, audit,
-               workflow, integration, renditions, ocr, classification, correspondence
+               workflow, integration, renditions, ocr, classification, correspondence,
+               forms (Word letter templates), signing (ink on a page, as a new version)
   cli/         create-admin, restore-from-storage, seed-correspondence-demo
 client/        React + Vite, RTL, Tailwind tokens from the UI standards
 docs/
@@ -94,6 +95,7 @@ docs/
   EXTERNAL_TOOLCHAIN.md       Tesseract, OCRmyPDF, Ghostscript, LibreOffice on Windows
   CLASSIFICATION_PILOT.md     the document-recognition pilot and what it measured
   CORRESPONDENCE_TEST_GUIDE.md  walking the mail room end to end with the demo seed
+  FORMS_SIGNING_TEST_GUIDE.md   letter templates and tablet signing, step by step
   WEBHOOKS.md                 subscribing to events and verifying the signature
 tests/
 ```

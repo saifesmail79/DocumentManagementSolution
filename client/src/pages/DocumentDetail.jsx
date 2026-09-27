@@ -16,6 +16,7 @@ import {
   Share2,
   ScanSearch,
   Mailbox,
+  PenLine,
 } from 'lucide-react';
 
 import { api, ApiError } from '../api.js';
@@ -36,6 +37,7 @@ import {
 } from '../components/DocumentPanels.jsx';
 import ClassificationPanel from '../components/ClassificationPanel.jsx';
 import CorrespondencePanel from '../components/CorrespondencePanel.jsx';
+import SigningPanel from '../components/SigningPanel.jsx';
 import { useAuth } from '../auth.jsx';
 
 /**
@@ -74,6 +76,8 @@ const SECTIONS = [
   // Same contract for the correspondence register: the panel reports whether
   // the module's switch is on, and the tab exists only while it is.
   { key: 'correspondence', label: 'المراسلة', icon: Mailbox, mail: true },
+  // And for ink signing: the panel reports the switch, the tab follows it.
+  { key: 'signing', label: 'التوقيع', icon: PenLine, ink: true, wide: true },
 ];
 
 /**
@@ -110,6 +114,8 @@ export default function DocumentDetail() {
   const [pilotEnabled, setPilotEnabled] = useState(false);
   // The correspondence tab follows the same rule, from its own switch.
   const [mailEnabled, setMailEnabled] = useState(false);
+  // And the signing tab, from its own switch.
+  const [inkEnabled, setInkEnabled] = useState(false);
 
   /*
    * The help follows the open tab, as it does on the administration screen.
@@ -382,7 +388,9 @@ export default function DocumentDetail() {
       <div className="flex flex-row flex-wrap gap-1 border-b border-border">
         {SECTIONS.filter(
           (section) =>
-            (!section.pilot || pilotEnabled) && (!section.mail || mailEnabled),
+            (!section.pilot || pilotEnabled)
+            && (!section.mail || mailEnabled)
+            && (!section.ink || inkEnabled),
         ).map((section) => {
           const state = sectionState[section.key] ?? {};
           const active = tab === section.key;
@@ -643,6 +651,7 @@ export default function DocumentDetail() {
           that opens it is only offered once it has. */}
       <div className={tab === 'classification' ? 'max-w-3xl' : 'hidden'}>
         <ClassificationPanel
+          key={documentId}
           documentId={documentId}
           canRead={document.canRead}
           onOpen={(id) => navigate(`/documents/${id}`)}
@@ -654,11 +663,24 @@ export default function DocumentDetail() {
       {/* Same arrangement for the correspondence register. */}
       <div className={tab === 'correspondence' ? 'max-w-3xl' : 'hidden'}>
         <CorrespondencePanel
+          key={documentId}
           documentId={documentId}
           documentTitle={document.title}
           canRead={document.canRead}
           onCount={counter('correspondence')}
           onEnabled={setMailEnabled}
+        />
+      </div>
+
+      {/* Same arrangement for ink signing. Wide: a page is drawn on at its full width. */}
+      <div className={tab === 'signing' ? '' : 'hidden'}>
+        <SigningPanel
+          key={documentId}
+          documentId={documentId}
+          canRead={document.canRead}
+          onChanged={load}
+          onCount={counter('signing')}
+          onEnabled={setInkEnabled}
         />
       </div>
     </div>

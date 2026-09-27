@@ -424,6 +424,51 @@ export const api = {
   },
 
   /**
+   * Letter formats (النماذج): Word templates merged into new documents. Every
+   * call except `status` answers "disabled" while the module's switch is off.
+   * The admin calls need a super-admin session.
+   */
+  forms: {
+    status: () => request('/api/forms/status'),
+    templates: () => request('/api/forms/templates'),
+    template: (templateId) => request(`/api/forms/templates/${templateId}`),
+    /** body: { templateId, folderId, title, values: { placeholder: value } } */
+    generate: (body) => request('/api/forms/generate', { method: 'POST', body }),
+
+    adminStatus: () => request('/api/admin/forms/status'),
+    adminTemplates: () => request('/api/admin/forms/templates'),
+    /** formData: name, description, typeId, approvalTemplateId, defaultFolderId, then the .docx as `file`. */
+    adminCreate: (formData) => request('/api/admin/forms/templates', { method: 'POST', body: formData, raw: true }),
+    adminUpdate: (templateId, body) =>
+      request(`/api/admin/forms/templates/${templateId}`, { method: 'PATCH', body }),
+    adminReplaceFile: (templateId, formData) =>
+      request(`/api/admin/forms/templates/${templateId}/file`, { method: 'PUT', body: formData, raw: true }),
+    adminSetAccess: (templateId, principalIds) =>
+      request(`/api/admin/forms/templates/${templateId}/access`, { method: 'PUT', body: { principalIds } }),
+    adminSetFields: (templateId, fields) =>
+      request(`/api/admin/forms/templates/${templateId}/fields`, { method: 'PUT', body: { fields } }),
+    adminFileUrl: (templateId) => `/api/admin/forms/templates/${templateId}/file`,
+    /** A sample-filled PDF of the template, for checking fidelity. Creates nothing. */
+    adminPreviewUrl: (templateId) => `/api/admin/forms/templates/${templateId}/preview`,
+  },
+
+  /**
+   * Ink signing (التوقيع): strokes drawn on a page, saved as a new version.
+   * `document` answers { enabled:false } while the switch is off.
+   */
+  signing: {
+    status: () => request('/api/signing/status'),
+    document: (documentId) => request(`/api/signing/documents/${documentId}`),
+    /** Page count and each page's displayed size. Loads the PDF; ask only when the tab opens. */
+    pages: (documentId) => request(`/api/signing/documents/${documentId}/pages`),
+    pageUrl: (documentId, page, version) =>
+      `/api/signing/documents/${documentId}/pages/${page}${version ? `?version=${version}` : ''}`,
+    /** body: { version, note?, pages: [{ number, image: 'data:image/png;base64,…' }] } */
+    sign: (documentId, body) =>
+      request(`/api/signing/documents/${documentId}/sign`, { method: 'POST', body }),
+  },
+
+  /**
    * The correspondence register (الوارد والصادر). Every call except `status`
    * answers "disabled" while the module's switch is off.
    */

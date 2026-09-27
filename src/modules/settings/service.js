@@ -127,6 +127,10 @@ export const EDITABLE = Object.freeze({
    * administration screen, and everything the module does reads it.
    */
   'correspondence.enabled': { type: 'bool', fallback: () => config.correspondence.enabled },
+  /** Official letter formats (النماذج). Same switch pattern; off by default. */
+  'forms.enabled': { type: 'bool', fallback: () => config.forms.enabled },
+  /** Ink signing on the document page (التوقيع). Same switch pattern; off by default. */
+  'signing.enabled': { type: 'bool', fallback: () => config.signing.enabled },
   /*
    * The principal id of the mail-room group. Registering, forwarding and
    * annulling letters is limited to its members (and super admins). Stored as

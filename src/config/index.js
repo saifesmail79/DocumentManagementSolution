@@ -321,6 +321,60 @@ export const config = Object.freeze({
     intakeFolder: integer('CORRESPONDENCE_INTAKE_FOLDER', 0, { min: 0 }),
   }),
 
+  forms: Object.freeze({
+    /**
+     * Official letter formats (النماذج): Word templates merged and converted
+     * to PDF. OFF by default; the stored setting `forms.enabled` overrides
+     * this at runtime, the same switch pattern as the mail room.
+     */
+    enabled: boolean('FORMS_ENABLED', false),
+    /** A single placeholder's value. A letter body is a few thousand characters. */
+    maxValueChars: integer('FORMS_MAX_VALUE_CHARS', 20_000, { min: 100, max: 200_000 }),
+    /** A .docx template with logos and tables is well under this. */
+    maxTemplateBytes: integer('FORMS_MAX_TEMPLATE_BYTES', 20 * 1024 * 1024, { min: 65_536 }),
+    /**
+     * Conversion inside a request. Measured: ~7 s for a one-page letter on the
+     * development machine, ~49 s more on a host whose default printer is
+     * unreachable (see docs/EXTERNAL_TOOLCHAIN.md). Past this the person is
+     * told to try again rather than left waiting on a stalled LibreOffice.
+     */
+    timeoutMs: integer('FORMS_TIMEOUT_MS', 45_000, { min: 5000 }),
+    /** LibreOffice processes at once. Each is a fresh profile and a CPU. */
+    maxConcurrent: integer('FORMS_MAX_CONCURRENT', 2, { min: 1, max: 8 }),
+    /** The generate request is text values only. */
+    bodyLimitBytes: integer('FORMS_BODY_LIMIT_BYTES', 1024 * 1024, { min: 65_536 }),
+  }),
+
+  signing: Object.freeze({
+    /**
+     * Ink signing (التوقيع): strokes drawn on a page, flattened into a new
+     * version. OFF by default; `signing.enabled` overrides at runtime.
+     */
+    enabled: boolean('SIGNING_ENABLED', false),
+    /**
+     * Resolution of the page image a person draws on. 72 is illegible on a
+     * tablet; 300 makes an A4 page a 25 MB bitmap. 150 reads well and an A4
+     * page is 1240×1754 pixels.
+     */
+    dpi: integer('SIGNING_DPI', 150, { min: 72, max: 300 }),
+    /** Hard kill for rendering one page. */
+    timeoutMs: integer('SIGNING_TIMEOUT_MS', 60_000, { min: 5000 }),
+    /** The sign request carries one transparent PNG per drawn page, base64. */
+    bodyLimitBytes: integer('SIGNING_BODY_LIMIT_BYTES', 25 * 1024 * 1024, { min: 1024 * 1024 }),
+    /** A small ASCII provenance line under the ink: who, when, which version. */
+    provenance: boolean('SIGNING_PROVENANCE', true),
+    /** Pages one save may carry. A signing session is a handful of pages. */
+    maxPagesPerRequest: integer('SIGNING_MAX_PAGES_PER_REQUEST', 20, { min: 1, max: 200 }),
+    /**
+     * Ceiling on one overlay's pixels. A PNG declares its size in its header
+     * and decodes to four bytes a pixel, so the header is checked before any
+     * decoder runs; an A4 page at 300 dpi is 8.7 million pixels.
+     */
+    maxPixels: integer('SIGNING_MAX_PIXELS', 30_000_000, { min: 1_000_000 }),
+    /** Rendered pages kept in memory so flipping back is instant. Never on disk. */
+    cacheEntries: integer('SIGNING_CACHE_ENTRIES', 24, { min: 0, max: 500 }),
+  }),
+
   mail: Object.freeze({
     /** Empty means no SMTP. The reset flow then falls back to the log transport. */
     host: optional('MAIL_HOST', ''),

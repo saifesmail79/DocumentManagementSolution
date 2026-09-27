@@ -34,6 +34,7 @@ import {
 } from '../components/AdminTabs.jsx';
 import ClassificationTab from '../components/ClassificationTab.jsx';
 import CorrespondenceAdminTab from '../components/CorrespondenceAdminTab.jsx';
+import FormsAdminTab from '../components/FormsAdminTab.jsx';
 import { useHelpTopic } from '../help/HelpContext.jsx';
 import { SETTING_HELP, PERMISSION_BITS, roleDisplay } from '../help/content.js';
 import HelpTip from '../components/HelpTip.jsx';
@@ -118,6 +119,7 @@ export default function Admin() {
       {tab === 'diagnostics' ? <DiagnosticsTab /> : null}
       {tab === 'classification' ? <ClassificationTab /> : null}
       {tab === 'correspondence' ? <CorrespondenceAdminTab /> : null}
+      {tab === 'forms' ? <FormsAdminTab /> : null}
     </div>
   );
 }
@@ -1441,6 +1443,8 @@ const SETTING_LABELS = {
   'auth.password_require_digit': 'إلزام رقم',
   'auth.password_require_symbol': 'إلزام رمز (! @ # %)',
   'correspondence.enabled': 'وحدة المراسلات',
+  'forms.enabled': 'النماذج الرسمية',
+  'signing.enabled': 'التوقيع بالقلم',
   'ocr.enabled': 'المسح الضوئي للنصوص (OCR)',
   'extraction.enabled': 'استخراج نص الوثائق',
   'classification.enabled': 'التعرّف التلقائي على الوثائق (تجريبي)',
@@ -1496,6 +1500,11 @@ const SETTING_SECTIONS = [
     title: 'المراسلات',
     hint: 'مفتاح تشغيل سجل الوارد والصادر. الأقسام وقلم الوارد تُعرَّف في «الإدارة ← المراسلات».',
     keys: ['correspondence.enabled'],
+  },
+  {
+    title: 'النماذج والتوقيع',
+    hint: 'مفتاحا الكتب المولّدة من نماذج Word، والتوقيع بخط اليد على الوثائق. النماذج نفسها تُعرَّف في «الإدارة ← النماذج».',
+    keys: ['forms.enabled', 'signing.enabled'],
   },
   {
     title: 'عام',

@@ -191,9 +191,34 @@ function run(command, args, { timeoutMs = 120_000, cwd, env } = {}) {
 }
 
 let detected = null;
+let detectedAt = 0;
+
+/*
+ * How long a probe's answer is trusted — a minute, not the process lifetime.
+ *
+ * The order of events on a real host is: the administrator turns a switch on,
+ * reads «LibreOffice غير موجود», and THEN installs LibreOffice. With a
+ * process-lifetime memo that notice never clears, because forms, signing and
+ * the /status routes all call this without `force`, so the whole install stays
+ * "not ready" until somebody restarts the service. The converse is as bad: a
+ * tool removed or broken after boot keeps being advertised as present, and the
+ * refusal arrives only after a conversion slot has been spent on it.
+ *
+ * A minute of staleness costs at most one `--version` spawn per minute on the
+ * hot paths, which already spawn the same tools per job, and it is far cheaper
+ * than `force: true` on an interactive route, which would spawn per request.
+ */
+const DETECT_TTL_MS = 60_000;
 
 export async function detectTools({ force = false } = {}) {
-  if (detected && !force) return detected;
+  if (detected && !force && Date.now() - detectedAt < DETECT_TTL_MS) return detected;
+
+  // The resolved LibreOffice command is memoised too, and `libreOffice()`
+  // prefers the sibling `soffice.com` only when that file exists AT THE TIME IT
+  // FIRST RAN. Before the install it does not exist, so the command would stay
+  // pinned to the `soffice.exe` that never exits headless and even a fresh
+  // probe would conclude "missing". Cleared here so a re-probe resolves again.
+  libreOfficeCommand = null;
 
   const probe = async (command, args, options = {}) => {
     try {
@@ -210,6 +235,7 @@ export async function detectTools({ force = false } = {}) {
   ]);
 
   detected = { libreoffice, ghostscript, sharp: { available: true } };
+  detectedAt = Date.now();
   return detected;
 }
 
@@ -621,8 +647,15 @@ async function buildPreview(absolutePath, filename) {
   }
 }
 
-/** LibreOffice headless. Returns the produced PDF's path, or null. */
-async function convertToPdf(absolutePath) {
+/**
+ * LibreOffice headless. Returns the produced PDF's path, or null when
+ * LibreOffice is absent; throws on timeout or failure.
+ *
+ * Exported for the letter-format feature, which converts inside a request and
+ * so passes a shorter timeout than the background worker's. The returned path
+ * lives inside a temp directory the CALLER must remove.
+ */
+export async function convertToPdf(absolutePath, { timeoutMs = config.renditions.timeoutMs } = {}) {
   const tools = await detectTools();
   if (!tools.libreoffice.available) return null;
 
@@ -648,7 +681,7 @@ async function convertToPdf(absolutePath) {
       workDir,
       absolutePath,
     ],
-    { timeoutMs: config.renditions.timeoutMs, cwd: workDir, env: LIBREOFFICE_ENV },
+    { timeoutMs, cwd: workDir, env: LIBREOFFICE_ENV },
   );
 
   // Returning null here would be a lie with consequences. The caller reads null
@@ -660,7 +693,7 @@ async function convertToPdf(absolutePath) {
   // says what actually happened.
   if (result.timedOut) {
     await rm(workDir, { recursive: true, force: true }).catch(() => {});
-    throw new Error(`LibreOffice timed out after ${config.renditions.timeoutMs}ms`);
+    throw new Error(`LibreOffice timed out after ${timeoutMs}ms`);
   }
 
   if (result.code !== 0) {
@@ -706,6 +739,57 @@ async function rasterisePdfFirstPage(pdfPath) {
 
     if (result.timedOut) {
       throw new Error(`Ghostscript timed out after ${config.renditions.timeoutMs}ms`);
+    }
+    if (result.code !== 0) {
+      throw new Error(`Ghostscript exited ${result.code}: ${result.stderr.slice(0, 300)}`);
+    }
+
+    return await readFile(output);
+  } finally {
+    await rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Ghostscript, one chosen page at a chosen resolution. Returns PNG bytes.
+ *
+ * Exported for ink signing, which shows a person the page they draw on. The
+ * same argument list as the thumbnail path above — every flag there is
+ * load-bearing — plus `-dUseCropBox`, so the raster is the rectangle a viewer
+ * shows and the one the strokes are later drawn into, and anti-aliasing, so
+ * text is readable on a tablet. Throws on timeout (`code: 'render_timeout'`)
+ * and on failure, never returns null: a missing renderer is the caller's
+ * question to `detectTools()`.
+ */
+export async function rasterisePdfPage({ pdfPath, page, dpi, timeoutMs = config.renditions.timeoutMs }) {
+  const pageNumber = Number(page);
+  if (!Number.isInteger(pageNumber) || pageNumber < 1) throw new Error(`invalid page ${page}`);
+  const resolution = Number(dpi);
+  if (!Number.isInteger(resolution) || resolution < 36 || resolution > 600) throw new Error(`invalid dpi ${dpi}`);
+
+  const workDir = await mkdtemp(path.join(tmpdir(), 'dms-page-'));
+  const output = path.join(workDir, 'page.png');
+
+  try {
+    const result = await run(
+      config.renditions.ghostscriptPath,
+      [
+        '-dNOPAUSE', '-dBATCH', '-dQUIET',
+        '-dSAFER',
+        '-dUseCropBox',
+        '-sDEVICE=png16m', `-r${resolution}`,
+        '-dTextAlphaBits=4', '-dGraphicsAlphaBits=4',
+        `-dFirstPage=${pageNumber}`, `-dLastPage=${pageNumber}`,
+        `-sOutputFile=${output}`,
+        pdfPath,
+      ],
+      { timeoutMs },
+    );
+
+    if (result.timedOut) {
+      const error = new Error(`Ghostscript timed out after ${timeoutMs}ms`);
+      error.code = 'render_timeout';
+      throw error;
     }
     if (result.code !== 0) {
       throw new Error(`Ghostscript exited ${result.code}: ${result.stderr.slice(0, 300)}`);

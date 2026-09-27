@@ -40,6 +40,8 @@ import {
   correspondenceRoutes,
   correspondenceAdminRoutes,
 } from './modules/correspondence/routes.js';
+import { formsRoutes, formsAdminRoutes } from './modules/forms/routes.js';
+import { signingRoutes } from './modules/signing/routes.js';
 
 const log = moduleLogger('server');
 
@@ -135,6 +137,12 @@ export async function buildApp({ logger: withLogger = true } = {}) {
   // /api/admin/mail — that prefix already means SMTP diagnostics.
   await app.register(correspondenceRoutes, { prefix: '/api/correspondence' });
   await app.register(correspondenceAdminRoutes, { prefix: '/api/admin/correspondence' });
+
+  // Letter formats (النماذج) and ink signing (التوقيع): phases 3 and 4 of the
+  // correspondence plan, each behind its own stored switch, off by default.
+  await app.register(formsRoutes, { prefix: '/api/forms' });
+  await app.register(formsAdminRoutes, { prefix: '/api/admin/forms' });
+  await app.register(signingRoutes, { prefix: '/api/signing' });
 
   // Public: the one route that serves document bytes without a session. It
   // enforces its own expiry, password and download cap.

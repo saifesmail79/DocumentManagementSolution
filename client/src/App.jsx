@@ -22,6 +22,7 @@ import DocumentDetail from './pages/DocumentDetail.jsx';
 import RecycleBin from './pages/RecycleBin.jsx';
 import MyDocuments from './pages/MyDocuments.jsx';
 import Correspondence from './pages/Correspondence.jsx';
+import Forms from './pages/Forms.jsx';
 import Home from './pages/Home.jsx';
 import NotificationBell from './components/NotificationBell.jsx';
 import { HelpProvider } from './help/HelpContext.jsx';
@@ -211,6 +212,7 @@ function Shell() {
               <Route path="/recycle-bin" element={<RecycleBin />} />
               <Route path="/my" element={<MyDocuments />} />
               <Route path="/correspondence" element={<Correspondence />} />
+              <Route path="/forms" element={<Forms />} />
               <Route path="/admin" element={<Admin />} />
               <Route path="/password" element={<ChangePassword />} />
               <Route path="*" element={<Navigate to="/" replace />} />

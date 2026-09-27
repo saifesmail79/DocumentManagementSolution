@@ -79,6 +79,16 @@ const TRUNCATION_ORDER = [
   'upload_sessions',
   'rendition_queue',
   'document_renditions',
+  // Letter formats. Letters reference documents and templates; fields and access
+  // reference templates (and field definitions / principals); templates
+  // reference types, APPROVAL TEMPLATES, folders and users — so the whole
+  // block goes before the approval tables as well as before documents.
+  'form_letters',
+  'form_template_access',
+  'form_template_fields',
+  'form_templates',
+  // Ink signatures reference documents and users.
+  'document_signatures',
   'approval_decisions',
   'approval_requests',
   'approval_steps',

@@ -94,6 +94,32 @@ describe('the tile menu', () => {
     assert.equal(moduleForPath('/admin', { isSuperAdmin: false }), null);
     assert.equal(moduleForPath('/', { isSuperAdmin: true }), null);
   });
+
+  /**
+   * The breadcrumb says where the reader is, not what they may be offered.
+   *
+   * النماذج is the first module gated on a capability, and the breadcrumb asked
+   * `visibleModules` — which cannot see a capability the shell never fetches — so
+   * it matched nothing and the « > النماذج» segment simply vanished from a screen
+   * the router had already opened. Any future gated module would lose it too,
+   * which is why this pins the rule rather than the one module.
+   */
+  test('a capability-gated module still names itself in the breadcrumb', () => {
+    const gated = MODULES.filter((module) => module.requires);
+    assert.ok(gated.length > 0, 'no capability-gated module left to check this rule with');
+
+    for (const module of gated) {
+      // An ordinary user, with no capabilities passed at all: the page is open,
+      // so the question is only what to call it.
+      assert.equal(
+        moduleForPath(module.to, { isSuperAdmin: false })?.key,
+        module.key,
+        `${module.label} loses its breadcrumb segment`,
+      );
+    }
+
+    assert.equal(moduleForPath('/forms', { isSuperAdmin: false })?.label, 'النماذج');
+  });
 });
 
 describe('the tabs a tile links into', () => {

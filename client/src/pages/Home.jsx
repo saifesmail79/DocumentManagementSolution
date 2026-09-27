@@ -109,12 +109,27 @@ export default function Home() {
       })
       .catch(() => {});
 
+    // The letter-formats tile is for people with a template to use. Failing to
+    // answer means no tile, which is the safe direction: a tile that opens on
+    // an empty screen is the thing being avoided.
+    api.forms
+      .status()
+      .then((status) => {
+        if (!cancelled) {
+          setCapabilities((current) => ({
+            ...current,
+            forms: status?.enabled === true && Number(status.templates) > 0,
+          }));
+        }
+      })
+      .catch(() => {});
+
     return () => {
       cancelled = true;
     };
   }, []);
 
-  const modules = applyOrder(visibleModules(user), order ?? []);
+  const modules = applyOrder(visibleModules(user, capabilities), order ?? []);
 
   const persist = useCallback(
     async (keys) => {

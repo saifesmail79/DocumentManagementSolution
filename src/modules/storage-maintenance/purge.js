@@ -140,6 +140,14 @@ export async function purgeDeletedDocuments({
         await sql`
           UPDATE dbo.documents SET current_version = 0 WHERE document_id = ${row.document_id}
         `.execute(trx);
+
+        // A letter generated from a template keeps its merged values as
+        // provenance. Once the letter's bytes are gone, the values go too: the
+        // text of a purged letter must not survive in a side table outside
+        // the folder's permissions. The row stays, naming the template.
+        await sql`
+          UPDATE dbo.form_letters SET values_json = '{}' WHERE document_id = ${row.document_id}
+        `.execute(trx);
       });
 
       await storage.remove(row.storage_path);

@@ -70,7 +70,7 @@ async function discardStaged(staged) {
  * with no type has no required fields, which is deliberate — the type is what
  * carries the obligation.
  */
-async function missingRequiredFields(typeId, provided) {
+export async function missingRequiredFields(typeId, provided) {
   if (typeId === null || typeId === undefined) return [];
 
   const required = await sql`

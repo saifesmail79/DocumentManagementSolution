@@ -114,6 +114,11 @@ async function referencedPaths() {
     SELECT r.storage_path, 'rendition', r.document_id, r.bytes, d.title
       FROM dbo.document_renditions r
       JOIN dbo.documents d ON d.document_id = r.document_id
+    UNION ALL
+    -- Letter-format templates are the institute's own designs and exist
+    -- nowhere else: a missing one is data loss, not something to remake.
+    SELECT t.storage_path, 'template', NULL, t.bytes, t.name
+      FROM dbo.form_templates t
   `.execute(db);
 
   return rows.rows.map((row) => ({

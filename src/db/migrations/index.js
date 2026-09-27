@@ -42,6 +42,10 @@ import { m0015UserPreferences } from './0015-user-preferences.js';
 import { m0016ClassificationPilot } from './0016-classification-pilot.js';
 import { m0017WebhookSigningSecret } from './0017-webhook-signing-secret.js';
 import { m0018Correspondence } from './0018-correspondence.js';
+import { m0019FormsTemplates } from './0019-forms-templates.js';
+import { m0020DocumentSignatures } from './0020-document-signatures.js';
+import { m0021FormsSigningCorrections } from './0021-forms-signing-corrections.js';
+import { m0022ReconciliationTemplateKind } from './0022-reconciliation-template-kind.js';
 
 /**
  * @typedef {object} Migration
@@ -71,4 +75,8 @@ export const MIGRATIONS = [
   m0016ClassificationPilot,
   m0017WebhookSigningSecret,
   m0018Correspondence,
+  m0019FormsTemplates,
+  m0020DocumentSignatures,
+  m0021FormsSigningCorrections,
+  m0022ReconciliationTemplateKind,
 ];
