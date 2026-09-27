@@ -22,7 +22,7 @@ The module is already ON. To re-create all of this on another machine, run:
 
 ## 1. Register an incoming letter (log in as `diwan`)
 
-1. Logging in takes mail-room staff straight to **المراسلات**. Open the
+1. Logging in takes mail-room staff straight to **المراسلات**, on the
    **تسجيل كتاب** tab — this is the mail room's front door.
 2. Press **اختيار ملف** and pick any PDF (or scan with the scanner
    panel). The file uploads and the registration form opens by itself.

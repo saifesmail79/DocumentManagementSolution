@@ -242,6 +242,41 @@ export function visibleTabs(module, capabilities = {}) {
 }
 
 /** The module a path belongs to, for the breadcrumb and the active tile. */
+/**
+ * Where signing in lands a person, or null to stay put.
+ *
+ * Only when nobody asked for a page. The sign-in form is shown at whatever
+ * URL was opened — a link out of a notification, a bookmark, a page whose
+ * session expired — and that URL is the destination; overriding it would
+ * throw the reader off the very document they came for. At the root, the
+ * mail room starts at the intake screen, its front door — once an intake
+ * folder has been configured, since before that the screen is a notice with
+ * nothing to press; a person whose unit has letters waiting starts at their
+ * queue; everyone else keeps the tile menu, because an empty queue is not a
+ * starting screen. Administrators keep the menu: their day has no single
+ * starting screen.
+ *
+ * `status` is the correspondence status reply. Asked with the most
+ * permissive status possible, the answer says whether fetching the real one
+ * could change anything — the sign-in page uses that to skip the request.
+ */
+export function signInLanding({ user, pathname, status }) {
+  if (!user || user.isSuperAdmin || user.mustChangePassword) return null;
+  if (pathname !== '/') return null;
+  if (!status?.enabled) return null;
+  if (status.registrar && status.intakeFolderId) return '/correspondence?tab=intake';
+  if (Number(status.queueCount) > 0) return '/correspondence';
+  return null;
+}
+
+/** The status that lands the most people: what `signInLanding` is probed with. */
+export const MOST_PERMISSIVE_STATUS = Object.freeze({
+  enabled: true,
+  registrar: true,
+  queueCount: 1,
+  intakeFolderId: '1',
+});
+
 export function moduleForPath(pathname, user) {
   return visibleModules(user).find((module) => pathname.startsWith(module.to)) ?? null;
 }

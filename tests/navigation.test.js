@@ -29,8 +29,8 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 // A relative specifier, not a joined absolute path: on Windows the latter
 // reaches the ESM loader as the scheme "c:" and is rejected outright.
 const {
-  MODULES, ADMIN_TABS, MY_TABS, CORRESPONDENCE_TABS,
-  visibleModules, moduleForPath, applyOrder, reorder, visibleTabs,
+  MODULES, ADMIN_TABS, MY_TABS, CORRESPONDENCE_TABS, MOST_PERMISSIVE_STATUS,
+  visibleModules, moduleForPath, applyOrder, reorder, visibleTabs, signInLanding,
 } = await import('../client/src/navigation.js');
 
 const appSource = await readFile(path.join(ROOT, 'client/src/App.jsx'), 'utf8');
@@ -259,6 +259,93 @@ describe('starting the application', () => {
     // file. Nothing fails, and the table simply never appears.
     const orphans = files.filter((name) => !manifest.includes(name));
     assert.deepEqual(orphans, [], `migration files missing from the manifest: ${orphans.join(', ')}`);
+  });
+});
+
+describe('where signing in lands a person', () => {
+  const clerk = { isSuperAdmin: false, mustChangePassword: false };
+  const admin = { isSuperAdmin: true, mustChangePassword: false };
+  const mailRoom = { enabled: true, registrar: true, queueCount: 0, intakeFolderId: '7' };
+  const lettersWaiting = { enabled: true, registrar: false, queueCount: 2 };
+  const nothingWaiting = { enabled: true, registrar: false, queueCount: 0 };
+
+  /**
+   * The first version sent every employee to the mail queue whenever the
+   * module was on, letters or not, and it did so from the sign-in page after
+   * the tile menu had already painted — overriding a document link the person
+   * had opened on purpose. The rule now lives here, and these pin down each
+   * side of it.
+   */
+  test('the mail room starts at its front door, the intake screen', () => {
+    assert.equal(signInLanding({ user: clerk, pathname: '/', status: mailRoom }), '/correspondence?tab=intake');
+  });
+
+  test('a person with letters waiting starts at their queue', () => {
+    assert.equal(signInLanding({ user: clerk, pathname: '/', status: lettersWaiting }), '/correspondence');
+  });
+
+  test('nobody is sent to an empty queue', () => {
+    assert.equal(signInLanding({ user: clerk, pathname: '/', status: nothingWaiting }), null);
+  });
+
+  test('an intake screen with no folder behind it is nobody\'s starting screen', () => {
+    // Until the intake folder is configured, تسجيل كتاب is a notice with
+    // nothing to press; the mail room keeps the menu, or its queue if letters wait.
+    const unconfigured = { ...mailRoom, intakeFolderId: null };
+    assert.equal(signInLanding({ user: clerk, pathname: '/', status: unconfigured }), null);
+    assert.equal(signInLanding({ user: clerk, pathname: '/', status: { ...unconfigured, queueCount: 1 } }), '/correspondence');
+  });
+
+  test('a page asked for by its own URL is the destination, not the queue', () => {
+    // A link out of a notification, a bookmark, or a session that expired
+    // mid-work: the sign-in form shows at that URL and must return there.
+    for (const pathname of ['/documents/123', '/folders/4', '/search?q=x', '/correspondence?tab=register']) {
+      assert.equal(signInLanding({ user: clerk, pathname, status: mailRoom }), null, pathname);
+    }
+  });
+
+  test('administrators and a forced password change keep the menu', () => {
+    assert.equal(signInLanding({ user: admin, pathname: '/', status: mailRoom }), null);
+    const forced = { ...clerk, mustChangePassword: true };
+    assert.equal(signInLanding({ user: forced, pathname: '/', status: mailRoom }), null);
+  });
+
+  test('a module that is off, or a status that never came, changes nothing', () => {
+    for (const status of [undefined, null, {}, { enabled: false, registrar: true, queueCount: 5 }]) {
+      assert.equal(signInLanding({ user: clerk, pathname: '/', status }), null);
+    }
+  });
+
+  test('the probe status is the one that lands the most people', () => {
+    // The sign-in page asks with this first, to learn whether fetching the real
+    // status could move anyone; a probe that lands nobody would silence the rule.
+    assert.equal(signInLanding({ user: clerk, pathname: '/', status: MOST_PERMISSIVE_STATUS }), '/correspondence?tab=intake');
+    assert.equal(signInLanding({ user: admin, pathname: '/', status: MOST_PERMISSIVE_STATUS }), null);
+    assert.equal(signInLanding({ user: clerk, pathname: '/x', status: MOST_PERMISSIVE_STATUS }), null);
+  });
+
+  test('every landing is a tab the correspondence page can show its person', () => {
+    const correspondence = MODULES.find((module) => module.key === 'correspondence');
+    for (const status of [mailRoom, lettersWaiting]) {
+      const target = signInLanding({ user: clerk, pathname: '/', status });
+      const tab = new URL(target, 'http://x').searchParams.get('tab') ?? 'queue';
+      const offered = visibleTabs(correspondence, status).map((entry) => entry.key);
+      assert.ok(offered.includes(tab), `${target} lands on a tab withheld from that person`);
+    }
+  });
+
+  test('the sign-in page reads the shared rule and decides before the shell renders', async () => {
+    const source = await readFile(path.join(ROOT, 'client/src/pages/Login.jsx'), 'utf8');
+    assert.match(source, /signInLanding\(/, 'the page must consume the shared rule');
+    assert.match(source, /before:/, 'the landing must be chosen inside signIn, before the shell appears');
+    assert.doesNotMatch(source, /status\.registrar|queueCount/, 'the page is restating the rule instead of asking it');
+    assert.doesNotMatch(source, /replace: true/, 'the landing must be pushed so رجوع leads to the menu, not into a previous session');
+    assert.match(source, /withTimeout\(/, 'a stalled status request must not hold a signed-in person on the form');
+    assert.doesNotMatch(
+      source,
+      /finally\s*\{[^}]*setBusy\(false\)/,
+      'the form must stay disabled after a successful sign-in until the shell replaces it',
+    );
   });
 });
 
