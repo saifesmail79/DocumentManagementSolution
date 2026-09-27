@@ -46,6 +46,7 @@ import { m0019FormsTemplates } from './0019-forms-templates.js';
 import { m0020DocumentSignatures } from './0020-document-signatures.js';
 import { m0021FormsSigningCorrections } from './0021-forms-signing-corrections.js';
 import { m0022ReconciliationTemplateKind } from './0022-reconciliation-template-kind.js';
+import { m0023FormsTemplateFolders } from './0023-forms-template-folders.js';
 
 /**
  * @typedef {object} Migration
@@ -79,4 +80,5 @@ export const MIGRATIONS = [
   m0020DocumentSignatures,
   m0021FormsSigningCorrections,
   m0022ReconciliationTemplateKind,
+  m0023FormsTemplateFolders,
 ];

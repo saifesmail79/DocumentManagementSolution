@@ -1134,6 +1134,199 @@ describe('official letter formats', { skip: CONFIGURED ? false : target.reason }
     await call('PUT', '/api/settings/upload.duplicate_policy', boss, { value: 'warn' });
   });
 
+  // ── The assigned folders ───────────────────────────────────────────────
+  //
+  // A format assigned to folders may be filed ONLY into those, and the fill
+  // screen offers only the ones the person holds UPLOAD on. An empty list is the
+  // old behaviour — any folder they may upload into — and these tests end by
+  // restoring it, so nothing after them sees a restricted format.
+
+  test('an assigned format offers only the folders the person may file into', async () => {
+    await makeFolder('archive');
+    // «archive» is granted to nobody: it is assigned to the format, so the
+    // administrator sees it, and no ordinary user may file into it.
+
+    const assigned = await call('PUT', `/api/admin/forms/templates/${ids.template}/folders`, boss, {
+      folderIds: [String(id.letters), String(id.archive)],
+    });
+    assert.equal(assigned.statusCode, 200, assigned.body);
+    assert.deepEqual(
+      assigned.json().template.folders.map((folder) => folder.folderId).sort(),
+      [String(id.letters), String(id.archive)].sort(),
+    );
+    // The admin payload names each folder by the path an administrator reads.
+    assert.deepEqual(
+      assigned.json().template.folders.map((folder) => folder.path).sort(),
+      ['archive', 'letters'],
+    );
+
+    const audit = await sql`
+      SELECT detail FROM dbo.audit_log
+       WHERE action = 'form_template.folders_changed' AND target_id = ${String(ids.template)}
+    `.execute(db);
+    assert.equal(audit.rows.length, 1);
+    assert.match(audit.rows[0].detail, /letters/);
+
+    // kateb may upload into «letters» only, so that is the only destination the
+    // fill screen is given — «archive» is assigned but not theirs to file into.
+    const list = await call('GET', '/api/forms/templates', kateb);
+    assert.equal(list.json().templates.length, 1);
+    assert.deepEqual(
+      list.json().templates[0].folders.map((folder) => folder.folderId),
+      [String(id.letters)],
+    );
+
+    const one = await call('GET', `/api/forms/templates/${ids.template}`, kateb);
+    assert.equal(one.statusCode, 200, one.body);
+    assert.deepEqual(
+      one.json().template.folders.map((folder) => folder.name),
+      ['letters'],
+    );
+
+    const status = await call('GET', '/api/forms/status', kateb);
+    assert.equal(status.json().templates, 1);
+
+    // mudeer holds the format but may upload into NEITHER assigned folder, so
+    // the format is not usable by them at all: not listed, not counted, and not
+    // confirmed — rather than offered and then refused at the last step.
+    const mudeer = await signIn('mudeer');
+    const theirs = await call('GET', '/api/forms/templates', mudeer);
+    assert.deepEqual(theirs.json().templates, []);
+
+    const theirStatus = await call('GET', '/api/forms/status', mudeer);
+    assert.equal(theirStatus.json().templates, 0);
+
+    const refused = await call('GET', `/api/forms/templates/${ids.template}`, mudeer);
+    assert.equal(refused.statusCode, 404);
+
+    // A super admin may upload anywhere, so both assigned folders are offered.
+    const bossList = await call('GET', '/api/forms/templates', boss);
+    const mine = bossList.json().templates.find((entry) => entry.templateId === String(ids.template));
+    assert.equal(mine.folders.length, 2);
+  });
+
+  test('a letter into a folder the format is not assigned to is refused before anything is spent', async () => {
+    const base = {
+      templateId: ids.template,
+      folderId: String(id.closed),
+      title: 'كتاب في المكان الخطأ',
+      values: { addressee: 'A', reference: 'REF-NO', subject: 'S', body: 'B' },
+    };
+
+    const elsewhere = await call('POST', '/api/forms/generate', kateb, base);
+    assert.equal(elsewhere.statusCode, 403, elsewhere.body);
+    assert.equal(elsewhere.json().error, 'folder_not_allowed');
+
+    // An ASSIGNED folder this person cannot file into is refused by the folder's
+    // own permission instead — «not_found», because they cannot even browse it.
+    // Which proves the order: the format's own rule is read first and did not
+    // stand in the way here.
+    const notTheirs = await call('POST', '/api/forms/generate', kateb, {
+      ...base,
+      folderId: String(id.archive),
+    });
+    assert.equal(notTheirs.statusCode, 404, notTheirs.body);
+
+    const documents = await sql`
+      SELECT COUNT(*) AS n FROM dbo.documents WHERE folder_id = ${id.closed}
+    `.execute(db);
+    assert.equal(Number(documents.rows[0].n), 0);
+  });
+
+  test('a letter into an assigned folder is filed exactly as before', async (t) => {
+    if (!libreOffice) return t.skip('LibreOffice is not installed on this machine');
+
+    const response = await call('POST', '/api/forms/generate', kateb, {
+      templateId: ids.template,
+      folderId: String(id.letters),
+      title: 'كتاب إلى المجلد المخصّص',
+      values: { addressee: 'Assigned Folder', reference: 'REF-ASG', subject: 'S', body: 'B' },
+    });
+    assert.equal(response.statusCode, 201, response.body);
+
+    const document = await sql`
+      SELECT folder_id FROM dbo.documents WHERE document_id = ${response.json().documentId}
+    `.execute(db);
+    assert.equal(String(document.rows[0].folder_id), String(id.letters));
+  });
+
+  test('a format may be assigned its folders as it is created', async () => {
+    const response = await uploadTemplate(
+      boss,
+      {
+        name: 'نموذج بمجلدات',
+        folderIds: JSON.stringify([String(id.letters), String(id.archive), String(id.letters)]),
+      },
+      { filename: 'مخصّص.docx', buffer: buildDocx({ body: ['To {{addressee}}'] }) },
+    );
+    assert.equal(response.statusCode, 201, response.body);
+    // The repeated id collapsed: the administrator meant that folder once.
+    assert.equal(response.json().template.folders.length, 2);
+
+    const fixtureId = Number(response.json().template.templateId);
+    const rows = await sql`
+      SELECT COUNT(*) AS n FROM dbo.form_template_folders WHERE template_id = ${fixtureId}
+    `.execute(db);
+    assert.equal(Number(rows.rows[0].n), 2);
+
+    // A malformed list is refused whole rather than read as «any folder».
+    const malformed = await uploadTemplate(
+      boss,
+      { name: 'قائمة خاطئة', folderIds: 'not json' },
+      { filename: 'x.docx', buffer: buildDocx({ body: ['{{a}}'] }) },
+    );
+    assert.equal(malformed.statusCode, 400);
+    assert.equal(malformed.json().error, 'invalid_value');
+
+    // A fixture, not part of the story the rest of the suite tells.
+    await sql`DELETE FROM dbo.form_template_folders WHERE template_id = ${fixtureId}`.execute(db);
+    await sql`DELETE FROM dbo.form_template_fields WHERE template_id = ${fixtureId}`.execute(db);
+    await sql`DELETE FROM dbo.form_templates WHERE template_id = ${fixtureId}`.execute(db);
+  });
+
+  test('the assigned list is replaced whole, and a folder that is not there is refused', async () => {
+    const missing = await call('PUT', `/api/admin/forms/templates/${ids.template}/folders`, boss, {
+      folderIds: [String(id.letters), '999999999'],
+    });
+    assert.equal(missing.statusCode, 404, missing.body);
+    assert.equal(missing.json().error, 'not_found');
+    assert.match(missing.json().detail, /999999999/);
+
+    const notAnId = await call('PUT', `/api/admin/forms/templates/${ids.template}/folders`, boss, {
+      folderIds: ['abc'],
+    });
+    assert.equal(notAnId.statusCode, 400);
+    assert.equal(notAnId.json().error, 'invalid_value');
+
+    // Neither refusal touched the stored set.
+    const untouched = await sql`
+      SELECT COUNT(*) AS n FROM dbo.form_template_folders WHERE template_id = ${Number(ids.template)}
+    `.execute(db);
+    assert.equal(Number(untouched.rows[0].n), 2);
+
+    // An empty list is meaningful: it restores «any folder this person may upload
+    // into», which is what every format did before assignment existed.
+    const cleared = await call('PUT', `/api/admin/forms/templates/${ids.template}/folders`, boss, {
+      folderIds: [],
+    });
+    assert.equal(cleared.statusCode, 200, cleared.body);
+    assert.deepEqual(cleared.json().template.folders, []);
+
+    const list = await call('GET', '/api/forms/templates', kateb);
+    assert.equal(list.json().templates.length, 1);
+    assert.deepEqual(list.json().templates[0].folders, []);
+
+    // And the destination the format used to refuse is refused by the folder's
+    // own permission again, not by the format.
+    const anywhere = await call('POST', '/api/forms/generate', kateb, {
+      templateId: ids.template,
+      folderId: String(id.closed),
+      title: 'كتاب',
+      values: { addressee: 'A', reference: 'REF-ANY' },
+    });
+    assert.equal(anywhere.statusCode, 404, anywhere.body);
+  });
+
   test('the preview is a PDF and files nothing', async (t) => {
     if (!libreOffice) return t.skip('LibreOffice is not installed on this machine');
 

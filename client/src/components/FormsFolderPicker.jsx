@@ -45,20 +45,31 @@
  * result, and a list that looks complete while missing the folder someone is
  * hunting for is worse than a list that says so.
  *
+ * ─── Why `only` narrows the list instead of the caller filtering it ─────────
+ *
+ * A template may be assigned to particular folders, and then a letter from it
+ * may be filed into none but those. The rule is the server's — `generate`
+ * refuses `folder_not_allowed` — and this box is where it becomes visible, so
+ * it takes the allowed ids and shows their intersection with the folders the
+ * person may upload into. Narrowing here rather than around the picker keeps
+ * one list behind the search, the row cap, the counted line and the "nothing
+ * to offer" warning; a caller that filtered its own set beforehand would have
+ * to reproduce all four.
+ *
  * ─── Why clearing an unavailable choice is opt-in ───────────────────────────
  *
- * A folder can be handed in that this picker will not offer: a template's
- * default destination is chosen by an administrator without the upload rule
- * applied, and the last-used folder is remembered in the browser, which may
- * belong to a different signed-in person. The box would then show nothing
+ * A folder can be handed in that this picker will not offer: the folders
+ * assigned to a template are chosen by an administrator without the upload
+ * rule applied, and the last-used folder is remembered in the browser, which
+ * may belong to a different signed-in person. The box would then show nothing
  * while a folder id nobody saw is still held in state, and the letter is
  * filed — or refused — for a destination the person never chose.
  *
  * So the fill screen asks for that value to be cleared, which makes the missing
  * choice visible and blocks the submit. The administration dialog does not: it
- * lists folders the tree endpoint may have capped, and dropping a stored default
- * merely because it lies past the cap would be a quiet edit to someone else's
- * configuration — but the × still offers to return it to «no default».
+ * lists folders the tree endpoint may have capped, and dropping an assigned
+ * folder merely because it lies past the cap would be a quiet edit to someone
+ * else's configuration — but the × still offers to empty the box.
  */
 
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
@@ -81,21 +92,46 @@ function fold(text) {
     .toLowerCase();
 }
 
-/** Full paths, built from the flat rows the tree endpoint returns. */
-function withPaths(folders) {
-  const byId = new Map(folders.map((folder) => [folder.folderId, folder]));
+/**
+ * Full paths, built from the flat rows the tree endpoint returns, as a map of
+ * folder id → path.
+ *
+ * Exported because the administration screen lists a template's assigned
+ * folders and must print them the way this box does — the full path, since two
+ * folders may both be called «الصادر». One builder, one spelling of a path.
+ */
+export function folderPaths(folders) {
+  const rows = folders ?? [];
+  const byId = new Map(rows.map((folder) => [String(folder.folderId), folder]));
+  const paths = new Map();
 
-  return folders
+  for (const folder of rows) {
+    const parts = [];
+    let cursor = folder;
+    // Bounded by the map: a cycle would otherwise hang the render.
+    for (let hops = 0; cursor && hops < 64; hops += 1) {
+      parts.unshift(cursor.name);
+      cursor = cursor.parentId ? byId.get(String(cursor.parentId)) : null;
+    }
+    paths.set(String(folder.folderId), parts.join(' / '));
+  }
+
+  return paths;
+}
+
+/** The rows this box searches: id, upload bits, full path and its folded form. */
+function withPaths(folders) {
+  const paths = folderPaths(folders);
+
+  return (folders ?? [])
     .map((folder) => {
-      const parts = [];
-      let cursor = folder;
-      // Bounded by the map: a cycle would otherwise hang the render.
-      for (let hops = 0; cursor && hops < 64; hops += 1) {
-        parts.unshift(cursor.name);
-        cursor = cursor.parentId ? byId.get(cursor.parentId) : null;
-      }
-      const path = parts.join(' / ');
-      return { folderId: folder.folderId, permissions: folder.permissions, path, folded: fold(path) };
+      const path = paths.get(String(folder.folderId)) ?? folder.name;
+      return {
+        folderId: String(folder.folderId),
+        permissions: folder.permissions,
+        path,
+        folded: fold(path),
+      };
     })
     .sort((a, b) => a.path.localeCompare(b.path, 'ar'));
 }
@@ -114,6 +150,7 @@ const MAX_SHOWN = 100;
  * @param {string} [props.hint]
  * @param {boolean} [props.disabled]
  * @param {boolean} [props.requireUpload] Keep only folders the user may file into.
+ * @param {string[]} [props.only]     When non-empty, the only folder ids offered.
  * @param {string} [props.emptyLabel]   What an empty, closed box means, e.g. «بلا مجلد افتراضي».
  * @param {boolean} [props.clearWhenUnavailable] Clear a value this picker cannot offer.
  */
@@ -124,6 +161,7 @@ export default function FormsFolderPicker({
   hint,
   disabled = false,
   requireUpload = true,
+  only = null,
   emptyLabel = null,
   clearWhenUnavailable = false,
 }) {
@@ -144,9 +182,23 @@ export default function FormsFolderPicker({
   const held = String(value ?? '');
   const hasValue = held !== '';
 
+  /*
+   * The allowed set, from `only`, as a value that changes with its contents.
+   *
+   * Callers build that array while rendering, so its identity changes on every
+   * keystroke elsewhere on the page; keyed on the ids themselves, the list is
+   * rebuilt only when the allowed folders actually differ.
+   */
+  const onlyKey = Array.isArray(only) ? only.map(String).join('\u0000') : '';
+  const allowed = useMemo(() => (onlyKey ? new Set(onlyKey.split('\u0000')) : null), [onlyKey]);
+
   const usable = useMemo(
-    () => withPaths(folders ?? []).filter((folder) => !requireUpload || folder.permissions?.upload),
-    [folders, requireUpload],
+    () =>
+      withPaths(folders ?? []).filter(
+        (folder) =>
+          (!requireUpload || folder.permissions?.upload) && (!allowed || allowed.has(folder.folderId)),
+      ),
+    [folders, requireUpload, allowed],
   );
 
   const selected = useMemo(() => usable.find((folder) => folder.folderId === held) ?? null, [usable, held]);
@@ -379,8 +431,9 @@ export default function FormsFolderPicker({
 
       {!loading && !error && usable.length === 0 ? (
         <Alert tone="warning">
-          لا يوجد مجلد تملك فيه صلاحية «رفع». اطلب من مدير النظام منحك الصلاحية على المجلد الذي
-          تودع فيه كتبك.
+          {allowed
+            ? 'لا يوجد من مجلدات هذا النموذج مجلدٌ تملك فيه صلاحية «رفع». اطلب من مدير النظام منحك الصلاحية، أو إضافة مجلد آخر إلى النموذج.'
+            : 'لا يوجد مجلد تملك فيه صلاحية «رفع». اطلب من مدير النظام منحك الصلاحية على المجلد الذي تودع فيه كتبك.'}
         </Alert>
       ) : null}
     </div>

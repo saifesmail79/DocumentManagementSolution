@@ -43,6 +43,7 @@ import {
   updateTemplate,
   replaceTemplateFile,
   setTemplateAccess,
+  setTemplateFolders,
   setTemplateFields,
   readTemplateFile,
   previewTemplate,
@@ -69,6 +70,10 @@ const STATUS = {
   conflict: 409,
   not_found: 404,
   forbidden: 403,
+  // The destination is not one of the folders this format is filed into. 403
+  // rather than 400: the request is well formed and the folder is real, it is
+  // the format that does not go there.
+  folder_not_allowed: 403,
   invalid_title: 400,
   missing_value: 400,
   value_too_long: 400,
@@ -106,6 +111,36 @@ function parseId(value) {
   if (value == null) return null;
   const text = String(value).trim();
   return /^[0-9]{1,19}$/.test(text) ? text : null;
+}
+
+/**
+ * The folders a format is assigned to, from a JSON body: `{ folderIds: [...] }`.
+ *
+ * An absent list is an empty list — the caller said «any folder». A list holding
+ * anything that is not an id is refused whole rather than filtered, because
+ * silently dropping one entry would assign the format to fewer places than the
+ * administrator chose and the dialog would still show what they picked.
+ */
+function parseFolderIds(value) {
+  if (value === undefined || value === null) return { ok: true, ids: [] };
+  if (!Array.isArray(value)) return { ok: false };
+  const ids = value.map((entry) => parseId(entry));
+  if (ids.some((id) => id === null)) return { ok: false };
+  return { ok: true, ids };
+}
+
+/**
+ * The same list as a multipart scalar part, which is text and not an array: the
+ * create form sends it as JSON in one part, before the file. Absent means «any
+ * folder»; malformed is refused rather than read as absent.
+ */
+function parseFolderIdsField(value) {
+  if (value === undefined || value === null || String(value).trim() === '') return { ok: true, ids: [] };
+  try {
+    return parseFolderIds(JSON.parse(String(value)));
+  } catch {
+    return { ok: false };
+  }
 }
 
 function toNullableInt(value) {
@@ -295,13 +330,18 @@ export async function formsAdminRoutes(app) {
     const upload = await readTemplateUpload(request);
     if (!upload.ok) return refuse(reply, upload);
 
+    const folderIds = parseFolderIdsField(upload.fields.folderIds);
+    if (!folderIds.ok) {
+      return refuse(reply, { reason: 'invalid_value', detail: 'قائمة المجلدات غير صالحة' });
+    }
+
     const result = await createTemplate({
       userId: request.user.userId,
       name: upload.fields.name,
       description: upload.fields.description ?? null,
       typeId: toNullableInt(upload.fields.typeId),
       approvalTemplateId: toNullableInt(upload.fields.approvalTemplateId),
-      defaultFolderId: parseId(upload.fields.defaultFolderId),
+      folderIds: folderIds.ids,
       filename: upload.filename,
       buffer: upload.buffer,
     });
@@ -331,7 +371,6 @@ export async function formsAdminRoutes(app) {
       typeId: body.typeId === undefined ? undefined : toNullableInt(body.typeId),
       approvalTemplateId:
         body.approvalTemplateId === undefined ? undefined : toNullableInt(body.approvalTemplateId),
-      defaultFolderId: body.defaultFolderId === undefined ? undefined : parseId(body.defaultFolderId),
       isActive: body.isActive === undefined ? undefined : Boolean(body.isActive),
     });
     if (!result.ok) return refuse(reply, result);
@@ -405,6 +444,40 @@ export async function formsAdminRoutes(app) {
       targetType: 'form_template',
       targetId: String(templateId),
       detail: result.template.access.map((entry) => entry.displayName).join('، ') || 'لا أحد',
+      request,
+    });
+
+    return { template: result.template };
+  });
+
+  /**
+   * The folders this format's letters may be filed into.
+   *
+   * Its own route rather than a field on PATCH: it is a set replaced whole, it
+   * has its own audit action, and the dialog saves it only when it changed.
+   */
+  app.put('/templates/:templateId/folders', { preHandler: requireEnabled }, async (request, reply) => {
+    const templateId = parseTemplateId(request.params.templateId);
+    if (templateId === null) return reply.code(400).send({ error: 'invalid_template_id' });
+
+    const folderIds = parseFolderIds(request.body?.folderIds);
+    if (!folderIds.ok) {
+      return refuse(reply, { reason: 'invalid_value', detail: 'قائمة المجلدات غير صالحة' });
+    }
+
+    const result = await setTemplateFolders({ templateId, folderIds: folderIds.ids });
+    if (!result.ok) return refuse(reply, result);
+
+    const folders = result.template.folders;
+    await record({
+      actor: request.user,
+      action: ACTION.FORM_TEMPLATE_FOLDERS_CHANGED,
+      targetType: 'form_template',
+      targetId: String(templateId),
+      detail:
+        folders.length === 0
+          ? 'أي مجلد'
+          : `${folders.length} مجلد: ${folders.map((folder) => folder.name).join('، ')}`,
       request,
     });
 

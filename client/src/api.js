@@ -437,7 +437,7 @@ export const api = {
 
     adminStatus: () => request('/api/admin/forms/status'),
     adminTemplates: () => request('/api/admin/forms/templates'),
-    /** formData: name, description, typeId, approvalTemplateId, defaultFolderId, then the .docx as `file`. */
+    /** formData: name, description, typeId, approvalTemplateId, folderIds (JSON array of folder ids), then the .docx as `file`. */
     adminCreate: (formData) => request('/api/admin/forms/templates', { method: 'POST', body: formData, raw: true }),
     adminUpdate: (templateId, body) =>
       request(`/api/admin/forms/templates/${templateId}`, { method: 'PATCH', body }),
@@ -445,6 +445,9 @@ export const api = {
       request(`/api/admin/forms/templates/${templateId}/file`, { method: 'PUT', body: formData, raw: true }),
     adminSetAccess: (templateId, principalIds) =>
       request(`/api/admin/forms/templates/${templateId}/access`, { method: 'PUT', body: { principalIds } }),
+    /** The folders a letter from this template may be filed into; [] means any folder the person may upload into. */
+    adminSetFolders: (templateId, folderIds) =>
+      request(`/api/admin/forms/templates/${templateId}/folders`, { method: 'PUT', body: { folderIds } }),
     adminSetFields: (templateId, fields) =>
       request(`/api/admin/forms/templates/${templateId}/fields`, { method: 'PUT', body: { fields } }),
     adminFileUrl: (templateId) => `/api/admin/forms/templates/${templateId}/file`,

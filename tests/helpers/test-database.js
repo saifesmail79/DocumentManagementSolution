@@ -85,6 +85,7 @@ const TRUNCATION_ORDER = [
   // block goes before the approval tables as well as before documents.
   'form_letters',
   'form_template_access',
+  'form_template_folders',
   'form_template_fields',
   'form_templates',
   // Ink signatures reference documents and users.

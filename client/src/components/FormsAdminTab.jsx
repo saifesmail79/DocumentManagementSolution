@@ -25,6 +25,27 @@
  * renditions screen already learned to avoid ("a tool probe alone is a false
  * green light"), so the state of the converter is stated in its own line.
  *
+ * ─── Why the folder list is a rule and not a suggestion ─────────────────────
+ *
+ * A template used to carry one advisory "default folder": the fill screen
+ * proposed it and the person could file the letter anywhere they held «رفع».
+ * That is the wrong shape for an official letter. A leave request belongs in
+ * the personnel folder and a circular in الصادر, and the institute — not
+ * whoever happens to be typing — decides which. So a template now carries a
+ * list of folders, and a letter made from it may be filed into none but those:
+ * the fill screen offers only the assigned folders the person may upload into,
+ * chooses for them when exactly one qualifies, and the server refuses anything
+ * else outright.
+ *
+ * An empty list keeps the old freedom — any folder the person may upload into —
+ * so a template nobody has restricted behaves as it always did.
+ *
+ * The «إضافة مجلد» box here offers every folder, not only the ones the
+ * administrator may upload into: the list says where letters of this kind
+ * belong, and it is the writer's own permission that decides whether they may
+ * file one there. An administrator who cannot upload into الصادر must still be
+ * able to say that circulars are filed in it.
+ *
  * ─── Why replacing a file shows a difference ────────────────────────────────
  *
  * Re-uploading a template re-reads its placeholders. Labels for placeholders
@@ -50,6 +71,7 @@ import {
   Plus,
   Save,
   Users,
+  X,
 } from 'lucide-react';
 
 import { api, ApiError } from '../api.js';
@@ -60,7 +82,7 @@ import { Modal } from './Modal.jsx';
 import TabIntro from './TabIntro.jsx';
 import ExpandableActions from './ExpandableActions.jsx';
 import { useDialogs } from './DialogProvider.jsx';
-import FormsFolderPicker from './FormsFolderPicker.jsx';
+import FormsFolderPicker, { folderPaths } from './FormsFolderPicker.jsx';
 import FormsFieldsTable, { unmappedRequiredFields } from './FormsFieldsTable.jsx';
 import FormsAccessDialog from './FormsAccessDialog.jsx';
 
@@ -102,13 +124,38 @@ function describeError(caught, fallback) {
   return (MAP[caught.code] ?? fallback) + explained;
 }
 
+/** ` (detail)` when the server named one, so the offending row is identifiable. */
+function detailOf(caught) {
+  const detail = caught instanceof ApiError ? caught.body?.detail : null;
+  return typeof detail === 'string' && detail.trim() ? ` (${detail.trim()})` : '';
+}
+
+/*
+ * `not_found` while creating a template names a reference, not the template.
+ *
+ * The server checks the document type, the approval path and every assigned
+ * folder in one place and answers `not_found` with a detail; the generic
+ * sentence ("the template does not exist — perhaps it was deleted") would send
+ * the administrator looking for the wrong thing entirely.
+ */
+function describeMissingReference(caught) {
+  return (
+    'أحد الاختيارات لا يشير إلى شيء موجود — نوع الوثيقة أو مسار الاعتماد أو أحد مجلدات الإيداع'
+    + `${detailOf(caught)}. صحّح الاختيار وأعد المحاولة.`
+  );
+}
+
 const BLANK_DRAFT = {
   templateId: null,
   name: '',
   description: '',
   typeId: '',
   approvalTemplateId: '',
-  defaultFolderId: '',
+  // The assigned folders, as id strings; [] means any folder the writer may
+  // upload into. `folders` keeps the server's own rows so a folder that lies
+  // past the tree endpoint's cap still has a name to print.
+  folderIds: [],
+  folders: [],
   file: null,
 };
 
@@ -188,10 +235,12 @@ export default function FormsAdminTab() {
     [],
   );
 
-  const folderNames = useMemo(
-    () => new Map((folders ?? []).map((folder) => [String(folder.folderId), folder.name])),
-    [folders],
-  );
+  /*
+   * Full paths for the dialog's assigned list, from the same builder the picker
+   * uses — two folders may both be called «الصادر», and a bare name in a list
+   * an administrator is editing would not say which one is in it.
+   */
+  const folderPathMap = useMemo(() => folderPaths(folders ?? []), [folders]);
 
   async function openPreview(template) {
     setError(null);
@@ -363,7 +412,6 @@ export default function FormsAdminTab() {
                 types={types}
                 approvals={approvals}
                 customFields={customFields}
-                folderNames={folderNames}
                 disabled={!enabled}
                 converter={converter}
                 onEdit={() =>
@@ -374,8 +422,8 @@ export default function FormsAdminTab() {
                     typeId: template.typeId == null ? '' : String(template.typeId),
                     approvalTemplateId:
                       template.approvalTemplateId == null ? '' : String(template.approvalTemplateId),
-                    defaultFolderId:
-                      template.defaultFolderId == null ? '' : String(template.defaultFolderId),
+                    folderIds: (template.folders ?? []).map((folder) => String(folder.folderId)),
+                    folders: template.folders ?? [],
                     file: null,
                   })
                 }
@@ -409,6 +457,7 @@ export default function FormsAdminTab() {
         draft={draft}
         types={types}
         approvals={approvals}
+        folderPathMap={folderPathMap}
         onClose={() => setDraft(null)}
         onSaved={(message) => {
           setNotice(message);
@@ -449,7 +498,6 @@ function TemplateRow({
   types,
   approvals,
   customFields,
-  folderNames,
   disabled,
   converter,
   onEdit,
@@ -469,7 +517,7 @@ function TemplateRow({
   const approvalName = approvals.find(
     (entry) => Number(entry.templateId) === Number(template.approvalTemplateId),
   )?.name;
-  const folderName = folderNames.get(String(template.defaultFolderId));
+  const assigned = template.folders ?? [];
   const access = template.access ?? [];
 
   return (
@@ -508,7 +556,20 @@ function TemplateRow({
           <p className="mt-1 text-xs text-text-muted">
             {`النوع: ${typeName ?? 'بلا نوع'}`}
             {` · الاعتماد التلقائي: ${approvalName ?? 'لا'}`}
-            {` · مجلد افتراضي: ${folderName ?? 'لا'}`}
+            <span>{' · المجلدات: '}</span>
+            {/* «أي مجلد» is the honest reading of an empty list: the rule is
+                absent, not merely unset. */}
+            {assigned.length === 0 ? (
+              <span>أي مجلد</span>
+            ) : (
+              <span>
+                {assigned
+                  .slice(0, 4)
+                  .map((folder) => folder.name)
+                  .join('، ')}
+                {assigned.length > 4 ? <span className="num">{` +${assigned.length - 4}`}</span> : null}
+              </span>
+            )}
           </p>
 
           <p className="mt-0.5 text-xs text-text-muted">
@@ -606,7 +667,7 @@ function TemplateRow({
  * disappear) and its own report. Folding both into one form would make that
  * consequence a side effect of pressing «حفظ».
  */
-function TemplateDialog({ draft, types, approvals, onClose, onSaved }) {
+function TemplateDialog({ draft, types, approvals, folderPathMap, onClose, onSaved }) {
   const [form, setForm] = useState(BLANK_DRAFT);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -620,6 +681,46 @@ function TemplateDialog({ draft, types, approvals, onClose, onSaved }) {
 
   const creating = draft !== null && draft.templateId === null;
 
+  /*
+   * What each assigned folder is called in the list below.
+   *
+   * The tree's own path first, then the name the server sent with the template:
+   * the tree endpoint caps its result, and a folder past that cap must still
+   * print as something an administrator recognises rather than a bare id.
+   */
+  const labels = useMemo(() => {
+    const map = new Map(folderPathMap ?? []);
+    for (const folder of form.folders ?? []) {
+      const id = String(folder.folderId);
+      const base = map.get(id) || folder.path || folder.name || `#${id}`;
+      // A deleted folder is still assigned and blocks every save that keeps
+      // it; naming it is what lets the administrator remove it.
+      map.set(id, folder.isDeleted ? `${base} (محذوف)` : base);
+    }
+    return map;
+  }, [folderPathMap, form.folders]);
+
+  const folderIds = form.folderIds ?? [];
+
+  function addFolder(next) {
+    const id = String(next ?? '').trim();
+    if (!id) return;
+    setForm((current) => {
+      const held = current.folderIds ?? [];
+      // Choosing a folder twice is a slip, not an instruction: the server
+      // collapses duplicates anyway, and a list with a repeated row reads as a
+      // mistake nobody made.
+      return held.includes(id) ? current : { ...current, folderIds: [...held, id] };
+    });
+  }
+
+  function removeFolder(id) {
+    setForm((current) => ({
+      ...current,
+      folderIds: (current.folderIds ?? []).filter((held) => held !== String(id)),
+    }));
+  }
+
   async function save() {
     setBusy(true);
     setError(null);
@@ -632,7 +733,10 @@ function TemplateDialog({ draft, types, approvals, onClose, onSaved }) {
         body.append('description', form.description.trim());
         if (form.typeId) body.append('typeId', form.typeId);
         if (form.approvalTemplateId) body.append('approvalTemplateId', form.approvalTemplateId);
-        if (form.defaultFolderId) body.append('defaultFolderId', form.defaultFolderId);
+        // A whole array as one scalar part, the same idiom the upload routes use
+        // for a metadata array — multipart has no repeated-field convention the
+        // server reads, and the parts must precede the file either way.
+        if (folderIds.length) body.append('folderIds', JSON.stringify(folderIds));
         body.append('file', form.file, form.file.name);
 
         await api.forms.adminCreate(body);
@@ -643,8 +747,31 @@ function TemplateDialog({ draft, types, approvals, onClose, onSaved }) {
           description: form.description.trim(),
           typeId: form.typeId ? Number(form.typeId) : null,
           approvalTemplateId: form.approvalTemplateId ? Number(form.approvalTemplateId) : null,
-          defaultFolderId: form.defaultFolderId ? String(form.defaultFolderId) : null,
         });
+
+        /*
+         * The folders are their own route, and it is called only when the set
+         * actually differs: it replaces the whole set and writes an audit row,
+         * and a template saved for a typo should not read as "the folders were
+         * changed" in the log.
+         */
+        const before = [...(draft.folderIds ?? [])].sort().join('\u0000');
+        const after = [...folderIds].sort().join('\u0000');
+        if (before !== after) {
+          try {
+            await api.forms.adminSetFolders(draft.templateId, folderIds);
+          } catch (caught) {
+            // The template itself is already saved. Said plainly, with the
+            // dialog left open: pressing «حفظ» again re-sends both, and a
+            // closed dialog would hide which half of the save survived.
+            setError(
+              caught instanceof ApiError && caught.code === 'not_found'
+                ? `حُفظت بيانات النموذج، وتعذر حفظ المجلدات: أحد المجلدات المختارة غير موجود أو محذوف${detailOf(caught)}. أزله من القائمة ثم احفظ.`
+                : describeError(caught, 'حُفظت بيانات النموذج، وتعذر حفظ مجلدات الإيداع. أعد المحاولة.'),
+            );
+            return;
+          }
+        }
 
         const cleared = result?.clearedMappings ?? [];
         onSaved(
@@ -655,7 +782,11 @@ function TemplateDialog({ draft, types, approvals, onClose, onSaved }) {
       }
       onClose();
     } catch (caught) {
-      setError(describeError(caught, creating ? 'تعذر إضافة النموذج.' : 'تعذر حفظ النموذج.'));
+      setError(
+        creating && caught instanceof ApiError && caught.code === 'not_found'
+          ? describeMissingReference(caught)
+          : describeError(caught, creating ? 'تعذر إضافة النموذج.' : 'تعذر حفظ النموذج.'),
+      );
     } finally {
       setBusy(false);
     }
@@ -750,14 +881,64 @@ function TemplateDialog({ draft, types, approvals, onClose, onSaved }) {
           </label>
         </div>
 
-        <FormsFolderPicker
-          label="المجلد الافتراضي للإيداع (اختياري)"
-          value={form.defaultFolderId}
-          onChange={(next) => setForm({ ...form, defaultFolderId: next })}
-          emptyLabel="— بلا مجلد افتراضي —"
-          requireUpload={false}
-          hint="يُقترح على من يستخدم النموذج، ويبقى بإمكانه اختيار غيره."
-        />
+        <div className="rounded-lg border border-border bg-surface-muted/30 p-3">
+          <p className="text-sm font-medium text-text">مجلدات الإيداع</p>
+          <p className="mt-1 text-xs leading-relaxed text-text-muted">
+            لا تودع كتب هذا النموذج إلا في المجلدات المحددة هنا. اتركها فارغة ليودع كل مستخدم كتابه
+            في أي مجلد يملك فيه صلاحية «رفع».
+          </p>
+
+          {folderIds.length === 0 ? (
+            <p className="mt-2 text-xs text-text-muted">
+              لا مجلد محدد — أي مجلد يملك كاتب الكتاب فيه صلاحية «رفع».
+            </p>
+          ) : (
+            <ul className="mt-2 space-y-1">
+              {folderIds.map((id) => {
+                const label = labels.get(String(id)) ?? `#${id}`;
+                return (
+                  <li
+                    key={id}
+                    className="flex items-center gap-2 rounded border border-border bg-surface px-2 py-1"
+                  >
+                    <span className="min-w-0 flex-1 break-words text-xs text-text">
+                      {label}
+                      <span className="num ms-1 text-text-muted">#{id}</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => removeFolder(id)}
+                      disabled={busy}
+                      aria-label={`إزالة المجلد ${label}`}
+                      title="إزالة من مجلدات النموذج"
+                      className="rounded p-1 text-text-muted hover:bg-red-500/10 hover:text-red-600
+                        disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <X size={14} aria-hidden="true" />
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+
+          <div className="mt-3">
+            {/*
+              The box never holds a value: choosing appends to the list above and
+              leaves the search empty for the next folder. `requireUpload` is off
+              on purpose — see the note at the top of this file.
+            */}
+            <FormsFolderPicker
+              label="إضافة مجلد"
+              value=""
+              onChange={addFolder}
+              disabled={busy}
+              requireUpload={false}
+              emptyLabel="— اختر مجلداً لإضافته —"
+              hint="تُعرض كل المجلدات: الصلاحية تُمنح للأشخاص، والقائمة هنا تقول أين تودع كتب هذا النموذج."
+            />
+          </div>
+        </div>
 
         {creating ? (
           <div className="rounded-lg border border-border bg-surface-muted/30 p-3">

@@ -22,6 +22,20 @@
  * in someone else's name from the browser. They arrive marked `builtIn` and are
  * not rendered at all — an input the server ignores is worse than no input.
  *
+ * ─── Why the destination is sometimes chosen for you ────────────────────────
+ *
+ * A template may be assigned to particular folders (الإدارة ← النماذج), and
+ * then a letter from it may be filed into none but those: `generate` refuses
+ * `folder_not_allowed` for anything else. The server sends those folders back
+ * already narrowed to the ones this person may upload into, so this screen
+ * hands that list to the picker and nothing else is offered. When exactly one
+ * survives, it is chosen — there is no question left to ask — and the folder
+ * remembered from the last letter is ignored, because a remembered folder is a
+ * convenience and the assignment is a rule.
+ *
+ * A template assigned to no folder keeps the old behaviour: any folder the
+ * person may upload into, starting from the one they used last.
+ *
  * ─── Why the notice on a duplicate or a failed approval stays here ──────────
  *
  * On success the new document is opened, which is what someone pressing
@@ -88,6 +102,7 @@ const GENERATE_ERRORS = {
   template_inactive: 'هذا النموذج معطّل حالياً. اختر نموذجاً آخر أو راجع مدير النظام.',
   not_found: 'النموذج أو المجلد غير موجود، أو لا تملك صلاحية عليه. حدّث الصفحة وأعد المحاولة.',
   forbidden: 'لا تملك صلاحية «رفع» على المجلد المختار. اختر مجلداً آخر أو اطلب الصلاحية.',
+  folder_not_allowed: 'هذا النموذج لا يودع في هذا المجلد. اختر مجلداً من القائمة.',
   busy: 'الخادم مشغول بتحويل كتب أخرى. أعد المحاولة بعد قليل.',
   libreoffice_missing:
     'التحويل إلى PDF غير متاح على الخادم (LibreOffice غير مثبّت). راجع مدير النظام قبل إعادة المحاولة.',
@@ -412,14 +427,32 @@ function FillForm({ template, ready, onBack }) {
     [template.fields],
   );
 
-  const [title, setTitle] = useState(`${template.name} — ${formatDate(new Date())}`);
-  // A seed, not a decision: the template's default folder is chosen by an
-  // administrator without the upload rule applied, and the remembered one may
-  // predate a permission change. The picker reconciles it against what it can
-  // actually offer (`clearWhenUnavailable`) and clears it if it cannot.
-  const [folderId, setFolderId] = useState(
-    () => String(template.defaultFolderId ?? '') || readLastFolder(userId),
+  /*
+   * The folders this template may be filed into, already narrowed by the server
+   * to the ones this person may upload into. Empty means "any folder they may
+   * upload into", which is what the picker offers on its own.
+   */
+  const assigned = useMemo(
+    () => (template.folders ?? []).map((folder) => String(folder.folderId)),
+    [template.folders],
   );
+  const restricted = assigned.length > 0;
+
+  const [title, setTitle] = useState(`${template.name} — ${formatDate(new Date())}`);
+  /*
+   * A seed, not a decision.
+   *
+   * One assigned folder is the answer, so it is filled in. Several, and the
+   * choice is made here — the folder remembered from the last letter is not
+   * consulted, because it may not be among them. With none assigned the
+   * remembered folder returns, and it may predate a permission change: the
+   * picker reconciles whatever it is handed against what it can actually offer
+   * (`clearWhenUnavailable`) and clears it if it cannot.
+   */
+  const [folderId, setFolderId] = useState(() => {
+    if (restricted) return assigned.length === 1 ? assigned[0] : '';
+    return readLastFolder(userId);
+  });
   const [values, setValues] = useState({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -452,7 +485,10 @@ function FillForm({ template, ready, onBack }) {
         ),
       });
 
-      rememberLastFolder(userId, folderId);
+      // Remembered only for templates that accept any folder; where the
+      // assignment decides, a remembered folder would be read back into a
+      // screen that never offers it.
+      if (!restricted) rememberLastFolder(userId, folderId);
 
       const notes = [];
       if (result.duplicateOf?.length) {
@@ -523,10 +559,16 @@ function FillForm({ template, ready, onBack }) {
           value={folderId}
           onChange={setFolderId}
           disabled={busy}
-          // A default or remembered folder this person cannot file into is
+          // Non-empty: the template's own folders are the whole list.
+          only={restricted ? assigned : null}
+          // An assigned or remembered folder this person cannot file into is
           // cleared rather than submitted unseen.
           clearWhenUnavailable
-          hint="يُودع الكتاب في هذا المجلد، وتظهر المجلدات التي تملك فيها صلاحية «رفع» فقط."
+          hint={
+            restricted
+              ? 'هذا النموذج مخصص لمجلدات بعينها، ولا تظهر منها إلا ما تملك فيه صلاحية «رفع».'
+              : 'يُودع الكتاب في هذا المجلد، وتظهر المجلدات التي تملك فيها صلاحية «رفع» فقط.'
+          }
         />
       </Card>
 

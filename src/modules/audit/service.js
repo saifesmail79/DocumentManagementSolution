@@ -100,6 +100,7 @@ export const ACTION = Object.freeze({
   FORM_TEMPLATE_FILE_REPLACED: 'form_template.file_replaced',
   FORM_TEMPLATE_ACCESS_CHANGED: 'form_template.access_changed',
   FORM_TEMPLATE_FIELDS_CHANGED: 'form_template.fields_changed',
+  FORM_TEMPLATE_FOLDERS_CHANGED: 'form_template.folders_changed',
   FORM_LETTER_CREATED: 'form_letter.created',
   // Ink signing (التوقيع): a new version carrying drawn strokes.
   DOCUMENT_SIGNED: 'document.signed',
@@ -188,6 +189,7 @@ export const CATEGORY = Object.freeze({
     ACTION.FORM_TEMPLATE_FILE_REPLACED,
     ACTION.FORM_TEMPLATE_ACCESS_CHANGED,
     ACTION.FORM_TEMPLATE_FIELDS_CHANGED,
+    ACTION.FORM_TEMPLATE_FOLDERS_CHANGED,
   ],
 });
 

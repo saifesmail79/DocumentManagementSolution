@@ -31,8 +31,8 @@ of 2026-09-27, so you can look before you build.
 ## 2. Upload and publish it (الإدارة ← النماذج)
 
 1. Press **نموذج جديد**: name, description, optional document type, optional
-   approval template (starts automatically after each letter), optional
-   default folder, then the file. A file with a stray `{{` or a placeholder
+   approval template (starts automatically after each letter), the folders
+   its letters may be filed into (none, one or several), then the file. A file with a stray `{{` or a placeholder
    named like `{{@x}}` is refused with the reason.
 2. The template starts **disabled**. The fields table lists every placeholder
    found: give each an Arabic label, tick «متعدد الأسطر» for the body, «إلزامي»
@@ -43,7 +43,9 @@ of 2026-09-27, so you can look before you build.
    place to check that LibreOffice reproduced the letterhead, tables and
    footer faithfully — the answer to open question 5 for that template.
 4. **الصلاحية**: choose the groups or users who may use it. Super
-   administrators always can.
+   administrators always can. **المجلدات**: assign the folders a letter from
+   this template may go into; with none assigned, any folder the writer may
+   upload into is allowed.
 5. **تفعيل**. Activation is refused while a field has no label, or while the
    document type demands a required field the template does not supply.
 6. **استبدال الملف** re-reads the placeholders and shows what was added,
@@ -55,10 +57,10 @@ of 2026-09-27, so you can look before you build.
 
 1. The home menu shows the **النماذج** tile only to someone with a usable
    template. Open it, pick the template.
-2. Fill the fields, choose the destination folder (only folders you may
-   upload into are offered; the last one used is remembered per person, and a
-   remembered or default folder you may no longer upload into is cleared so
-   you choose again), keep or change
+2. Fill the fields, choose the destination folder. When the template is
+   assigned to folders, only those you may upload into are offered and a
+   single one is chosen for you; otherwise any folder you may upload into is
+   offered and the last one used is remembered per person. Keep or change
    the proposed title, press **إنشاء الكتاب**. The button shows «جارٍ تجهيز
    الكتاب…» for a few seconds.
 3. The new document opens. Check: the PDF text, the document type, the

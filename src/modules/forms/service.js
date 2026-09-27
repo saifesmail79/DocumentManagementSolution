@@ -19,6 +19,20 @@
  * makes about scanning). `form_letters` records only the provenance — which
  * format, which values, by whom.
  *
+ * ─── Where a letter may be filed is the format's decision ───────────────────
+ *
+ * An official format belongs to particular places — the outgoing-letters folder
+ * of each department entitled to write on it. So a format carries a list of
+ * assigned folders, and while that list is non-empty it is a RULE: the fill
+ * screen offers only those of them the person may upload into, and `generate`
+ * refuses every other destination. An empty list means «anywhere this person may
+ * upload», which is what every format did before the list existed, so nothing
+ * already configured changed meaning.
+ *
+ * A format assigned only to folders a person cannot upload into is not usable by
+ * them at all, and is left out of their list and their count rather than offered
+ * and then refused at the last step.
+ *
  * ─── Why the work is ordered the way it is ──────────────────────────────────
  *
  * Everything that can be refused without spending anything is refused first:
@@ -168,18 +182,78 @@ async function libreOfficePresent() {
   }
 }
 
+/**
+ * How many formats this person may actually fill.
+ *
+ * It counts the list rather than counting rows, because "may fill" now depends
+ * on the folders a format is assigned to: a format whose every assigned folder
+ * is one this person cannot upload into is not usable by them. A COUNT that did
+ * not know that rule would promise a number the picker then contradicts.
+ */
 async function usableCount({ userId, isSuperAdmin }) {
+  return (await listTemplatesFor({ userId, isSuperAdmin })).length;
+}
+
+// ── The assigned folders ─────────────────────────────────────────────────
+
+/**
+ * The folders a format's letters may be filed into — a RULE, not a suggestion.
+ *
+ * Empty means "anywhere this person may upload", which is what every format
+ * carried before the list existed. Non-empty means only these, and the fill
+ * screen is given only the ones the person may upload into.
+ *
+ * The raw ids are read without touching permissions or the tree: `generate`
+ * refuses a destination that is not on the list before it reads a single
+ * permission bit, so a format that is not filed here costs nothing to refuse.
+ */
+async function assignedFolderIds(templateId, executor = db) {
   const result = await sql`
-    SELECT COUNT(*) AS n
-      FROM dbo.form_templates t
-     WHERE t.is_active = 1
-       AND (${isSuperAdmin ? 1 : 0} = 1 OR EXISTS (
-             SELECT 1 FROM dbo.form_template_access a
-              WHERE a.template_id = t.template_id
-                AND a.principal_id IN (SELECT principal_id FROM dbo.fn_expand_principals(${userId}))
-           ))
+    SELECT folder_id FROM dbo.form_template_folders WHERE template_id = ${templateId}
+  `.execute(executor);
+  return new Set(result.rows.map((row) => String(row.folder_id)));
+}
+
+/**
+ * For each of these formats: everything assigned to it, and the subset this
+ * person may actually file into.
+ *
+ * One query for the whole page rather than one per folder: `fn_effective_
+ * permission` is exactly what `permissionBits` wraps, and CROSS APPLY calls it
+ * once per assigned folder inside the server instead of once per round trip.
+ * A deleted folder stays in `assigned` — so it cannot silently widen the rule
+ * back to "any folder" — but it is never offered.
+ */
+async function foldersByTemplate(templateIds, { userId, isSuperAdmin }) {
+  const byTemplate = new Map();
+  if (templateIds.length === 0) return byTemplate;
+
+  const result = await sql`
+    SELECT tf.template_id, tf.folder_id, fo.name,
+           -- Usable means the person can both see the folder in the tree the
+           -- picker draws from (BROWSE) and file into it (UPLOAD). An
+           -- upload-only grant would list a template with no folder to choose.
+           CASE WHEN fo.is_deleted = 0
+                  AND (${isSuperAdmin ? 1 : 0} = 1
+                       OR (p.perm_bits & ${PERM.UPLOAD | PERM.BROWSE}) = ${PERM.UPLOAD | PERM.BROWSE})
+                THEN 1 ELSE 0 END AS usable
+      FROM dbo.form_template_folders tf
+      JOIN dbo.folders fo ON fo.folder_id = tf.folder_id
+     CROSS APPLY dbo.fn_effective_permission(${userId}, tf.folder_id) p
+     WHERE tf.template_id IN (${sql.join(templateIds.map((value) => sql`${value}`))})
+     ORDER BY fo.name
   `.execute(db);
-  return Number(result.rows[0].n);
+
+  for (const row of result.rows) {
+    const key = Number(row.template_id);
+    const entry = byTemplate.get(key) ?? { assigned: 0, usable: [] };
+    entry.assigned += 1;
+    if (Number(row.usable) === 1) {
+      entry.usable.push({ folderId: String(row.folder_id), name: row.name });
+    }
+    byTemplate.set(key, entry);
+  }
+  return byTemplate;
 }
 
 // ── The working surface ──────────────────────────────────────────────────
@@ -187,7 +261,7 @@ async function usableCount({ userId, isSuperAdmin }) {
 /** The formats this person may fill, for the picker. */
 export async function listTemplatesFor({ userId, isSuperAdmin = false }) {
   const result = await sql`
-    SELECT t.template_id, t.name, t.description, t.type_id, t.default_folder_id,
+    SELECT t.template_id, t.name, t.description, t.type_id,
            ty.name AS type_name
       FROM dbo.form_templates t
       LEFT JOIN dbo.document_types ty ON ty.type_id = t.type_id
@@ -200,14 +274,31 @@ export async function listTemplatesFor({ userId, isSuperAdmin = false }) {
      ORDER BY t.name
   `.execute(db);
 
-  return result.rows.map((row) => ({
-    templateId: String(row.template_id),
-    name: row.name,
-    description: row.description,
-    typeId: row.type_id === null ? null : Number(row.type_id),
-    typeName: row.type_name ?? null,
-    defaultFolderId: row.default_folder_id === null ? null : String(row.default_folder_id),
-  }));
+  const folders = await foldersByTemplate(
+    result.rows.map((row) => Number(row.template_id)),
+    { userId, isSuperAdmin },
+  );
+
+  const out = [];
+  for (const row of result.rows) {
+    const entry = folders.get(Number(row.template_id));
+
+    // Assigned to folders and none of them is one this person may file into:
+    // the format is not usable by them at all, so it is not offered. Left in
+    // the list it would be a format whose every destination the fill screen has
+    // to refuse — an entry that exists only to fail.
+    if (entry && entry.usable.length === 0) continue;
+
+    out.push({
+      templateId: String(row.template_id),
+      name: row.name,
+      description: row.description,
+      typeId: row.type_id === null ? null : Number(row.type_id),
+      typeName: row.type_name ?? null,
+      folders: entry ? entry.usable : [],
+    });
+  }
+  return out;
 }
 
 /**
@@ -221,7 +312,7 @@ export async function listTemplatesFor({ userId, isSuperAdmin = false }) {
 async function resolveForCaller({ templateId, userId, isSuperAdmin }) {
   const result = await sql`
     SELECT t.template_id, t.name, t.description, t.storage_path, t.original_filename,
-           t.sha256, t.bytes, t.type_id, t.approval_template_id, t.default_folder_id,
+           t.sha256, t.bytes, t.type_id, t.approval_template_id,
            t.is_active, ty.name AS type_name,
            CASE WHEN ${isSuperAdmin ? 1 : 0} = 1 OR EXISTS (
                   SELECT 1 FROM dbo.form_template_access a
@@ -247,17 +338,27 @@ export async function getTemplateFor({ templateId, userId, isSuperAdmin = false 
   if (!found.ok) return found;
   if (Number(found.row.is_active) !== 1) return { ok: false, reason: 'template_inactive' };
 
+  const folders = (await foldersByTemplate([Number(templateId)], { userId, isSuperAdmin })).get(
+    Number(templateId),
+  );
+
+  // Assigned to folders, none of them usable by this person: the same answer the
+  // picker gives by leaving the format out. An empty `folders` means «anywhere
+  // you may upload», so returning the form with an empty list would offer every
+  // folder they hold UPLOAD on and then refuse each one at «إنشاء الكتاب».
+  if (folders && folders.usable.length === 0) return { ok: false, reason: 'not_found' };
+
   const fields = await templateFields(templateId);
   return {
     ok: true,
     template: {
-      ...describeTemplate(found.row),
+      ...describeTemplate(found.row, folders ? folders.usable : []),
       fields: fields.filter((field) => !field.builtIn),
     },
   };
 }
 
-function describeTemplate(row) {
+function describeTemplate(row, folders = []) {
   return {
     templateId: String(row.template_id),
     name: row.name,
@@ -265,7 +366,7 @@ function describeTemplate(row) {
     typeId: row.type_id === null ? null : Number(row.type_id),
     typeName: row.type_name ?? null,
     approvalTemplateId: row.approval_template_id === null ? null : Number(row.approval_template_id),
-    defaultFolderId: row.default_folder_id === null ? null : String(row.default_folder_id),
+    folders,
     isActive: Number(row.is_active) === 1,
     originalFilename: row.original_filename,
     bytes: row.bytes === undefined ? undefined : Number(row.bytes),
@@ -341,6 +442,16 @@ export async function generate({
   if (!found.ok) return found;
   const template = found.row;
   if (Number(template.is_active) !== 1) return { ok: false, reason: 'template_inactive' };
+
+  // The assigned folders, first of everything: while the list is non-empty the
+  // format's letters belong in one of those places and nowhere else. Refused
+  // here, before a permission bit is read or a value is validated, because this
+  // is the cheapest refusal in the function and the destination is the one thing
+  // the person chose that the format itself can veto.
+  const assigned = await assignedFolderIds(templateId);
+  if (assigned.size > 0 && !assigned.has(String(folderId))) {
+    return { ok: false, reason: 'folder_not_allowed' };
+  }
 
   const cleanTitle = String(title ?? '').trim();
   if (!cleanTitle || cleanTitle.length > 500) return { ok: false, reason: 'invalid_title' };
@@ -577,17 +688,61 @@ export async function readTemplateFile(templateId) {
 
 // ── Administration ───────────────────────────────────────────────────────
 
-/** Every format, with its fields and its access list, for the admin tab. */
+/**
+ * The assigned folders of every format, each with the path an administrator
+ * recognises it by.
+ *
+ * The path is built from `mpath` — the materialized path every folder carries —
+ * rather than by walking parents one row at a time: two queries answer for the
+ * whole page. A deleted folder is still listed, because an administrator looking
+ * at an assignment that no longer leads anywhere needs to see it to remove it.
+ */
+async function adminFoldersByTemplate() {
+  const rows = await sql`
+    SELECT tf.template_id, tf.folder_id, fo.name, fo.mpath, fo.is_deleted
+      FROM dbo.form_template_folders tf
+      JOIN dbo.folders fo ON fo.folder_id = tf.folder_id
+     ORDER BY fo.name
+  `.execute(db);
+
+  if (rows.rows.length === 0) return new Map();
+
+  const chains = rows.rows.map((row) => String(row.mpath ?? '').split('/').filter(Boolean));
+  const involved = [...new Set(chains.flat())];
+  const names = await sql`
+    SELECT folder_id, name FROM dbo.folders
+     WHERE folder_id IN (${sql.join(involved.map((value) => sql`${value}`))})
+  `.execute(db);
+  const nameById = new Map(names.rows.map((row) => [String(row.folder_id), row.name]));
+
+  const byTemplate = new Map();
+  for (const [index, row] of rows.rows.entries()) {
+    const key = Number(row.template_id);
+    const list = byTemplate.get(key) ?? [];
+    const chain = chains[index].map((id) => nameById.get(id)).filter(Boolean);
+    list.push({
+      folderId: String(row.folder_id),
+      name: row.name,
+      path: chain.length > 0 ? chain.join(' / ') : row.name,
+      // A deleted folder stays assigned (so a deletion never widens a format
+      // to «any folder») but nobody can file into it; the screen says so.
+      isDeleted: row.is_deleted === true || Number(row.is_deleted) === 1,
+    });
+    byTemplate.set(key, list);
+  }
+  return byTemplate;
+}
+
+/** Every format, with its fields, its folders and its access list, for the admin tab. */
 export async function listTemplatesAdmin() {
   const templates = await sql`
     SELECT t.template_id, t.name, t.description, t.storage_path, t.original_filename,
-           t.sha256, t.bytes, t.type_id, t.approval_template_id, t.default_folder_id,
+           t.sha256, t.bytes, t.type_id, t.approval_template_id,
            t.is_active, t.created_at, t.updated_at,
-           ty.name AS type_name, ap.name AS approval_template_name, fo.name AS default_folder_name
+           ty.name AS type_name, ap.name AS approval_template_name
       FROM dbo.form_templates t
       LEFT JOIN dbo.document_types ty ON ty.type_id = t.type_id
       LEFT JOIN dbo.approval_templates ap ON ap.template_id = t.approval_template_id
-      LEFT JOIN dbo.folders fo ON fo.folder_id = t.default_folder_id
      ORDER BY t.name
   `.execute(db);
 
@@ -611,15 +766,16 @@ export async function listTemplatesAdmin() {
     byTemplate.set(Number(row.template_id), list);
   }
 
+  const foldersByTemplateId = await adminFoldersByTemplate();
+
   const out = [];
   for (const row of templates.rows) {
     const fields = await templateFields(row.template_id);
     out.push({
-      ...describeTemplate(row),
+      ...describeTemplate(row, foldersByTemplateId.get(Number(row.template_id)) ?? []),
       createdAt: new Date(row.created_at).toISOString(),
       updatedAt: new Date(row.updated_at).toISOString(),
       approvalTemplateName: row.approval_template_name ?? null,
-      defaultFolderName: row.default_folder_name ?? null,
       fields,
       access: byTemplate.get(Number(row.template_id)) ?? [],
       unlabelled: fields.filter((field) => !field.builtIn && String(field.label ?? '').trim() === '').length,
@@ -649,7 +805,7 @@ async function exists(table, column, value) {
   return Number(result.rows[0].n) > 0;
 }
 
-async function checkReferences({ typeId, approvalTemplateId, defaultFolderId }) {
+async function checkReferences({ typeId, approvalTemplateId }) {
   if (typeId !== null && typeId !== undefined && !(await exists('document_types', 'type_id', typeId))) {
     return { ok: false, reason: 'not_found', detail: 'نوع الوثيقة غير موجود' };
   }
@@ -660,14 +816,33 @@ async function checkReferences({ typeId, approvalTemplateId, defaultFolderId }) 
   ) {
     return { ok: false, reason: 'not_found', detail: 'قالب الموافقة غير موجود' };
   }
-  if (
-    defaultFolderId !== null &&
-    defaultFolderId !== undefined &&
-    !(await exists('folders', 'folder_id', defaultFolderId))
-  ) {
-    return { ok: false, reason: 'not_found', detail: 'المجلد الافتراضي غير موجود' };
-  }
   return { ok: true };
+}
+
+/**
+ * Cleans a list of folder ids and proves every one of them is a live folder.
+ *
+ * Duplicates collapse — the table's key would refuse the second row anyway, and
+ * an administrator who picked the same folder twice meant it once. A deleted
+ * folder is refused rather than stored: an assignment nobody can file into is a
+ * format that cannot be used, and the administrator is here now to pick another.
+ *
+ * No permission check: which folders a format belongs to is the institute's
+ * decision, not this administrator's own upload rights. Whether a particular
+ * person may file there is decided when they file.
+ */
+async function cleanFolderIds(folderIds) {
+  const ids = [...new Set((Array.isArray(folderIds) ? folderIds : []).map((id) => String(id).trim()))];
+  for (const id of ids) {
+    if (!/^[0-9]{1,19}$/.test(id)) return { ok: false, reason: 'invalid_value', detail: id };
+    const live = await sql`
+      SELECT COUNT(*) AS n FROM dbo.folders WHERE folder_id = ${id} AND is_deleted = 0
+    `.execute(db);
+    if (Number(live.rows[0].n) === 0) {
+      return { ok: false, reason: 'not_found', detail: `المجلد غير موجود: ${id}` };
+    }
+  }
+  return { ok: true, ids };
 }
 
 /**
@@ -682,7 +857,7 @@ export async function createTemplate({
   description = null,
   typeId = null,
   approvalTemplateId = null,
-  defaultFolderId = null,
+  folderIds = null,
   filename,
   buffer,
 }) {
@@ -694,8 +869,11 @@ export async function createTemplate({
   const shape = looksLikeDocx(buffer, filename);
   if (!shape.ok) return shape;
 
-  const references = await checkReferences({ typeId, approvalTemplateId, defaultFolderId });
+  const references = await checkReferences({ typeId, approvalTemplateId });
   if (!references.ok) return references;
+
+  const folders = await cleanFolderIds(folderIds);
+  if (!folders.ok) return folders;
 
   const inspected = await inspectTemplate(buffer);
   if (!inspected.ok) return inspected;
@@ -716,15 +894,16 @@ export async function createTemplate({
       const inserted = await sql`
         INSERT INTO dbo.form_templates
           (name, description, storage_path, original_filename, sha256, bytes,
-           type_id, approval_template_id, default_folder_id, is_active, created_by)
+           type_id, approval_template_id, is_active, created_by)
         OUTPUT INSERTED.template_id AS tid
         VALUES (${cleanName}, ${description ?? null}, ${stored.relativePath},
                 ${String(filename).slice(0, 255)}, ${sha256}, ${stored.bytes},
-                ${typeId}, ${approvalTemplateId}, ${defaultFolderId}, 0, ${userId})
+                ${typeId}, ${approvalTemplateId}, 0, ${userId})
       `.execute(trx);
 
       const id = Number(inserted.rows[0].tid);
       await insertFields(trx, id, inspected.tags, new Map());
+      await insertFolders(trx, id, folders.ids);
       return id;
     });
   } catch (error) {
@@ -762,6 +941,16 @@ async function insertFields(trx, templateId, tags, keep) {
   }
 }
 
+/** Writes the folder assignments. The caller has already cleaned the ids. */
+async function insertFolders(trx, templateId, folderIds) {
+  for (const folderId of folderIds) {
+    await sql`
+      INSERT INTO dbo.form_template_folders (template_id, folder_id)
+      VALUES (${templateId}, ${folderId})
+    `.execute(trx);
+  }
+}
+
 async function adminTemplate(templateId) {
   const all = await listTemplatesAdmin();
   return all.find((template) => template.templateId === String(templateId)) ?? null;
@@ -782,7 +971,6 @@ export async function updateTemplate({
   description,
   typeId,
   approvalTemplateId,
-  defaultFolderId,
   isActive,
 }) {
   const current = await sql`
@@ -799,7 +987,6 @@ export async function updateTemplate({
   const references = await checkReferences({
     typeId: typeId === undefined ? null : typeId,
     approvalTemplateId: approvalTemplateId === undefined ? null : approvalTemplateId,
-    defaultFolderId: defaultFolderId === undefined ? null : defaultFolderId,
   });
   if (!references.ok) return references;
 
@@ -871,8 +1058,6 @@ export async function updateTemplate({
              type_id = CASE WHEN ${typeId === undefined ? 1 : 0} = 1 THEN type_id ELSE ${typeId ?? null} END,
              approval_template_id = CASE WHEN ${approvalTemplateId === undefined ? 1 : 0} = 1
                                         THEN approval_template_id ELSE ${approvalTemplateId ?? null} END,
-             default_folder_id = CASE WHEN ${defaultFolderId === undefined ? 1 : 0} = 1
-                                      THEN default_folder_id ELSE ${defaultFolderId ?? null} END,
              is_active = CASE WHEN ${isActive === undefined ? 1 : 0} = 1 THEN is_active ELSE ${isActive ? 1 : 0} END,
              updated_at = SYSUTCDATETIME()
        WHERE template_id = ${templateId}
@@ -1005,6 +1190,35 @@ export async function setTemplateAccess({ templateId, principalIds }) {
         INSERT INTO dbo.form_template_access (template_id, principal_id) VALUES (${templateId}, ${id})
       `.execute(trx);
     }
+  });
+
+  const template = await adminTemplate(templateId);
+  return { ok: true, template };
+}
+
+/**
+ * Where this format's letters may be filed.
+ *
+ * An empty list is meaningful and allowed: it restores «any folder the person may
+ * upload into», which is what every format did before assignment existed. So
+ * this is a replace, not a merge — the administrator is looking at the whole list
+ * in the dialog, and the set they submit is the set that holds afterwards.
+ *
+ * Replaced in ONE transaction: a delete that committed without its insert would
+ * leave the format open to every folder, which is the failure that matters here.
+ */
+export async function setTemplateFolders({ templateId, folderIds }) {
+  const current = await sql`
+    SELECT template_id FROM dbo.form_templates WHERE template_id = ${templateId}
+  `.execute(db);
+  if (!current.rows[0]) return { ok: false, reason: 'not_found' };
+
+  const folders = await cleanFolderIds(folderIds);
+  if (!folders.ok) return folders;
+
+  await db.transaction().execute(async (trx) => {
+    await sql`DELETE FROM dbo.form_template_folders WHERE template_id = ${templateId}`.execute(trx);
+    await insertFolders(trx, templateId, folders.ids);
   });
 
   const template = await adminTemplate(templateId);
