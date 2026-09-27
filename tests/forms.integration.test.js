@@ -67,7 +67,14 @@ function para(text) {
  * document: the content types, the package relationship, a body, and
  * optionally a header part referenced from the section properties.
  */
-function buildDocx({ body = [], header = null, extra = {}, externalRel = false, doctype = false } = {}) {
+function buildDocx({
+  body = [],
+  header = null,
+  extra = {},
+  externalRel = false,
+  hyperlinkRel = false,
+  doctype = false,
+} = {}) {
   const zip = new PizZip();
 
   const overrides = [
@@ -104,13 +111,19 @@ function buildDocx({ body = [], header = null, extra = {}, externalRel = false, 
       ` mc:Ignorable="w14"><w:body>${body.map(para).join('')}${sectPr}</w:body></w:document>`,
   );
 
-  if (header || externalRel) {
+  if (header || externalRel || hyperlinkRel) {
     const relationships = [
       header
         ? '<Relationship Id="rId10" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>'
         : '',
       externalRel
         ? '<Relationship Id="rId99" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="http://example.invalid/logo.png" TargetMode="External"/>'
+        : '',
+      // What every institute letterhead carries in its footer: a website and
+      // a mail address. External by definition, harmless by nature.
+      hyperlinkRel
+        ? '<Relationship Id="rId98" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="http://www.example.invalid" TargetMode="External"/>'
+          + '<Relationship Id="rId97" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="mailto:info@example.invalid" TargetMode="External"/>'
         : '',
     ].join('');
     zip.file(
@@ -437,7 +450,17 @@ describe('official letter formats', { skip: CONFIGURED ? false : target.reason }
     );
     assert.equal(external.statusCode, 400);
     assert.equal(external.json().error, 'template_invalid');
-    assert.match(external.json().detail, /External/);
+    assert.match(external.json().detail, /image/);
+
+    // A hyperlink is external too, and must be accepted: refusing it refused
+    // the institute's real letterhead (a website and a mail address in the
+    // footer) while blocking nothing that is ever fetched.
+    const linked = await uploadTemplate(
+      boss,
+      { name: 'روابط' },
+      { filename: 'x.docx', buffer: buildDocx({ body: ['{{a}}'], hyperlinkRel: true }) },
+    );
+    assert.equal(linked.statusCode, 201, JSON.stringify(linked.json()));
 
     const entities = await uploadTemplate(
       boss,

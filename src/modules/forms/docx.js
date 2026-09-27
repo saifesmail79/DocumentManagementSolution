@@ -83,6 +83,32 @@ const MAX_PART_UNCOMPRESSED = 50 * 1024 * 1024;
 const FORBIDDEN_FIELDS = ['INCLUDEPICTURE', 'INCLUDETEXT', 'DDEAUTO', 'DDE', 'IMPORT'];
 
 /**
+ * External relationship types that are safe: nothing fetches them when the
+ * document is opened or converted. A hyperlink is a link the reader may click
+ * in the PDF; an attached template is a note of which .dotx the document was
+ * based on. Every institute letterhead carries a website and a mail address in
+ * its footer, so refusing these would refuse the real templates while
+ * blocking nothing.
+ *
+ * Everything else external — an image, an OLE object, a chart, a subdocument,
+ * a frame — is content LibreOffice would resolve on load, which is the whole
+ * reason external targets are refused.
+ */
+const HARMLESS_EXTERNAL = new Set(['hyperlink', 'attachedTemplate', 'mailTo']);
+
+/** The type of the first external relationship that is not harmless, or null. */
+function forbiddenExternalRelationship(xml) {
+  for (const match of xml.matchAll(/<Relationship\b[^>]*>/gi)) {
+    const element = match[0];
+    if (!/TargetMode\s*=\s*"External"/i.test(element)) continue;
+    const type = /\bType\s*=\s*"([^"]*)"/i.exec(element)?.[1] ?? '';
+    const kind = type.slice(type.lastIndexOf('/') + 1);
+    if (!HARMLESS_EXTERNAL.has(kind)) return kind || 'unknown';
+  }
+  return null;
+}
+
+/**
  * The text of the field instructions in one XML part, and nothing else.
  *
  * An instruction lives in a <w:instrText> run or in the w:instr attribute of a
@@ -204,8 +230,9 @@ export async function validateDocxArchive(buffer) {
       return refuse(`الجزء ${name} يحتوي تعريف DOCTYPE أو ENTITY`);
     }
 
-    if (lower.endsWith('.rels') && /TargetMode\s*=\s*"External"/i.test(text)) {
-      return refuse(`الجزء ${name} يحتوي علاقة خارجية (TargetMode="External")`);
+    if (lower.endsWith('.rels')) {
+      const external = forbiddenExternalRelationship(text);
+      if (external) return refuse(`الجزء ${name} يحتوي علاقة خارجية من نوع ${external}`);
     }
 
     const isContentPart =

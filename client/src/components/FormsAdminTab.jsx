@@ -1077,7 +1077,11 @@ function TemplateDialog({ draft, types, approvals, folderPathMap, onClose, onSav
               accept=".docx"
               hidden
               onChange={(event) => {
-                setForm((current) => ({ ...current, file: event.target.files?.[0] ?? null }));
+                // Taken from the event NOW. The state updater runs later, after
+                // the input has been reset below, and by then the input holds no
+                // file — reading it there is how a chosen file became «لم يُختر ملف».
+                const file = event.target.files?.[0] ?? null;
+                setForm((current) => ({ ...current, file }));
                 event.target.value = '';
               }}
             />
