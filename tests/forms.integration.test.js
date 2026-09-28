@@ -53,13 +53,20 @@ let libreOffice = false;
 // ── Fixtures ─────────────────────────────────────────────────────────────
 
 /**
- * One paragraph. A string is visible text; `{ raw }` is WordprocessingML written
- * out as it stands, which is how a test builds a real field instruction or the
+ * One paragraph. A string is visible text; an ARRAY is one run per entry, which
+ * is how Word itself stores a paragraph somebody edited — a corrected field name
+ * ends up split across several runs, and that split is half of the reason an
+ * Arabic template used to be refused; `{ raw }` is WordprocessingML written out
+ * as it stands, which is how a test builds a real field instruction or the
  * revision attributes Word puts on every paragraph it saves.
  */
 function para(text) {
   if (text && typeof text === 'object' && typeof text.raw === 'string') return text.raw;
-  return `<w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
+  const runs = Array.isArray(text) ? text : [text];
+  const body = runs
+    .map((run) => `<w:r><w:t xml:space="preserve">${run}</w:t></w:r>`)
+    .join('');
+  return `<w:p>${body}</w:p>`;
 }
 
 /**
@@ -223,6 +230,19 @@ async function makeField(name, dataType, { typeId = null, required = false } = {
     VALUES (${typeId}, ${name}, ${dataType}, ${required ? 1 : 0})
   `.execute(db);
   return Number(r.rows[0].fid);
+}
+
+/**
+ * There is no delete route for a format, so a fixture's rows go directly. A
+ * template that only exists to prove one refusal or one discovery must not stay
+ * in the lists the rest of the suite asserts over.
+ */
+async function dropTemplate(templateId) {
+  const numeric = Number(templateId);
+  await sql`DELETE FROM dbo.form_template_fields WHERE template_id = ${numeric}`.execute(db);
+  await sql`DELETE FROM dbo.form_template_access WHERE template_id = ${numeric}`.execute(db);
+  await sql`DELETE FROM dbo.form_template_folders WHERE template_id = ${numeric}`.execute(db);
+  await sql`DELETE FROM dbo.form_templates WHERE template_id = ${numeric}`.execute(db);
 }
 
 async function signIn(username) {
@@ -522,14 +542,13 @@ describe('official letter formats', { skip: CONFIGURED ? false : target.reason }
 
 
   test('a bad tag name and an unclosed tag are refused with an explanation', async () => {
-    const spaced = await uploadTemplate(
+    const unnamed = await uploadTemplate(
       boss,
-      { name: 'مسافة' },
-      { filename: 'x.docx', buffer: buildDocx({ body: ['{{ spaced }}'] }) },
+      { name: 'بلا اسم' },
+      { filename: 'x.docx', buffer: buildDocx({ body: ['To {{}} today'] }) },
     );
-    assert.equal(spaced.statusCode, 400);
-    assert.equal(spaced.json().error, 'template_invalid');
-    assert.match(spaced.json().detail, /مسافة/);
+    assert.equal(unnamed.statusCode, 400);
+    assert.equal(unnamed.json().error, 'template_invalid');
 
     const prefixed = await uploadTemplate(
       boss,
@@ -546,8 +565,13 @@ describe('official letter formats', { skip: CONFIGURED ? false : target.reason }
     );
     assert.equal(unclosed.statusCode, 400);
     assert.equal(unclosed.json().error, 'template_invalid');
-    // docxtemplater's own explanation, not a message this module invented.
-    assert.match(unclosed.json().detail, /unclosed/i);
+    // The engine says «The tag beginning with "{{oops" is unclosed». The person
+    // reading it wrote a letterhead in Word, so what reaches them is an Arabic
+    // sentence naming the text at fault and saying what to change; the English
+    // stays on the server log.
+    assert.match(unclosed.json().detail, /لم يُغلق/);
+    assert.match(unclosed.json().detail, /oops/, 'and it names the text at fault');
+    assert.doesNotMatch(unclosed.json().detail, /unclosed/i);
 
     const empty = await uploadTemplate(
       boss,
@@ -611,6 +635,75 @@ describe('official letter formats', { skip: CONFIGURED ? false : target.reason }
     const fixtureId = Number(response.json().template.templateId);
     await sql`DELETE FROM dbo.form_template_fields WHERE template_id = ${fixtureId}`.execute(db);
     await sql`DELETE FROM dbo.form_templates WHERE template_id = ${fixtureId}`.execute(db);
+  });
+
+  // ── Arabic templates: the braces Word stores, not the braces Word shows ─
+
+  test('a field whose braces Word mirrored is still found, in the body and in the header', async () => {
+    // MEASURED on a real institute letter (a 9715.docx from the archive): the
+    // person typed and SAW {{العدد}}, and Word stored }}العدد{{ — in a
+    // right-to-left paragraph the bidirectional algorithm shows an opening brace
+    // as a closing one — split across twenty runs, one per typing correction.
+    // docxtemplater read the stored order, called it an unclosed tag, and the
+    // upload was refused. Every Arabic template does this.
+    const response = await uploadTemplate(
+      boss,
+      { name: 'كتاب بأقواس معكوسة' },
+      {
+        filename: 'mirrored.docx',
+        buffer: buildDocx({
+          body: [['العدد : ', '}}', 'الع', 'دد', '{{'], ['التاريخ : ', '}}', 'التاريخ ', '{{']],
+          header: [['الإشارة : ', '}}', 'الإش', 'ارة', '{{']],
+        }),
+      },
+    );
+    assert.equal(response.statusCode, 201, response.body);
+    assert.deepEqual(
+      response.json().template.fields.map((field) => field.placeholder),
+      ['العدد', 'التاريخ', 'الإشارة'],
+      'the body fields and the header field, none of them mirrored any more',
+    );
+
+    await dropTemplate(response.json().template.templateId);
+  });
+
+  test('a field typed with a space inside the braces is accepted, and named without it', async () => {
+    // {{ name }} is what a person writes when they space out what they type. The
+    // space stays on the page — it was typed — but it is not part of the name,
+    // which is matched byte for byte. Refusing the file over it taught nobody
+    // anything.
+    const response = await uploadTemplate(
+      boss,
+      { name: 'مسافات داخل القوسين' },
+      { filename: 'spaced.docx', buffer: buildDocx({ body: ['To {{ name }} on {{  التاريخ  }}'] }) },
+    );
+    assert.equal(response.statusCode, 201, response.body);
+    assert.deepEqual(
+      response.json().template.fields.map((field) => field.placeholder),
+      ['name', 'التاريخ'],
+    );
+
+    await dropTemplate(response.json().template.templateId);
+  });
+
+  test('the merged value lands exactly where the mirrored placeholder was', async () => {
+    // Proved at the seam rather than through LibreOffice, so it is proved on
+    // every machine: the merge is what has to put 9715 after «العدد : », with no
+    // brace left behind.
+    const { mergeDocx } = await import('../src/modules/forms/docx.js');
+    const filled = await mergeDocx(
+      buildDocx({ body: [['العدد : ', '}}', 'الع', 'دد', '{{'], 'Signed {{author}}'] }),
+      { العدد: '9715', author: 'kateb' },
+    );
+    assert.equal(filled.ok, true, filled.detail);
+
+    const xml = new PizZip(filled.buffer).file('word/document.xml').asText();
+    const text = [...xml.matchAll(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g)]
+      .map((match) => match[1])
+      .join('');
+    assert.match(text, /العدد : 9715/);
+    assert.match(text, /Signed kateb/);
+    assert.doesNotMatch(text, /[{}]/, 'no brace survived the merge');
   });
 
   test('an upload past the size limit is refused and drained', async () => {
@@ -1375,6 +1468,61 @@ describe('official letter formats', { skip: CONFIGURED ? false : target.reason }
     assert.equal(response.statusCode, 200);
     assert.equal(response.rawPayload.subarray(0, 4).toString('latin1'), 'PK\u0003\u0004');
     assert.match(response.headers['content-disposition'], /attachment/);
+  });
+
+  test('a whole letter from a template Word mirrored reaches the page with its value', async (t) => {
+    if (!libreOffice) return t.skip('LibreOffice is not installed on this machine');
+
+    // The path the institute actually walks: a letterhead written in Word, its
+    // braces stored mirrored and its field split across runs, uploaded, opened
+    // to the section, made live, filled in, converted — and 9715 on the page.
+    const created = await uploadTemplate(
+      boss,
+      { name: 'نموذج معكوس الأقواس' },
+      {
+        filename: 'mirrored-letter.docx',
+        buffer: buildDocx({ body: [['Number : ', '}}', 'الع', 'دد', '{{'], 'Signed {{author}}'] }),
+      },
+    );
+    assert.equal(created.statusCode, 201, created.body);
+    const templateId = created.json().template.templateId;
+
+    const access = await call('PUT', `/api/admin/forms/templates/${templateId}/access`, boss, {
+      principalIds: [String(id['قسم الكتب'])],
+    });
+    assert.equal(access.statusCode, 200, access.body);
+
+    const live = await call('PATCH', `/api/admin/forms/templates/${templateId}`, boss, {
+      isActive: true,
+    });
+    assert.equal(live.statusCode, 200, live.body);
+
+    const generated = await call('POST', '/api/forms/generate', kateb, {
+      templateId,
+      folderId: String(id.letters),
+      title: 'كتاب بأقواس معكوسة',
+      values: { العدد: '9715' },
+    });
+    assert.equal(generated.statusCode, 201, generated.body);
+
+    const content = await call(
+      'GET',
+      `/api/documents/${generated.json().documentId}/content`,
+      kateb,
+    );
+    assert.equal(content.statusCode, 200);
+    const text = await pdfText(content.rawPayload);
+    assert.match(text, /Number/);
+    assert.match(text, /9715/, 'the value is on the page');
+    assert.match(text, /Signed kateb/);
+    assert.doesNotMatch(text, /[{}]/, 'and no brace is');
+
+    // Taken back off the shelf: the lists the rest of the suite asserts over
+    // belong to the format the story is about.
+    const off = await call('PATCH', `/api/admin/forms/templates/${templateId}`, boss, {
+      isActive: false,
+    });
+    assert.equal(off.statusCode, 200, off.body);
   });
 
   // ── Replacing the file ─────────────────────────────────────────────────

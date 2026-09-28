@@ -56,6 +56,26 @@
  * to offer" warning; a caller that filtered its own set beforehand would have
  * to reproduce all four.
  *
+ * ─── Why choosing several folders is the same box, not a second control ─────
+ *
+ * The administration dialog needs a LIST of folders, and its first version
+ * asked for them one at a time: choose a folder, watch it drop into a list
+ * above, find the box again, choose the next. Four folders were four trips
+ * through a search box that emptied itself after each one, and nothing on the
+ * screen said the question was "which folders" rather than "which folder".
+ *
+ * So the same box answers both. In `multiple` mode it holds the chosen folders
+ * as chips and the list rows carry a checkbox: a row toggles, the list stays
+ * open, and what was typed keeps filtering while the next folder is picked.
+ * Nothing else changes — one list behind one search, one row cap, one counted
+ * line, one Arabic folding — because the moment the two modes stop sharing that
+ * machinery they start disagreeing about which folders exist.
+ *
+ * The chips print the full path, and `labelFor` lets the caller name a folder
+ * this box cannot: the tree endpoint caps its result and a deleted folder is
+ * not in it at all, yet both may still be assigned to a template, and a chip
+ * reading «#42» is not something an administrator can act on.
+ *
  * ─── Why clearing an unavailable choice is opt-in ───────────────────────────
  *
  * A folder can be handed in that this picker will not offer: the folders
@@ -73,7 +93,7 @@
  */
 
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
-import { Search, X } from 'lucide-react';
+import { Check, Search, X } from 'lucide-react';
 
 import { useTree } from '../TreeContext.jsx';
 import { Alert } from './ui.jsx';
@@ -144,8 +164,12 @@ const MAX_SHOWN = 100;
 
 /**
  * @param {object} props
- * @param {string} props.value          The chosen folder id, as a string ('' = none).
- * @param {Function} props.onChange     Called with the new folder id string.
+ * @param {string} [props.value]        Single mode: the chosen folder id as a string ('' = none).
+ * @param {Function} [props.onChange]   Single mode: called with the new folder id string.
+ * @param {boolean} [props.multiple]    Several folders at once, shown as removable chips.
+ * @param {string[]} [props.values]     Multi mode: the chosen folder ids.
+ * @param {Function} [props.onChangeMany] Multi mode: called with the whole new list.
+ * @param {Function} [props.labelFor]   Multi mode: `(id) => label` for a folder the tree lacks.
  * @param {string} [props.label]
  * @param {string} [props.hint]
  * @param {boolean} [props.disabled]
@@ -157,6 +181,10 @@ const MAX_SHOWN = 100;
 export default function FormsFolderPicker({
   value,
   onChange,
+  multiple = false,
+  values = null,
+  onChangeMany = null,
+  labelFor = null,
   label = 'مجلد الإيداع',
   hint,
   disabled = false,
@@ -169,6 +197,10 @@ export default function FormsFolderPicker({
   const listId = useId();
   const inputId = useId();
   const inputRef = useRef(null);
+  // The whole control, which in multi mode is the chip box around the search:
+  // the list is measured against THIS, or it would hang under the narrow input
+  // squeezed between the chips.
+  const fieldRef = useRef(null);
 
   // The text being typed while the list is open. Closed, the box shows the
   // chosen folder's path instead, so the two never fight over one string.
@@ -179,8 +211,12 @@ export default function FormsFolderPicker({
   // Where the list is drawn, measured from the box while open.
   const [box, setBox] = useState(null);
 
-  const held = String(value ?? '');
-  const hasValue = held !== '';
+  // Single mode's one id; in multi mode nothing is "held" in the box — the
+  // chips are, and `chosen` below is the whole answer.
+  const held = multiple ? '' : String(value ?? '');
+  const picked = multiple ? (values ?? []).map(String) : [];
+  const pickedSet = new Set(picked);
+  const hasValue = multiple ? picked.length > 0 : held !== '';
 
   /*
    * The allowed set, from `only`, as a value that changes with its contents.
@@ -211,9 +247,9 @@ export default function FormsFolderPicker({
    * folder exists, and clearing then would throw away a good default.
    */
   useEffect(() => {
-    if (!clearWhenUnavailable || loading || error || !hasValue) return;
+    if (multiple || !clearWhenUnavailable || loading || error || !hasValue) return;
     if (!usable.some((folder) => folder.folderId === held)) onChange('');
-  }, [clearWhenUnavailable, loading, error, hasValue, held, usable, onChange]);
+  }, [multiple, clearWhenUnavailable, loading, error, hasValue, held, usable, onChange]);
 
   const matches = useMemo(() => {
     const needle = fold(query.trim());
@@ -232,7 +268,7 @@ export default function FormsFolderPicker({
   useEffect(() => {
     if (!open) return undefined;
     const measure = () => {
-      const rect = inputRef.current?.getBoundingClientRect();
+      const rect = (fieldRef.current ?? inputRef.current)?.getBoundingClientRect();
       if (!rect) return;
       setBox({
         left: rect.left,
@@ -249,7 +285,9 @@ export default function FormsFolderPicker({
       window.removeEventListener('resize', measure);
       window.removeEventListener('scroll', measure, true);
     };
-  }, [open]);
+    // Also on the chip count: ticking a folder makes the box taller, and a list
+    // still drawn against the old height would overlap the box it belongs to.
+  }, [open, picked.length]);
 
   function openList() {
     if (disabled || loading) return;
@@ -272,15 +310,53 @@ export default function FormsFolderPicker({
     inputRef.current?.blur();
   }
 
+  /*
+   * Multi mode: a row is a switch, and the list is not a dialog.
+   *
+   * Neither the list nor the typed text is disturbed, because the person is
+   * mid-question: they typed «صادر» to see the four folders that match it and
+   * are ticking three of them. Closing the list after the first tick is what
+   * made the old add-one-at-a-time control tiring.
+   */
+  function toggle(folderId) {
+    const id = String(folderId);
+    const next = pickedSet.has(id) ? picked.filter((entry) => entry !== id) : [...picked, id];
+    onChangeMany?.(next);
+  }
+
+  function choose(folder) {
+    if (multiple) toggle(folder.folderId);
+    else pick(folder);
+  }
+
   function clear() {
-    onChange('');
+    if (multiple) onChangeMany?.([]);
+    else onChange('');
     setQuery('');
     setHighlight(0);
     inputRef.current?.focus();
     setOpen(true);
   }
 
+  /** What a chip says: the tree's path, else the caller's name, else the id. */
+  function chipLabel(id) {
+    const fromTree = usable.find((folder) => folder.folderId === String(id))?.path;
+    return labelFor?.(String(id)) || fromTree || `#${id}`;
+  }
+
   function onKeyDown(event) {
+    /*
+     * Backspace on an empty search box removes the last chip.
+     *
+     * The habit every tag field teaches, and the only way to undo a mistaken
+     * tick without reaching for the mouse. Guarded on an empty query so it
+     * never eats a letter someone is still deleting.
+     */
+    if (multiple && event.key === 'Backspace' && query === '' && picked.length > 0) {
+      event.preventDefault();
+      onChangeMany?.(picked.slice(0, -1));
+      return;
+    }
     if (!open) {
       if (event.key === 'ArrowDown' || event.key === 'Enter') {
         event.preventDefault();
@@ -296,7 +372,7 @@ export default function FormsFolderPicker({
       setHighlight((current) => Math.max(current - 1, 0));
     } else if (event.key === 'Enter') {
       event.preventDefault();
-      if (highlight >= 0 && shown[highlight]) pick(shown[highlight]);
+      if (highlight >= 0 && shown[highlight]) choose(shown[highlight]);
     } else if (event.key === 'Escape') {
       event.preventDefault();
       closeList();
@@ -307,7 +383,43 @@ export default function FormsFolderPicker({
   // closed and genuinely holds nothing; open, the box is a search box.
   const placeholder = usable.length === 0
     ? ''
-    : (!open && !hasValue && emptyLabel) || 'اكتب جزءاً من اسم المجلد أو مساره…';
+    : (!open && !hasValue && emptyLabel)
+      || (multiple && hasValue ? 'إضافة مجلد آخر…' : 'اكتب جزءاً من اسم المجلد أو مساره…');
+
+  /*
+   * What the search box does, whichever shape holds it.
+   *
+   * One object rather than two copies: the combobox wiring — what the list is,
+   * which row is announced, when it opens, when it closes — is the part that
+   * must not differ between one folder and several.
+   */
+  const searchProps = {
+    id: inputId,
+    type: 'text',
+    role: 'combobox',
+    'aria-expanded': open,
+    'aria-controls': listId,
+    'aria-autocomplete': 'list',
+    'aria-activedescendant':
+      open && highlight >= 0 && shown[highlight] ? `${listId}-${shown[highlight].folderId}` : undefined,
+    autoComplete: 'off',
+    placeholder,
+    disabled: disabled || loading,
+    onFocus: openList,
+    onClick: () => {
+      if (!open) openList();
+    },
+    onChange: (event) => {
+      setQuery(event.target.value);
+      setHighlight(0);
+      if (!open) setOpen(true);
+    },
+    onKeyDown,
+    // The list takes the pointer with mousedown prevented, so the box has not
+    // blurred by the time a click lands on a row; anything else that takes
+    // focus closes the list.
+    onBlur: closeList,
+  };
 
   return (
     <div className="space-y-2">
@@ -321,37 +433,67 @@ export default function FormsFolderPicker({
             aria-hidden="true"
             className="pointer-events-none absolute end-3 top-1/2 -translate-y-1/2 text-text-muted"
           />
-          <input
-            ref={inputRef}
-            id={inputId}
-            type="text"
-            role="combobox"
-            aria-expanded={open}
-            aria-controls={listId}
-            aria-autocomplete="list"
-            aria-activedescendant={
-              open && highlight >= 0 && shown[highlight] ? `${listId}-${shown[highlight].folderId}` : undefined
-            }
-            autoComplete="off"
-            value={open ? query : (selected?.path ?? '')}
-            placeholder={placeholder}
-            disabled={disabled || loading}
-            onFocus={openList}
-            onClick={() => { if (!open) openList(); }}
-            onChange={(event) => {
-              setQuery(event.target.value);
-              setHighlight(0);
-              if (!open) setOpen(true);
-            }}
-            onKeyDown={onKeyDown}
-            // The list takes the pointer with mousedown prevented, so the box
-            // has not blurred by the time a click lands on a row; anything else
-            // that takes focus closes the list.
-            onBlur={closeList}
-            className={`w-full rounded-lg border border-border bg-control py-2 pe-9 text-sm text-text
-              focus:outline-none focus:ring-2 focus:ring-primary/40 ${hasValue && !open ? 'ps-9' : 'ps-3'}`}
-          />
-          {hasValue && !open && !disabled ? (
+          {multiple ? (
+            <div
+              ref={fieldRef}
+              // The chips and the search are one control, so pressing anywhere
+              // inside it puts the caret in the search rather than nowhere.
+              onClick={() => inputRef.current?.focus()}
+              className={`flex min-h-[2.5rem] w-full flex-wrap items-center gap-1 rounded-lg border
+                border-border bg-control px-2 py-1.5 pe-9 focus-within:ring-2 focus-within:ring-primary/40
+                ${disabled || loading ? 'opacity-60' : ''}`}
+            >
+              {picked.map((id) => {
+                const name = chipLabel(id);
+                return (
+                  <span
+                    key={id}
+                    className="flex max-w-full items-center gap-1 rounded border border-border
+                      bg-surface px-1.5 py-0.5 text-xs text-text"
+                  >
+                    <span className="min-w-0 break-all">{name}</span>
+                    <button
+                      type="button"
+                      // The box must not blur: the list stays open while the
+                      // administrator prunes what they have already ticked.
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={(event) => {
+                        // Not the box's click: removing a chip is not a request
+                        // to open the list.
+                        event.stopPropagation();
+                        toggle(id);
+                      }}
+                      disabled={disabled}
+                      aria-label={`إزالة المجلد ${name}`}
+                      title="إزالة من القائمة"
+                      className="rounded p-0.5 text-text-muted hover:bg-red-500/10 hover:text-red-600
+                        disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <X size={12} aria-hidden="true" />
+                    </button>
+                  </span>
+                );
+              })}
+              <input
+                ref={inputRef}
+                {...searchProps}
+                // Always the query: what is chosen is the chips' business, so
+                // the two never fight over one string.
+                value={query}
+                className="min-w-[8rem] flex-1 border-0 bg-transparent p-0.5 text-sm text-text
+                  placeholder:text-text-muted focus:outline-none"
+              />
+            </div>
+          ) : (
+            <input
+              ref={inputRef}
+              {...searchProps}
+              value={open ? query : (selected?.path ?? '')}
+              className={`w-full rounded-lg border border-border bg-control py-2 pe-9 text-sm text-text
+                focus:outline-none focus:ring-2 focus:ring-primary/40 ${hasValue && !open ? 'ps-9' : 'ps-3'}`}
+            />
+          )}
+          {!multiple && hasValue && !open && !disabled ? (
             <button
               type="button"
               onMouseDown={(event) => event.preventDefault()}
@@ -368,6 +510,7 @@ export default function FormsFolderPicker({
             <ul
               id={listId}
               role="listbox"
+              aria-multiselectable={multiple ? true : undefined}
               // One guard for the rows, the footer, the padding and the
               // scrollbar: pressing anywhere in the list must not blur the box.
               onMouseDown={(event) => event.preventDefault()}
@@ -379,7 +522,7 @@ export default function FormsFolderPicker({
               ) : null}
               {shown.map((folder, index) => {
                 const active = index === highlight;
-                const chosen = folder.folderId === held;
+                const chosen = multiple ? pickedSet.has(folder.folderId) : folder.folderId === held;
                 return (
                   <li
                     key={folder.folderId}
@@ -391,12 +534,25 @@ export default function FormsFolderPicker({
                     role="option"
                     aria-selected={chosen}
                     onMouseEnter={() => setHighlight(index)}
-                    onClick={() => pick(folder)}
-                    className={`cursor-pointer px-3 py-2 text-sm ${
+                    onClick={() => choose(folder)}
+                    className={`flex cursor-pointer items-center gap-2 px-3 py-2 text-sm ${
                       active ? 'bg-primary/10 text-primary' : chosen ? 'font-medium text-text' : 'text-text'
                     }`}
                   >
-                    {folder.path}
+                    {multiple ? (
+                      // A drawn box, not an <input type="checkbox">: a real one
+                      // inside a row would take the focus the combobox needs and
+                      // give Space a second, conflicting meaning.
+                      <span
+                        aria-hidden="true"
+                        className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
+                          chosen ? 'border-primary bg-primary text-white' : 'border-border bg-control'
+                        }`}
+                      >
+                        {chosen ? <Check size={12} strokeWidth={3} /> : null}
+                      </span>
+                    ) : null}
+                    <span className="min-w-0 flex-1 break-words">{folder.path}</span>
                   </li>
                 );
               })}
@@ -414,10 +570,35 @@ export default function FormsFolderPicker({
         </div>
       </div>
 
+      {multiple && picked.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-2 text-xs text-text-muted">
+          <span>
+            <span className="num">{picked.length}</span>
+            <span> مجلداً مختاراً.</span>
+          </span>
+          <button
+            type="button"
+            // Same guard as the chips: emptying the list is not a reason to
+            // lose the open list and what was typed into it.
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={clear}
+            disabled={disabled}
+            className="rounded px-1.5 py-0.5 text-primary hover:bg-primary/10
+              disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            مسح الكل
+          </button>
+        </div>
+      ) : null}
+
       {usable.length > 0 ? (
         <p className="text-xs text-text-muted">
           <span className="num">{usable.length}</span>
-          <span> مجلداً متاحاً. اكتب للبحث، أو افتح القائمة واختر.</span>
+          <span>
+            {multiple
+              ? ' مجلداً متاحاً. اكتب للبحث، ثم أشّر على كل مجلد يودع فيه هذا النموذج.'
+              : ' مجلداً متاحاً. اكتب للبحث، أو افتح القائمة واختر.'}
+          </span>
         </p>
       ) : null}
 

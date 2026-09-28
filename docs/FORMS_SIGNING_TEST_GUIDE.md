@@ -21,7 +21,9 @@ of 2026-09-27, so you can look before you build.
 1. Open Word. Write the letter as the institute writes it — letterhead, tables,
    footer, anything. Wherever a value changes per letter, type a placeholder
    between double braces: `{{العدد}}`, `{{الجهة}}`, `{{الموضوع}}`, `{{النص}}`.
-   Arabic or Latin names both work; no spaces inside the braces.
+   Arabic or Latin names both work. Inside Arabic text Word shows the braces
+   mirrored on screen (and stores them reversed); the system accepts that, and
+   trims a stray space inside the braces. A placeholder must sit on one line.
 2. Four placeholders are filled by the system and cannot be set by anyone:
    `{{date}}` (27/09/2026), `{{date_iso}}` (2026-09-27), `{{date_ar}}` (the
    date written in Arabic) and `{{author}}` (the display name of whoever

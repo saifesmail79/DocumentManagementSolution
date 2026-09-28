@@ -40,11 +40,24 @@
  * An empty list keeps the old freedom — any folder the person may upload into —
  * so a template nobody has restricted behaves as it always did.
  *
- * The «إضافة مجلد» box here offers every folder, not only the ones the
- * administrator may upload into: the list says where letters of this kind
- * belong, and it is the writer's own permission that decides whether they may
- * file one there. An administrator who cannot upload into الصادر must still be
- * able to say that circulars are filed in it.
+ * The «مجلدات الإيداع» box here is one multi-select: the chosen folders sit in
+ * it as chips and the list ticks them off without closing, because "which
+ * folders" is one question and the first version asked it once per folder. It
+ * offers every folder, not only the ones the administrator may upload into: the
+ * list says where letters of this kind belong, and it is the writer's own
+ * permission that decides whether they may file one there. An administrator who
+ * cannot upload into الصادر must still be able to say that circulars are filed
+ * in it.
+ *
+ * ─── Why a refusal is printed at the bottom of the dialog ───────────────────
+ *
+ * The dialog's body scrolls; its footer does not. So «حفظ» is pressed from the
+ * bottom while the top of the form — where the error banner used to be — is off
+ * the screen. A rejected template file therefore looked like a button that does
+ * nothing, and the administrator pressed it again. The message now renders last
+ * in the body, directly above the footer, and scrolls itself into view; and for
+ * a rejected file it leads with «تعذر قبول ملف النموذج:» and prints the server's
+ * own reason underneath, since that reason names the offending tag.
  *
  * ─── Why replacing a file shows a difference ────────────────────────────────
  *
@@ -71,7 +84,6 @@ import {
   Plus,
   Save,
   Users,
-  X,
 } from 'lucide-react';
 
 import { api, ApiError } from '../api.js';
@@ -160,7 +172,10 @@ function describeError(caught, fallback) {
     upload_stalled:
       'توقف وصول الملف إلى الخادم قبل اكتماله. إن كان على قرص شبكة فانسخه إلى هذا الجهاز ثم أعد المحاولة.',
     upload_aborted: 'أُوقف الرفع قبل اكتماله.',
-    template_invalid: 'ملف النموذج غير سليم أو يحتوي ما لا يُقبل.',
+    // A headline that says what happened and what follows, because the server's
+    // detail is the useful half: it names the unclosed tag or the part it
+    // refused. Printed on its own line under this one.
+    template_invalid: 'تعذر قبول ملف النموذج:',
     fields_unlabelled: 'لا يُفعَّل النموذج قبل تسمية كل حقوله بالعربية.',
     type_requires_fields: 'نوع الوثيقة يطلب حقولاً إلزامية لا يملؤها أي حقل في النموذج.',
     field_unmappable: 'أحد الحقول مربوط بحقل لا يقبل الربط (النص والرقم والتاريخ فقط).',
@@ -176,6 +191,17 @@ function describeError(caught, fallback) {
 
   const detail = caught.body?.detail;
   const explained = typeof detail === 'string' && detail.trim() ? `\n${detail.trim()}` : '';
+  /*
+   * The one headline that ends in a colon must not be left dangling.
+   *
+   * `template_invalid` promises a reason on the next line; a server that sent
+   * none (an older build, a refusal with no detail) would otherwise print
+   * «تعذر قبول ملف النموذج:» and stop, which reads as a broken message rather
+   * than a refusal.
+   */
+  if (caught.code === 'template_invalid' && !explained) {
+    return `${MAP.template_invalid}\nالملف ليس ملف Word سليماً (.docx) أو يحتوي ما لا يُقبل. راجع الملف في Word ثم أعد اختياره.`;
+  }
   return (MAP[caught.code] ?? fallback) + explained;
 }
 
@@ -242,6 +268,14 @@ export default function FormsAdminTab() {
   const replaceTarget = useRef(null);
   // The blob URL of the last preview, revoked when another replaces it.
   const previewUrl = useRef(null);
+  /*
+   * The tab's own banner, brought into view for the same reason the dialog's is.
+   *
+   * «استبدال الملف» and «معاينة» are pressed on a row that may be the twentieth,
+   * and their refusal is printed above the list. Scrolled to, it is a refusal;
+   * unscrolled, it is a button that did nothing.
+   */
+  const errorRef = useRef(null);
 
   const load = useCallback(async () => {
     try {
@@ -280,6 +314,11 @@ export default function FormsAdminTab() {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    if (!error) return;
+    errorRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [error]);
 
   // The last preview's blob URL outlives this component only as long as the tab
   // the browser opened it in; nothing else holds it, so it is released here.
@@ -427,7 +466,11 @@ export default function FormsAdminTab() {
         </p>
       </Card>
 
-      {error ? <Alert tone="error">{error}</Alert> : null}
+      {error ? (
+        <div ref={errorRef}>
+          <Alert tone="error">{error}</Alert>
+        </div>
+      ) : null}
       {notice ? <Alert tone="success">{notice}</Alert> : null}
 
       {preview ? (
@@ -747,6 +790,7 @@ function TemplateDialog({ draft, types, approvals, folderPathMap, onClose, onSav
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const fileInput = useRef(null);
+  const errorRef = useRef(null);
 
   useEffect(() => {
     if (!draft) return;
@@ -754,10 +798,25 @@ function TemplateDialog({ draft, types, approvals, folderPathMap, onClose, onSav
     setError(null);
   }, [draft]);
 
+  /*
+   * A refusal is brought to the eye instead of waiting to be found.
+   *
+   * The dialog's body scrolls and its footer does not, so «حفظ» is pressed from
+   * the bottom of a form whose top is off-screen. An Alert rendered up there was
+   * invisible: the administrator pressed save, nothing appeared to happen, and
+   * they pressed it again. The message now sits at the end of the body, right
+   * above the footer where the press happened, and this scrolls it into view for
+   * the case where the form is long enough that even that is below the fold.
+   */
+  useEffect(() => {
+    if (!error) return;
+    errorRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [error]);
+
   const creating = draft !== null && draft.templateId === null;
 
   /*
-   * What each assigned folder is called in the list below.
+   * What each assigned folder's chip says, handed to the picker as `labelFor`.
    *
    * The tree's own path first, then the name the server sent with the template:
    * the tree endpoint caps its result, and a folder past that cap must still
@@ -777,23 +836,8 @@ function TemplateDialog({ draft, types, approvals, folderPathMap, onClose, onSav
 
   const folderIds = form.folderIds ?? [];
 
-  function addFolder(next) {
-    const id = String(next ?? '').trim();
-    if (!id) return;
-    setForm((current) => {
-      const held = current.folderIds ?? [];
-      // Choosing a folder twice is a slip, not an instruction: the server
-      // collapses duplicates anyway, and a list with a repeated row reads as a
-      // mistake nobody made.
-      return held.includes(id) ? current : { ...current, folderIds: [...held, id] };
-    });
-  }
-
-  function removeFolder(id) {
-    setForm((current) => ({
-      ...current,
-      folderIds: (current.folderIds ?? []).filter((held) => held !== String(id)),
-    }));
+  function setFolderIds(next) {
+    setForm((current) => ({ ...current, folderIds: (next ?? []).map(String) }));
   }
 
   // The upload in flight, so «إيقاف» and closing the dialog can end it.
@@ -932,8 +976,6 @@ function TemplateDialog({ draft, types, approvals, folderPathMap, onClose, onSav
       }
     >
       <div className="space-y-3">
-        {error ? <Alert tone="error">{error}</Alert> : null}
-
         <TextField
           label="اسم النموذج"
           value={form.name}
@@ -996,59 +1038,28 @@ function TemplateDialog({ draft, types, approvals, folderPathMap, onClose, onSav
         </div>
 
         <div className="rounded-lg border border-border bg-surface-muted/30 p-3">
-          <p className="text-sm font-medium text-text">مجلدات الإيداع</p>
-          <p className="mt-1 text-xs leading-relaxed text-text-muted">
+          <p className="text-xs leading-relaxed text-text-muted">
             لا تودع كتب هذا النموذج إلا في المجلدات المحددة هنا. اتركها فارغة ليودع كل مستخدم كتابه
             في أي مجلد يملك فيه صلاحية «رفع».
           </p>
 
-          {folderIds.length === 0 ? (
-            <p className="mt-2 text-xs text-text-muted">
-              لا مجلد محدد — أي مجلد يملك كاتب الكتاب فيه صلاحية «رفع».
-            </p>
-          ) : (
-            <ul className="mt-2 space-y-1">
-              {folderIds.map((id) => {
-                const label = labels.get(String(id)) ?? `#${id}`;
-                return (
-                  <li
-                    key={id}
-                    className="flex items-center gap-2 rounded border border-border bg-surface px-2 py-1"
-                  >
-                    <span className="min-w-0 flex-1 break-words text-xs text-text">
-                      {label}
-                      <span className="num ms-1 text-text-muted">#{id}</span>
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => removeFolder(id)}
-                      disabled={busy}
-                      aria-label={`إزالة المجلد ${label}`}
-                      title="إزالة من مجلدات النموذج"
-                      className="rounded p-1 text-text-muted hover:bg-red-500/10 hover:text-red-600
-                        disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      <X size={14} aria-hidden="true" />
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-
           <div className="mt-3">
             {/*
-              The box never holds a value: choosing appends to the list above and
-              leaves the search empty for the next folder. `requireUpload` is off
-              on purpose — see the note at the top of this file.
+              One box for the whole answer: it shows what is chosen and takes the
+              next choice in the same place, and the list stays open while several
+              folders are ticked. `requireUpload` is off on purpose — see the note
+              at the top of this file. `labelFor` names a folder the tree does not
+              return (past its cap, or deleted) so no chip reads as a bare id.
             */}
             <FormsFolderPicker
-              label="إضافة مجلد"
-              value=""
-              onChange={addFolder}
+              label="مجلدات الإيداع"
+              multiple
+              values={folderIds}
+              onChangeMany={setFolderIds}
+              labelFor={(id) => labels.get(String(id)) ?? null}
               disabled={busy}
               requireUpload={false}
-              emptyLabel="— اختر مجلداً لإضافته —"
+              emptyLabel="— أي مجلد يملك كاتب الكتاب فيه صلاحية «رفع» —"
               hint="تُعرض كل المجلدات: الصلاحية تُمنح للأشخاص، والقائمة هنا تقول أين تودع كتب هذا النموذج."
             />
           </div>
@@ -1089,6 +1100,18 @@ function TemplateDialog({ draft, types, approvals, folderPathMap, onClose, onSav
               تُستخرج الحقول من الملف عند الرفع. الحقلان {'{{date}}'} و{'{{author}}'} يُملآن تلقائياً
               ولا يُطلبان من المستخدم.
             </p>
+          </div>
+        ) : null}
+
+        {/*
+          Last in the body, immediately above the footer: the refusal appears
+          where the hand and the eye already are. One Alert, not two — a second
+          copy at the top would leave the administrator wondering whether two
+          things went wrong.
+        */}
+        {error ? (
+          <div ref={errorRef}>
+            <Alert tone="error">{error}</Alert>
           </div>
         ) : null}
       </div>

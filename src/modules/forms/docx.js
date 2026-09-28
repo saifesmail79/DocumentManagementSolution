@@ -42,7 +42,52 @@
  * relationships, DOCTYPE/ENTITY declarations and the INCLUDETEXT/DDE family of
  * field instructions are refused for the same reason: this file is handed to
  * LibreOffice, which will follow every one of them.
+ *
+ * ─── Arabic templates: the braces Word stores are not the braces Word shows ──
+ *
+ * MEASURED on a real institute letter (its two fields are «العدد» and
+ * «التاريخ»): the person typed {{العدد}} in a right-to-left paragraph and sees
+ * {{العدد}} on the screen, but the characters Word actually stored, in logical
+ * order, are }}العدد{{ — the braces are mirrored. That is not a mistake and not
+ * a corrupt file: in a right-to-left run the bidirectional algorithm displays
+ * an opening brace as a closing one and vice versa, so the pair the writer sees
+ * around the name is stored the other way round. On top of that Word had split
+ * the paragraph into twenty runs, one per typing correction. docxtemplater,
+ * which reads the stored order and knows nothing about direction, reported
+ * «unclosed tag» and the upload was refused. EVERY Arabic template hits this.
+ *
+ * So the XML is normalised before the engine ever sees it: within one
+ * paragraph, a }} that comes first and is followed by text and then a {{ is a
+ * mirrored pair, and the four characters are flipped. Whitespace that sits just
+ * inside a tag is moved just outside it in the same way, so {{ name }} — an
+ * accidental space, which the tag name rules would otherwise refuse — becomes
+ * ␣{{name}}␣ and is accepted as «name».
+ *
+ * Two decisions hold this together. The transform only PERMUTES characters, so
+ * every run keeps its exact length and the text can be written back into the
+ * same runs by position — a rewrite that re-flowed the runs would lose the
+ * formatting, the revision marks and the language attributes Word keeps there.
+ * And the stored blob keeps the original bytes: normalisation runs on the
+ * in-memory zip on every inspect and every merge, so the administrator can
+ * still download the file they uploaded and open it in Word unchanged.
  */
+
+/**
+ * The library's English explanation, on the server log and nowhere else.
+ *
+ * The logger is reached through a dynamic import because this file is otherwise
+ * a set of pure functions over bytes — importing the logger statically would
+ * pull the whole configuration in behind it, and a helper that cannot be called
+ * without a database connection string is no longer pure. The call is
+ * deliberately not awaited: nothing about a refusal waits on a log line.
+ */
+function logEnglish(detail) {
+  import('../../lib/logger.js')
+    .then(({ moduleLogger }) =>
+      moduleLogger('forms').debug(detail, 'docxtemplater refused a template'),
+    )
+    .catch(() => {});
+}
 
 /** A placeholder name is an identifier, matched byte for byte by the renderer. */
 export const MAX_PLACEHOLDER_LENGTH = 100;
@@ -275,7 +320,12 @@ export async function inspectTemplate(buffer) {
 
   let structured;
   try {
-    const doc = new Docxtemplater(new PizZip(buffer), {
+    // The braces are straightened on a throwaway copy of the zip before the
+    // lexer sees them; the stored bytes stay exactly as they were uploaded.
+    const zip = new PizZip(buffer);
+    normaliseTemplateZip(zip);
+
+    const doc = new Docxtemplater(zip, {
       delimiters: { start: '{{', end: '}}' },
       paragraphLoop: true,
       linebreaks: true,
@@ -329,16 +379,87 @@ function orderParts(files, doc) {
   return [...body, ...rest];
 }
 
-/** The library's own explanation of every bad tag, flattened into one line. */
+/**
+ * What to do about each way docxtemplater can refuse a file, in Arabic.
+ *
+ * The library's own explanations are English sentences about lexers and tags
+ * («The tag beginning with "{{oops" is unclosed»). The person reading them is
+ * an administrator who wrote a letterhead in Word, so what reaches them is an
+ * Arabic sentence that names the text at fault and says what to change. The
+ * English is kept — at debug level, on the server — because it is what a
+ * support question is answered from.
+ */
+const RTL_BRACE_NOTE =
+  ' وداخل النص العربي تظهر الأقواس معكوسة على الشاشة (}}الاسم{{) وهذا مقبول، فاكتبها كما تراها.';
+
+const ONE_FIELD_PER_LINE = 'اكتب كل حقل بالشكل {{الاسم}} كاملًا في سطر واحد.';
+
+const TEMPLATE_ERROR_MESSAGES = Object.freeze({
+  unclosed_tag: (what) =>
+    `الحقل الذي يبدأ بـ «{{${what}» لم يُغلق بـ }} في السطر نفسه. ${ONE_FIELD_PER_LINE}${RTL_BRACE_NOTE}`,
+  unopened_tag: (what) =>
+    `الحقل الذي ينتهي بـ «${what}}}» لم يُفتح بـ {{ في السطر نفسه. ${ONE_FIELD_PER_LINE}${RTL_BRACE_NOTE}`,
+  duplicate_open_tag: (what) =>
+    `الحقل «${what}» يحمل أقواس فتح زائدة. ${ONE_FIELD_PER_LINE}`,
+  duplicate_close_tag: (what) =>
+    `الحقل «${what}» يحمل أقواس إغلاق زائدة. ${ONE_FIELD_PER_LINE}`,
+  closing_tag_does_not_match_opening_tag: (what) =>
+    `الحقل «${what}» أُغلق بوسم يحمل اسمًا آخر. ${ONE_FIELD_PER_LINE}`,
+  unbalanced_loop_tags: () =>
+    `الملف يستخدم وسوم تكرار غير متوازنة، وهي صيغة غير مدعومة هنا. ${ONE_FIELD_PER_LINE}`,
+  malformed_xml: () =>
+    'تعذّر قراءة محتوى الملف: يبدو أن المستند تالف. افتحه في Word واحفظه من جديد بصيغة .docx ثم أعد المحاولة.',
+  file_has_invalid_xml: () =>
+    'محتوى المستند غير سليم: يبدو أن الملف تالف. افتحه في Word واحفظه من جديد بصيغة .docx ثم أعد المحاولة.',
+  invalid_xml_characters: (what) =>
+    `الحقل «${what}» يحتوي محارف لا يقبلها مستند Word.`,
+});
+
+/** The offending text an entry names, short enough to read in one line. */
+function offendingText(entry) {
+  const raw =
+    entry?.properties?.xtag ??
+    entry?.properties?.openingtag ??
+    entry?.properties?.explanation ??
+    entry?.message ??
+    '';
+  // The braces are stripped off the ends because the sentence puts them back
+  // itself: the library hands over «{oops» for an unclosed {{oops.
+  const text = String(raw).replace(/\s+/g, ' ').replace(/^[{}]+|[{}]+$/g, '').trim();
+  return text.length > 60 ? `${text.slice(0, 60)}…` : text;
+}
+
+/** One Arabic sentence for one of the library's errors. */
+function explainOne(entry) {
+  const id = entry?.properties?.id;
+  const message = TEMPLATE_ERROR_MESSAGES[id];
+  if (message) return message(offendingText(entry));
+  return `تعذّر قراءة حقول الملف. ${ONE_FIELD_PER_LINE}${RTL_BRACE_NOTE}`;
+}
+
+/**
+ * Every refusal the engine reports, as Arabic sentences. Two at most: a broken
+ * template usually breaks the same way in several places, and a wall of text is
+ * read as a crash rather than as something to fix.
+ */
 function explainTemplateError(error) {
   const errors = error?.properties?.errors;
-  if (Array.isArray(errors) && errors.length > 0) {
-    return errors
+  const entries = Array.isArray(errors) && errors.length > 0 ? errors : [error];
+
+  logEnglish({
+    ids: entries.map((entry) => entry?.properties?.id ?? null),
+    explanations: entries
       .map((entry) => entry?.properties?.explanation ?? entry?.message ?? String(entry))
-      .slice(0, 10)
-      .join('؛ ');
+      .slice(0, 10),
+  });
+
+  const said = [];
+  for (const entry of entries) {
+    const sentence = explainOne(entry);
+    if (!said.includes(sentence)) said.push(sentence);
+    if (said.length === 2) break;
   }
-  return String(error?.properties?.explanation ?? error?.message ?? error).slice(0, 300);
+  return said.join(' ');
 }
 
 /** Why this placeholder cannot be used, or null when it is fine. */
@@ -397,7 +518,12 @@ export async function mergeDocx(buffer, values) {
   ]);
 
   try {
-    const doc = new Docxtemplater(new PizZip(buffer), {
+    // The same normalisation as on inspection, for the same reason, and on the
+    // same terms: a throwaway zip built from the untouched stored bytes.
+    const zip = new PizZip(buffer);
+    normaliseTemplateZip(zip);
+
+    const doc = new Docxtemplater(zip, {
       delimiters: { start: '{{', end: '}}' },
       paragraphLoop: true,
       linebreaks: true,
@@ -410,4 +536,205 @@ export async function mergeDocx(buffer, values) {
   } catch (error) {
     return refuse(explainTemplateError(error));
   }
+}
+
+// ── Normalising the braces before the engine reads them ──────────────────
+//
+// See the note at the top of this file: in a right-to-left paragraph Word
+// stores the braces of {{name}} mirrored, and it splits one field across many
+// runs. Both are repaired here, on the in-memory zip only.
+
+/**
+ * The parts docxtemplater substitutes into: the body, every header and footer,
+ * and the notes. A field in any other part would not be filled, so normalising
+ * it would only hide the fact.
+ */
+const TEMPLATED_PART = /^word\/(document\d*|header\d+|footer\d+|footnotes|endnotes)\.xml$/i;
+
+/** The text of a <w:t> run, with the offsets of its inner text. */
+const RUN_TEXT = /<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g;
+
+/**
+ * The inner ranges of the paragraphs in one part, innermost only.
+ *
+ * A paragraph can contain another paragraph — a text box inside a drawing is
+ * the everyday case — and the two are different paragraphs on the page, so the
+ * text of the inner one must not be concatenated with the text of the outer.
+ * Counting children while the outer paragraph is open is what keeps them apart.
+ */
+function paragraphRanges(xml) {
+  const boundary = /<w:p(?=[\s/>])[^>]*>|<\/w:p>/g;
+  const open = [];
+  const ranges = [];
+  let match;
+  while ((match = boundary.exec(xml)) !== null) {
+    if (match[0] === '</w:p>') {
+      const started = open.pop();
+      if (!started) continue;
+      if (started.children === 0) ranges.push([started.start, match.index]);
+      if (open.length > 0) open[open.length - 1].children += 1;
+    } else if (!match[0].endsWith('/>')) {
+      open.push({ start: match.index + match[0].length, children: 0 });
+    }
+  }
+  return ranges;
+}
+
+/** Every `{{` and `}}` in the text, in order, as { at, open }. */
+function braceTokens(text) {
+  const tokens = [];
+  for (let i = 0; i < text.length - 1; i += 1) {
+    const pair = text[i] + text[i + 1];
+    if (pair === '{{') {
+      tokens.push({ at: i, open: true });
+      i += 1;
+    } else if (pair === '}}') {
+      tokens.push({ at: i, open: false });
+      i += 1;
+    }
+  }
+  return tokens;
+}
+
+const flip = (text, at, char) => text.slice(0, at) + char + char + text.slice(at + 2);
+
+/**
+ * Flips the mirrored pairs of one paragraph's text. Same length out as in.
+ *
+ * The scan is left to right and a proper pair is consumed as a pair, so a
+ * paragraph that carries both {{a}} and }}b{{ is read correctly. A `}}` that
+ * comes first is only treated as mirrored when a `{{` follows it with real text
+ * and no other brace in between; anything else is left exactly as it is, so a
+ * genuinely broken template still produces the engine's own error rather than a
+ * silently different one.
+ *
+ * The trade, stated: a paragraph that prints a literal }} of its own before a
+ * real field is misread, and the upload is refused with a message naming the
+ * wrong fragment. That is a letter about braces; mirrored fields are every
+ * Arabic letter there is.
+ */
+function repairMirroredBraces(text) {
+  let out = text;
+  const tokens = braceTokens(out);
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    const next = tokens[i + 1];
+    if (token.open) {
+      if (next && !next.open) i += 1; // a proper {{…}} pair
+      continue;
+    }
+    if (!next || !next.open) continue;
+    const between = out.slice(token.at + 2, next.at);
+    if (between.trim() === '' || /[{}]/.test(between)) continue;
+    out = flip(out, token.at, '{');
+    out = flip(out, next.at, '}');
+    i += 1;
+  }
+  return out;
+}
+
+/**
+ * Moves whitespace from just inside a tag to just outside it: {{ name }} becomes
+ * ␣{{name}}␣. The space stays on the page — it was typed — but it stops being
+ * part of the field's name, which is matched byte for byte.
+ */
+function moveWhitespaceOutside(text) {
+  let out = text;
+  // The rotation permutes characters inside one tag's own span, so every other
+  // token keeps the offset it had: the list is computed once and stays valid.
+  const tokens = braceTokens(out);
+  for (let i = 0; i < tokens.length - 1; i += 1) {
+    if (!tokens[i].open || tokens[i + 1].open) continue;
+    const start = tokens[i].at;
+    const end = tokens[i + 1].at;
+    const inner = out.slice(start + 2, end);
+    const lead = /^\s*/.exec(inner)[0];
+    const trail = lead.length === inner.length ? '' : /\s*$/.exec(inner)[0];
+    i += 1;
+    if (lead === '' && trail === '') continue;
+    const core = inner.slice(lead.length, inner.length - trail.length);
+    out = `${out.slice(0, start)}${lead}{{${core}}}${trail}${out.slice(end + 2)}`;
+  }
+  return out;
+}
+
+/** Both repairs, in order. The result always has the length of the input. */
+export function normaliseParagraphText(text) {
+  return moveWhitespaceOutside(repairMirroredBraces(text));
+}
+
+/**
+ * Rewrites one XML part, paragraph by paragraph.
+ *
+ * The concatenated raw text of the paragraph's <w:t> runs is what the engine
+ * effectively reads, so that is what is normalised; the result is sliced back
+ * into the same runs by position, which is sound only because the transform
+ * preserves length. Entity references (&amp;, &#10;) survive untouched: they
+ * contain no braces and no whitespace, so nothing moves across them.
+ */
+function normalisePartXml(xml) {
+  const edits = [];
+
+  for (const [start, end] of paragraphRanges(xml)) {
+    const paragraph = xml.slice(start, end);
+    const runs = [];
+    RUN_TEXT.lastIndex = 0;
+    let match;
+    while ((match = RUN_TEXT.exec(paragraph)) !== null) {
+      const openLength = match[0].length - match[1].length - '</w:t>'.length;
+      runs.push({ at: start + match.index + openLength, text: match[1] });
+    }
+    if (runs.length === 0) continue;
+
+    const joined = runs.map((run) => run.text).join('');
+    if (!joined.includes('{{') && !joined.includes('}}')) continue;
+
+    const normalised = normaliseParagraphText(joined);
+    if (normalised === joined) continue;
+
+    let cursor = 0;
+    for (const run of runs) {
+      const slice = normalised.slice(cursor, cursor + run.text.length);
+      cursor += run.text.length;
+      if (slice !== run.text) edits.push({ at: run.at, length: run.text.length, text: slice });
+    }
+  }
+
+  if (edits.length === 0) return null;
+
+  edits.sort((a, b) => a.at - b.at);
+  let out = '';
+  let cursor = 0;
+  for (const edit of edits) {
+    out += xml.slice(cursor, edit.at) + edit.text;
+    cursor = edit.at + edit.length;
+  }
+  return out + xml.slice(cursor);
+}
+
+/**
+ * Normalises every templated part of an opened zip, in place, and reports which
+ * parts it changed. The caller's zip is a throwaway built from the stored bytes;
+ * the stored bytes themselves are never touched.
+ */
+export function normaliseTemplateZip(zip) {
+  const changed = [];
+  for (const name of Object.keys(zip.files)) {
+    if (zip.files[name].dir || !TEMPLATED_PART.test(name)) continue;
+    let xml;
+    try {
+      xml = zip.file(name)?.asText();
+    } catch {
+      continue;
+    }
+    if (typeof xml !== 'string') continue;
+
+    const next = normalisePartXml(xml);
+    if (next === null) continue;
+
+    zip.remove(name);
+    zip.file(name, next, { createFolders: true });
+    changed.push(name);
+  }
+  return changed;
 }
