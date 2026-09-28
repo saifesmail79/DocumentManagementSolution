@@ -673,12 +673,21 @@ export async function renderPage({ userId, documentId, page, version }) {
       return { ok: false, reason: 'busy' };
     }
 
-    const png = await rasterisePdfPage({
-      pdfPath: copy,
-      page,
-      dpi,
-      timeoutMs: config.signing.timeoutMs,
-    });
+    /*
+     * Once more before giving up. A non-zero exit right after the temp copy
+     * was written has been seen on a machine whose antivirus scans new files
+     * and holds them for a moment; the second attempt, a beat later, finds the
+     * file free. A timeout is not retried: it already cost the whole budget.
+     */
+    let png;
+    try {
+      png = await rasterisePdfPage({ pdfPath: copy, page, dpi, timeoutMs: config.signing.timeoutMs });
+    } catch (first) {
+      if (first?.code === 'render_timeout') throw first;
+      log.warn({ err: first, documentId: String(documentId), page }, 'rendering failed once; retrying');
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      png = await rasterisePdfPage({ pdfPath: copy, page, dpi, timeoutMs: config.signing.timeoutMs });
+    }
 
     cachePut(key, png);
     return { ok: true, png, version: found.versionNumber, cached: false };
@@ -697,7 +706,10 @@ export async function renderPage({ userId, documentId, page, version }) {
      * could not be produced.
      */
     log.warn({ err: error, documentId: String(documentId), page }, 'rendering a page for signing failed');
-    return { ok: false, reason: 'render_failed' };
+    // The first line of what the renderer said, so the screen can show it and
+    // the next report names the cause instead of "could not".
+    const detail = String(error?.message ?? error).split('\n')[0].slice(0, 200);
+    return { ok: false, reason: 'render_failed', detail };
   } finally {
     if (slot) releaseSlot();
     await rm(workDir, { recursive: true, force: true }).catch(() => {});

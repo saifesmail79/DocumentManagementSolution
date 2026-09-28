@@ -145,6 +145,7 @@ const PAGE_ERROR = {
     'هذه الصفحة أكبر من أن تُوقَّع بدقة العرض الحالية (قياس كبير مثل A0). راجع مسؤول النظام لتقليل '
     + 'دقة العرض، أو وقّع على نسخة بقياس أصغر.',
   busy: 'الخادم مشغول بتجهيز صفحات أخرى. حاول بعد لحظات.',
+  render_failed: 'تعذر إنتاج صورة الصفحة على الخادم.',
   network: 'تعذر الوصول إلى الخادم. تحقق من الاتصال وحاول مجدداً.',
   undecodable: 'تعذر عرض صورة الصفحة.',
 };
@@ -215,7 +216,7 @@ async function fetchPageImage(documentId, page, version, signal) {
 
   if (!response.ok) {
     const body = await response.json().catch(() => null);
-    return { status: 'error', code: body?.error, httpStatus: response.status };
+    return { status: 'error', code: body?.error, httpStatus: response.status, detail: body?.detail ?? null };
   }
 
   const blobUrl = URL.createObjectURL(await response.blob());
@@ -413,7 +414,13 @@ export default function SigningPanel({ documentId, canRead, onChanged, onCount, 
     setPageState({ status: 'loading' });
 
     (async () => {
-      const result = await fetchPageImage(documentId, page, version, controller.signal);
+      let result = await fetchPageImage(documentId, page, version, controller.signal);
+      // A server-side failure or a dropped connection is tried once more, a
+      // moment later, before it is shown: most such failures are momentary.
+      if (result.status === 'error' && (result.code === 'network' || (result.httpStatus ?? 0) >= 500)) {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        if (!cancelled) result = await fetchPageImage(documentId, page, version, controller.signal);
+      }
       if (cancelled) {
         if (result.blobUrl) URL.revokeObjectURL(result.blobUrl);
         return;
@@ -745,6 +752,10 @@ export default function SigningPanel({ documentId, canRead, onChanged, onCount, 
               <div className="space-y-2 p-2">
                 <Alert tone="error">
                   {messageFor(PAGE_ERROR, pageState.code, 'تعذر تجهيز صورة الصفحة.')}
+                  {!PAGE_ERROR[pageState.code] && (pageState.code || pageState.httpStatus)
+                    ? <span className="num"> ({pageState.code ?? 'HTTP ' + pageState.httpStatus})</span>
+                    : null}
+                  {pageState.detail ? <span className="block text-xs opacity-80" dir="ltr">{pageState.detail}</span> : null}
                 </Alert>
                 <Button
                   variant="secondary"
