@@ -13,7 +13,7 @@ import {
   Package,
   CheckSquare,
   Square,
-  Eye,
+  SquareSplitHorizontal,
   PanelRightClose,
   PanelRightOpen,
   Layers,
@@ -758,9 +758,11 @@ export default function Browse() {
                             customActions={[
                               {
                                 key: 'preview',
-                                icon: Eye,
+                                // Not the eye: «عرض» wears the eye already, and two
+                                // eyes side by side read as the same action twice.
+                                icon: SquareSplitHorizontal,
                                 show: doc.canRead,
-                                title: 'معاينة',
+                                title: 'معاينة جانبية — دون مغادرة القائمة',
                                 onClick: () => {
                                   setPreviewPane(true);
                                   activate(doc.documentId);

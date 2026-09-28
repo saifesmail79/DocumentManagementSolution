@@ -47,7 +47,7 @@ const RING_BOX = (RADIUS + 18) * 2;
 const BUILT_IN = {
   view: {
     icon: Eye,
-    title: 'عرض',
+    title: 'فتح صفحة الوثيقة',
     bgClass: 'bg-primary/10',
     textClass: 'text-primary',
     hoverClass: 'hover:bg-primary/20',
