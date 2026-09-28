@@ -16,6 +16,36 @@
  * Undoing a signature is restoring an earlier version, which leaves its own
  * record; nothing here deletes anything.
  *
+ * ─── What can be signed, and the one thing the two kinds share ──────────────
+ *
+ * Two kinds of document reach the pen: a PDF, and a single-file IMAGE — JPEG,
+ * PNG, WebP or a single-page TIFF. A scanner that files a page as a JPEG is the
+ * ordinary case in this institute, and telling somebody their letter cannot be
+ * signed because of the container it arrived in is a rule with no purpose
+ * behind it. The kind is decided by mimeType and by the filename extension,
+ * exactly as the old PDF-only check decided, and everything else — a multi-file
+ * document, a multi-page TIFF, a Word file, a spreadsheet — is refused by one
+ * name, `unsupported_format`.
+ *
+ * The two kinds share the contract and nothing else. `describe` says which one
+ * it is (`kind: 'pdf' | 'image'`), and from there:
+ *
+ *   • a PDF's page is rasterised by Ghostscript at `signing.dpi`, its geometry
+ *     is measured in POINTS, and the ink is placed over the CropBox by pdf-lib;
+ *   • an image IS its own page: `pageCount` is 1, its geometry is measured in
+ *     PIXELS (there is no page box and no dpi to apply), Ghostscript is never
+ *     spawned and no render slot is taken, and the ink is composited over the
+ *     upright pixels by sharp and re-encoded in the format it arrived in.
+ *
+ * Upright is load-bearing for the image path. A phone camera writes the sensor
+ * readout and an EXIF orientation tag beside it, so the stored width and height
+ * are the ones a viewer that ignores the tag would show, not the ones a person
+ * drew on. Every step — geometry, the served page, the size check, the
+ * composite — goes through sharp's `.rotate()` with no argument, which applies
+ * that tag and clears it, so all four work in the same pixels. The written
+ * bytes carry no orientation tag at all, because the pixels are now upright and
+ * a tag left behind would turn the signed page a second time.
+ *
  * ─── The one path to a write ────────────────────────────────────────────────
  *
  * The flattened PDF goes through `addVersion` from the documents service, with
@@ -38,8 +68,10 @@
  *     the tab is actually opened. It also says which pages are `signable`: a
  *     page whose raster at the signing dpi is over `maxPixels` can be drawn on
  *     but never saved, so it is refused before the pen, not after the ink.
- *   • `renderPage` spawns Ghostscript, at most twice at a time per process and
- *     never for a page over that same ceiling. Answers are kept in a small in-process
+ *   • `renderPage` spawns Ghostscript for a PDF, at most twice at a time per
+ *     process and never for a page over that same ceiling; for an image it
+ *     spawns nothing and takes no slot, because re-encoding a decoded bitmap is
+ *     work this process does itself. Answers are kept in a small in-process
  *     LRU so flipping back a page is instant, and NOTHING is written to
  *     storage: a page image is a picture of bytes that already exist, it would
  *     be invalidated by the very version this feature creates, and a cache in
@@ -51,12 +83,15 @@
  * The client draws on the PNG this module rendered and posts back a
  * transparent PNG of the SAME pixel size. That is the whole contract: no
  * stroke coordinates cross the wire, no device pixel ratio, no zoom factor —
- * one bitmap per page, in the resolution it was drawn at. The server places it
- * over the CropBox, which is the rectangle Ghostscript rasterised
+ * one bitmap per page, in the resolution it was drawn at. For a PDF the server
+ * places it over the CropBox, which is the rectangle Ghostscript rasterised
  * (`-dUseCropBox`) and the rectangle a viewer shows, and applies /Rotate
  * through the table in `localToUser`. A signature in the wrong place on an
  * official letter is worse than no signature, so the placement is derived from
- * the same box that produced the image and never from `page.getSize()`.
+ * the same box that produced the image and never from `page.getSize()`. For an
+ * image the same contract needs no table at all: the overlay is the upright
+ * picture the person drew on, so it is composited at (0, 0) over the upright
+ * pixels, which is the identity the PDF path has to work to reproduce.
  *
  * The PNG is inspected as bytes — signature, IHDR, declared pixel count —
  * before any decoder is handed it, because a PNG declares its size in twelve
@@ -190,8 +225,61 @@ function releaseSlot() {
 
 // ── Small pure helpers ───────────────────────────────────────────────────
 
-const PDF_FILENAME = /\.pdf$/i;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+/**
+ * The image formats a page can be, and how each one is recognised and written.
+ *
+ * Both a mime type and an extension are listed for every format because both
+ * are evidence and neither is trustworthy alone: a scanner's upload arrives as
+ * `application/octet-stream` named `scan.jpg`, and a browser drag-and-drop
+ * arrives as `image/jpeg` named `IMG_0421` with no extension at all. The old
+ * PDF check read both for the same reason.
+ *
+ * `mimeType` is the one written back, so a version filed as `image/pjpeg` by
+ * some ancient client is stored as `image/jpeg` when it is signed. The
+ * extension list is ordered with the canonical spelling first; a file whose own
+ * extension is in the list keeps it, so `قرار.jpeg` does not become `قرار.jpg`
+ * on its way through a signature.
+ */
+const IMAGE_FORMATS = Object.freeze({
+  jpeg: { mimeTypes: ['image/jpeg', 'image/jpg', 'image/pjpeg'], extensions: ['.jpg', '.jpeg', '.jpe'], mimeType: 'image/jpeg' },
+  png: { mimeTypes: ['image/png'], extensions: ['.png'], mimeType: 'image/png' },
+  webp: { mimeTypes: ['image/webp'], extensions: ['.webp'], mimeType: 'image/webp' },
+  tiff: { mimeTypes: ['image/tiff', 'image/x-tiff'], extensions: ['.tif', '.tiff'], mimeType: 'image/tiff' },
+});
+
+/**
+ * What kind of thing this version is, or null when it is nothing this module
+ * can sign.
+ *
+ * PDF first, because `application/pdf` is unambiguous and a `.pdf` extension is
+ * the one people rename things to. Then the image formats, mime type before
+ * extension. Anything else — a Word file, a spreadsheet, a video, a version
+ * with no filename and no usable type — is null, and the single refusal
+ * `unsupported_format` covers all of it: the panel has one sentence to say and
+ * splitting the reason would not give it a second.
+ */
+function documentFormat({ mimeType, filename }) {
+  const mime = String(mimeType ?? '').toLowerCase().split(';')[0].trim();
+  const extension = path.extname(String(filename ?? '')).toLowerCase();
+
+  if (mime === 'application/pdf' || extension === '.pdf') {
+    return { kind: 'pdf', format: 'pdf', extension: '.pdf', mimeType: 'application/pdf' };
+  }
+
+  for (const [format, spec] of Object.entries(IMAGE_FORMATS)) {
+    if (!spec.mimeTypes.includes(mime) && !spec.extensions.includes(extension)) continue;
+    return {
+      kind: 'image',
+      format,
+      extension: spec.extensions.includes(extension) ? extension : spec.extensions[0],
+      mimeType: spec.mimeType,
+    };
+  }
+
+  return null;
+}
 
 function isoOrNull(value) {
   if (!value) return null;
@@ -199,9 +287,127 @@ function isoOrNull(value) {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
-/** '.pdf' is forced onto the new version's filename, so any old extension goes. */
+/**
+ * The name without its extension, so the format's own extension can be put
+ * back. A PDF stays a PDF and a JPEG stays a JPEG — the extension is never
+ * forced to `.pdf` any more, because `buildRelativePath` derives the stored
+ * extension from it and `extensionRefusal` tests it, and a signed JPEG stored
+ * as a PDF would be a file the system lies about.
+ */
 function stripExtension(name) {
   return String(name ?? '').replace(/\.[^.\\/]{1,16}$/, '');
+}
+
+// ── Images: the facts a signature needs, and the upright pipeline ────────
+
+/**
+ * The size a viewer shows, from a size and an EXIF orientation tag.
+ *
+ * Orientations 5 to 8 are the quarter turns, and they swap width and height.
+ * sharp states the answer itself in `metadata.autoOrient` on the versions that
+ * have it; the arithmetic is kept as the fallback rather than as the primary,
+ * so the answer comes from the library that will do the rotating.
+ */
+function uprightSize(metadata) {
+  const stated = metadata?.autoOrient;
+  if (stated && Number(stated.width) > 0 && Number(stated.height) > 0) {
+    return { width: Number(stated.width), height: Number(stated.height) };
+  }
+
+  const orientation = Number(metadata?.orientation);
+  const quarter = orientation >= 5 && orientation <= 8;
+  return quarter
+    ? { width: Number(metadata.height), height: Number(metadata.width) }
+    : { width: Number(metadata.width), height: Number(metadata.height) };
+}
+
+/**
+ * Everything decided about an image before a single pixel is decoded.
+ *
+ * `metadata()` reads the container's header and stops; it is the image
+ * equivalent of the twelve-byte IHDR check the overlays get, and it is what
+ * lets the pixel ceiling be enforced against a 20 000 × 20 000 JPEG without
+ * asking for the 1.6 GB of memory that decoding it would want. No
+ * `limitInputPixels` is set for this call on purpose: the limit refuses at
+ * DECODE time with a throw, and the point of reading the header first is to
+ * refuse by name instead.
+ */
+async function imageFacts(bytes) {
+  const sharp = (await import('sharp')).default;
+  const metadata = await sharp(bytes).metadata();
+  const upright = uprightSize(metadata);
+  return {
+    pages: Number(metadata.pages ?? 1) || 1,
+    width: upright.width,
+    height: upright.height,
+    pixels: upright.width * upright.height,
+  };
+}
+
+/**
+ * `imageFacts` plus the two refusals every image caller has to make, in the
+ * same words, so the geometry, the served page and the save cannot drift apart
+ * on what they will accept.
+ */
+async function imageGeometry(bytes, documentId) {
+  let facts;
+  try {
+    facts = await imageFacts(bytes);
+  } catch (error) {
+    // Deliberately NOT the swallow-and-return-null of `stampPdf`, for the same
+    // reason the PDF path is not: a signature that cannot be placed must be
+    // refused by name, or the strokes vanish with nothing said.
+    log.warn({ err: error, documentId: String(documentId) }, 'the image could not be read for signing');
+    return { ok: false, reason: 'unreadable_image' };
+  }
+
+  if (!(facts.width >= 1) || !(facts.height >= 1)) {
+    log.warn({ documentId: String(documentId) }, 'the image declares no usable size');
+    return { ok: false, reason: 'unreadable_image' };
+  }
+
+  /*
+   * A multi-page TIFF is a file, not a page.
+   *
+   * TIFF is how a scanner hands over a whole bundle in one container, and an
+   * animated WebP holds frames the same way. Signing one would place the ink on
+   * the first page and file the result as the whole thing, losing every other
+   * page without a word — the quietest kind of data loss there is. So it is
+   * refused by the same name a Word file gets, and the count rides along in
+   * `detail` so the screen can say why.
+   */
+  if (facts.pages > 1) {
+    return { ok: false, reason: 'unsupported_format', detail: `${facts.pages} pages` };
+  }
+
+  return { ok: true, ...facts };
+}
+
+/**
+ * A decoding pipeline over the upright pixels.
+ *
+ * `.rotate()` with no argument is the whole orientation story: it applies the
+ * EXIF tag and clears it. `limitInputPixels` is the decoder's own guard, set to
+ * the same ceiling `imageFacts` has already checked, so a file whose header
+ * lies about its size still cannot turn into an allocation.
+ */
+async function uprightImage(bytes) {
+  const sharp = (await import('sharp')).default;
+  return sharp(bytes, { limitInputPixels: config.signing.maxPixels }).rotate();
+}
+
+/** Re-encode in the format the page arrived in, at the quality the design names. */
+function encodeAs(pipeline, format) {
+  switch (format) {
+    case 'jpeg':
+      return pipeline.jpeg({ quality: 92 });
+    case 'webp':
+      return pipeline.webp({ quality: 90 });
+    case 'tiff':
+      return pipeline.tiff();
+    default:
+      return pipeline.png();
+  }
 }
 
 /**
@@ -322,6 +528,37 @@ function provenanceLine({ userId, version, at }) {
   return out;
 }
 
+/**
+ * The same line, as a small SVG to composite at an image's bottom-left.
+ *
+ * An image has no font machinery and no text operator, so the line has to be
+ * drawn. sharp rasterises SVG, and a text element in a box the size of the text
+ * is a great deal cheaper than an overlay the size of the page. The line is
+ * already printable ASCII by the time it arrives, so the escaping here guards
+ * only against the three characters XML reserves — but it guards anyway,
+ * because "this string is already safe" is how injections are written.
+ *
+ * The size is derived from the page so the stamp is legible on a 600-pixel scan
+ * and not a banner across a 6000-pixel one, and clamped at both ends because a
+ * ratio alone gives an unreadable one pixel on a thumbnail-sized page.
+ */
+function provenanceOverlay(text, { width, height }) {
+  const fontSize = Math.min(Math.max(Math.round(height / 90), 9), 28);
+  const boxHeight = Math.round(fontSize * 1.8);
+  const boxWidth = Math.min(width, Math.round(text.length * fontSize * 0.62) + fontSize);
+  const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${boxWidth}" height="${boxHeight}">`
+    + `<text x="${Math.round(fontSize * 0.4)}" y="${Math.round(fontSize * 1.25)}"`
+    + ` font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="${fontSize}"`
+    // The grey of the PDF path's rgb(0.35, 0.35, 0.35), so the two stamps read
+    // the same on a printout of a mixed file.
+    + ` fill="#595959">${escaped}</text></svg>`;
+
+  return { input: Buffer.from(svg, 'utf8'), left: 0, top: Math.max(0, height - boxHeight) };
+}
+
 // ── Reading the document's state ─────────────────────────────────────────
 
 /**
@@ -387,7 +624,16 @@ async function signingState({ userId, documentId }) {
  * then the install's own upload policy. `checkRenderer` is false for `sign`:
  * flattening ink is pdf-lib work and needs no Ghostscript, so a renderer that
  * has gone missing since the page was drawn must not lose somebody's
- * signature.
+ * signature. It is skipped for an IMAGE whatever the caller asks, because
+ * nothing on the image path spawns anything — an install with no Ghostscript at
+ * all can still sign every scan it holds, and saying otherwise would be a
+ * refusal this function invented rather than found.
+ *
+ * A multi-page TIFF is deliberately NOT caught here. Counting a TIFF's pages
+ * means reading the file, and this function runs inside `describe`, the cheap
+ * call the document page makes for every document anybody opens. The refusal is
+ * raised by the three calls that do touch the bytes, so the panel hears it the
+ * moment it asks for the geometry — before the pen, which is what matters.
  */
 async function signability(state, { checkRenderer = true } = {}) {
   if (!state.canRead || !state.canUpload) return { canSign: false, reason: 'forbidden' };
@@ -399,24 +645,32 @@ async function signability(state, { checkRenderer = true } = {}) {
     return { canSign: false, reason: 'multi_file_document' };
   }
 
-  const isPdf = state.mimeType === 'application/pdf' || PDF_FILENAME.test(state.filename ?? '');
-  if (!isPdf) return { canSign: false, reason: 'not_pdf' };
+  const format = documentFormat({ mimeType: state.mimeType, filename: state.filename });
+  if (!format) return { canSign: false, reason: 'unsupported_format' };
 
-  if (state.legalHold) return { canSign: false, reason: 'legal_hold' };
-  if (state.lockedByOther) return { canSign: false, reason: 'locked', lockedBy: state.lockedBy };
-
-  // The install's allowed-extension list is enforced by `addVersion` at the
-  // very end of the save. Asked here as well, so a list that excludes pdf is a
-  // sentence on the screen before anybody draws, not a refusal afterwards.
-  if (await extensionRefusal('signature.pdf')) return { canSign: false, reason: 'pdf_not_allowed' };
-
-  if (checkRenderer) {
-    const { detectTools } = await import('../renditions/service.js');
-    const tools = await detectTools();
-    if (!tools.ghostscript.available) return { canSign: false, reason: 'renderer_missing' };
+  if (state.legalHold) return { canSign: false, kind: format.kind, reason: 'legal_hold' };
+  if (state.lockedByOther) {
+    return { canSign: false, kind: format.kind, reason: 'locked', lockedBy: state.lockedBy };
   }
 
-  return { canSign: true };
+  // The install's allowed-extension list is enforced by `addVersion` at the very
+  // end of the save. Asked here as well, and asked with the extension this
+  // document will actually be filed under rather than a hardcoded '.pdf', so a
+  // list that excludes the format is a sentence on the screen before anybody
+  // draws. The reason keeps its name — it is the same rule it always was.
+  if (await extensionRefusal(`signature${format.extension}`)) {
+    return { canSign: false, kind: format.kind, reason: 'pdf_not_allowed' };
+  }
+
+  if (checkRenderer && format.kind === 'pdf') {
+    const { detectTools } = await import('../renditions/service.js');
+    const tools = await detectTools();
+    if (!tools.ghostscript.available) {
+      return { canSign: false, kind: format.kind, reason: 'renderer_missing' };
+    }
+  }
+
+  return { canSign: true, kind: format.kind, format };
 }
 
 // ── describe ─────────────────────────────────────────────────────────────
@@ -449,6 +703,11 @@ export async function describe({ userId, documentId }) {
     enabled: true,
     canRead: true,
     canSign: verdict.canSign,
+    // 'pdf' or 'image' — the panel needs it to label the unit of the geometry
+    // it is about to ask for, and to say what it is showing. Absent when the
+    // format was never resolved (no permission, not a single-file document, or
+    // a format this module does not sign), because there is no kind to name.
+    ...(verdict.kind ? { kind: verdict.kind } : {}),
     ...(verdict.reason ? { reason: verdict.reason } : {}),
     ...(verdict.lockedBy ? { lockedBy: verdict.lockedBy } : {}),
     version: state.currentVersion,
@@ -512,24 +771,77 @@ export async function listSignatures({ documentId, currentVersion = null }) {
 // ── pageGeometry ─────────────────────────────────────────────────────────
 
 /**
- * Page count and each page's displayed size, from one pdf-lib load.
+ * Page count and each page's size, from one load of the version's bytes.
  *
  * The panel sizes its canvas from this and the server checks the posted PNGs
- * against it, so both ends work from the same numbers. The renderer is checked
- * even though pdf-lib needs none: a geometry answer the panel cannot turn into
- * a picture is a spinner with no explanation, and the honest reply to "let me
- * sign this" on a host without Ghostscript is 503 with a reason.
+ * against it, so both ends work from the same numbers.
+ *
+ * ─── The unit differs by kind, and the client must be told which ────────────
+ *
+ * For a PDF, `width` and `height` are POINTS — the CropBox as displayed — and
+ * the picture the panel will draw on is that box rasterised at `dpi`. For an
+ * IMAGE they are PIXELS: the upright pixel size of the file itself, which IS
+ * the picture, with no box to crop to and no resolution to apply. `kind` says
+ * which, `dpi` is reported either way (the client shows it, and a page image
+ * request carries it in the cache key) and is simply unused by the image path.
+ *
+ * The renderer is checked for a PDF even though pdf-lib needs none: a geometry
+ * answer the panel cannot turn into a picture is a spinner with no explanation,
+ * and the honest reply to "let me sign this" on a host without Ghostscript is
+ * 503 with a reason. An image needs no renderer, so it is never asked for one.
+ *
+ * The format is read from the VERSION being described rather than from the
+ * document's current one, because `?version=` may name an older version whose
+ * format differs — a scan replaced later by a PDF is an ordinary history.
  */
 export async function pageGeometry({ userId, documentId, version }) {
   if (!(await isEnabled())) return { ok: false, reason: 'signing_disabled' };
 
-  const { detectTools } = await import('../renditions/service.js');
-  const tools = await detectTools();
-  if (!tools.ghostscript.available) return { ok: false, reason: 'renderer_missing' };
-
   const { getVersionForRead } = await import('../documents/service.js');
   const found = await getVersionForRead({ userId, documentId, version });
   if (!found) return { ok: false, reason: 'not_found' };
+
+  const format = documentFormat({ mimeType: found.mimeType, filename: found.originalFilename });
+  if (!format) return { ok: false, reason: 'unsupported_format' };
+
+  if (format.kind === 'image') {
+    const facts = await imageGeometry(await readVersion(found.storagePath), documentId);
+    if (!facts.ok) return facts;
+
+    /*
+     * One page, and the pixel count is the page's own.
+     *
+     * `rotation` is always 0 because the size reported is already upright: the
+     * EXIF tag has been applied to the numbers here and will be applied to the
+     * pixels the panel is served, so there is no turn left for the client to
+     * make. Reporting the tag's value instead would invite it to turn the page
+     * a second time.
+     */
+    const signable = facts.pixels <= config.signing.maxPixels;
+    return {
+      ok: true,
+      kind: 'image',
+      version: found.versionNumber,
+      pageCount: 1,
+      pages: [
+        {
+          number: 1,
+          width: facts.width,
+          height: facts.height,
+          rotation: 0,
+          pixels: facts.pixels,
+          signable,
+          ...(signable ? {} : { reason: 'too_large' }),
+        },
+      ],
+      dpi: config.signing.dpi,
+      maxPixels: config.signing.maxPixels,
+    };
+  }
+
+  const { detectTools } = await import('../renditions/service.js');
+  const tools = await detectTools();
+  if (!tools.ghostscript.available) return { ok: false, reason: 'renderer_missing' };
 
   const bytes = await readVersion(found.storagePath);
 
@@ -578,6 +890,7 @@ export async function pageGeometry({ userId, documentId, version }) {
 
   return {
     ok: true,
+    kind: 'pdf',
     version: found.versionNumber,
     pageCount: pages.length,
     pages,
@@ -591,7 +904,12 @@ export async function pageGeometry({ userId, documentId, version }) {
 // ── renderPage ───────────────────────────────────────────────────────────
 
 /**
- * One page as a PNG, at the signing resolution.
+ * One page as a PNG: a PDF page at the signing resolution, or the image itself.
+ *
+ * Both kinds answer PNG, both are kept in the same LRU under the same key, and
+ * both refuse a page over `maxPixels` before decoding anything. What follows
+ * describes the PDF path; the image path is a decode and an encode in this
+ * process, and is documented where it branches.
  *
  * Ghostscript is handed a temp COPY rather than the stored path, because
  * stored paths deliberately carry the document's Arabic title and no evidence
@@ -611,16 +929,62 @@ export async function pageGeometry({ userId, documentId, version }) {
 export async function renderPage({ userId, documentId, page, version }) {
   if (!(await isEnabled())) return { ok: false, reason: 'signing_disabled' };
 
-  const { detectTools, rasterisePdfPage } = await import('../renditions/service.js');
-  const tools = await detectTools();
-  if (!tools.ghostscript.available) return { ok: false, reason: 'renderer_missing' };
-
   const { getVersionForRead } = await import('../documents/service.js');
   const found = await getVersionForRead({ userId, documentId, version });
   if (!found) return { ok: false, reason: 'not_found' };
 
+  const format = documentFormat({ mimeType: found.mimeType, filename: found.originalFilename });
+  if (!format) return { ok: false, reason: 'unsupported_format' };
+
   const dpi = config.signing.dpi;
   const key = `${documentId}/${found.versionNumber}/${page}/${dpi}`;
+
+  if (format.kind === 'image') {
+    /*
+     * An image is one page and is served as itself.
+     *
+     * No Ghostscript, no temp copy, no render slot: the slot exists because a
+     * subprocess per request is how a browser's six connections take a host
+     * down, and there is no subprocess here. What remains is a decode and a PNG
+     * encode inside this process, bounded by the same `maxPixels` ceiling as
+     * everything else and refused from the header before any of it is asked for.
+     *
+     * The answer is PNG whatever the source was, because the contract with the
+     * client is one format for the backdrop and one for the overlay; the save
+     * end puts the original format back.
+     */
+    if (page !== 1) return { ok: false, reason: 'invalid_page', detail: `page ${page} of 1` };
+
+    const cachedImage = cacheGet(key);
+    if (cachedImage) {
+      return { ok: true, png: cachedImage, version: found.versionNumber, cached: true };
+    }
+
+    const bytes = await readVersion(found.storagePath);
+    const facts = await imageGeometry(bytes, documentId);
+    if (!facts.ok) return facts;
+
+    if (facts.pixels > config.signing.maxPixels) {
+      return { ok: false, reason: 'too_large', limit: config.signing.maxPixels };
+    }
+
+    let png;
+    try {
+      png = await (await uprightImage(bytes)).png().toBuffer();
+    } catch (error) {
+      log.warn({ err: error, documentId: String(documentId) }, 'the image could not be re-encoded for signing');
+      const detail = String(error?.message ?? error).split('\n')[0].slice(0, 200);
+      return { ok: false, reason: 'render_failed', detail };
+    }
+
+    cachePut(key, png);
+    return { ok: true, png, version: found.versionNumber, cached: false };
+  }
+
+  const { detectTools, rasterisePdfPage } = await import('../renditions/service.js');
+  const tools = await detectTools();
+  if (!tools.ghostscript.available) return { ok: false, reason: 'renderer_missing' };
+
   const cached = cacheGet(key);
   if (cached) return { ok: true, png: cached, version: found.versionNumber, cached: true };
 
@@ -716,6 +1080,183 @@ export async function renderPage({ userId, documentId, page, version }) {
   }
 }
 
+// ── Flattening the ink ───────────────────────────────────────────────────
+
+/*
+ * Two flatteners, one signature.
+ *
+ * Both take the version's bytes, the validated overlays and the provenance line
+ * (null when the setting is off), and both answer `{ ok: true, bytes }` or a
+ * named refusal. Neither writes anything, neither knows about versions or the
+ * ledger, and the final size check — is this overlay a picture of THIS page —
+ * lives inside each of them, because only each of them knows what the page's
+ * size is measured in.
+ */
+
+/** Draw each overlay over its page's CropBox and save. */
+async function flattenPdf({ bytes, overlays, stamp, documentId }) {
+  let pdf;
+  let degrees;
+  let rgb;
+  let StandardFonts;
+  try {
+    let PDFDocument;
+    ({ PDFDocument, degrees, rgb, StandardFonts } = await import('pdf-lib'));
+    pdf = await PDFDocument.load(bytes, { ignoreEncryption: false });
+  } catch (error) {
+    log.warn({ err: error, documentId: String(documentId) }, 'the PDF could not be read for signing');
+    return { ok: false, reason: 'unreadable_pdf' };
+  }
+
+  const pdfPages = pdf.getPages();
+  for (const overlay of overlays) {
+    if (overlay.number > pdfPages.length) {
+      return { ok: false, reason: 'invalid_page', detail: `page ${overlay.number} of ${pdfPages.length}` };
+    }
+
+    const geometry = displayedGeometry(pdfPages[overlay.number - 1]);
+    const want = rasterSize(geometry);
+    if (
+      Math.abs(overlay.header.width - want.width) > 2
+      || Math.abs(overlay.header.height - want.height) > 2
+    ) {
+      // The overlay is not a picture of this page. Refused rather than scaled:
+      // stretching it to fit would move every stroke a little, and a signature
+      // that is nearly where somebody drew it is a forgery of the one they did.
+      return {
+        ok: false,
+        reason: 'invalid_image',
+        detail: `page ${overlay.number} is ${overlay.header.width}×${overlay.header.height}, expected ${want.width}×${want.height}`,
+      };
+    }
+    overlay.geometry = geometry;
+  }
+
+  const font = stamp ? await pdf.embedFont(StandardFonts.Helvetica) : null;
+
+  for (const overlay of overlays) {
+    const page = pdfPages[overlay.number - 1];
+    const { box, angle, width, height } = overlay.geometry;
+
+    const image = await pdf.embedPng(overlay.buffer);
+    const anchor = localToUser(box, angle, 0, 0);
+    page.drawImage(image, {
+      x: anchor.x,
+      y: anchor.y,
+      width,
+      height,
+      rotate: degrees(angle),
+    });
+
+    if (font) {
+      const at = localToUser(box, angle, 6, 6);
+      page.drawText(stamp, {
+        x: at.x,
+        y: at.y,
+        size: 7,
+        font,
+        color: rgb(0.35, 0.35, 0.35),
+        rotate: degrees(angle),
+      });
+    }
+  }
+
+  try {
+    return { ok: true, bytes: Buffer.from(await pdf.save()) };
+  } catch (error) {
+    log.error({ err: error, documentId: String(documentId) }, 'the signed PDF could not be written');
+    return { ok: false, reason: 'unreadable_pdf' };
+  }
+}
+
+/**
+ * Composite the one overlay over the upright pixels and re-encode in place.
+ *
+ * An image is one page, so a request naming any other page number is refused
+ * before anything is decoded — it means the client is working from a geometry
+ * answer that does not belong to this document.
+ *
+ * The result is written in the SAME format it arrived in. Converting everything
+ * to PNG would be simpler and would be wrong: a 4 MB scanned JPEG becomes a
+ * 30 MB PNG, and every signature would grow the file it is meant to finish.
+ * Nothing carries metadata over, which is the whole point — the pixels are now
+ * upright, and an EXIF orientation tag left behind would turn the signed page a
+ * second time in every viewer that honours it.
+ */
+async function flattenImage({ bytes, overlays, format, stamp, documentId }) {
+  const stray = overlays.find((overlay) => overlay.number !== 1);
+  if (stray) return { ok: false, reason: 'invalid_page', detail: `page ${stray.number} of 1` };
+
+  const facts = await imageGeometry(bytes, documentId);
+  if (!facts.ok) return facts;
+  if (facts.pixels > config.signing.maxPixels) {
+    return { ok: false, reason: 'too_large', limit: config.signing.maxPixels };
+  }
+
+  const [overlay] = overlays;
+  if (
+    Math.abs(overlay.header.width - facts.width) > 2
+    || Math.abs(overlay.header.height - facts.height) > 2
+  ) {
+    return {
+      ok: false,
+      reason: 'invalid_image',
+      detail: `page 1 is ${overlay.header.width}×${overlay.header.height}, expected ${facts.width}×${facts.height}`,
+    };
+  }
+
+  /*
+   * The two pixels of tolerance have to be spent somewhere.
+   *
+   * sharp refuses to composite anything larger than the base, so an overlay a
+   * pixel or two out — which the check above deliberately admits, because the
+   * client rounds a displayed size — would throw rather than sign. It is
+   * resized to the exact base instead, which is what the PDF path does too: it
+   * draws the overlay across the whole CropBox whatever its raster measured.
+   */
+  let input = overlay.buffer;
+  if (overlay.header.width !== facts.width || overlay.header.height !== facts.height) {
+    const sharp = (await import('sharp')).default;
+    input = await sharp(overlay.buffer, { limitInputPixels: config.signing.maxPixels })
+      .resize({ width: facts.width, height: facts.height, fit: 'fill' })
+      .png()
+      .toBuffer();
+  }
+
+  const layers = [{ input, left: 0, top: 0 }];
+  if (stamp) layers.push(provenanceOverlay(stamp, facts));
+
+  const compose = async (chosen) =>
+    encodeAs((await uprightImage(bytes)).composite(chosen), format.format).toBuffer();
+
+  try {
+    return { ok: true, bytes: await compose(layers) };
+  } catch (error) {
+    /*
+     * The stamp is the only part that may be dropped.
+     *
+     * Rendering the provenance line means rasterising an SVG text element, which
+     * needs a font on the host; the ink needs nothing but pixels. A host with no
+     * usable font must not lose somebody's signature over a grey caption, so the
+     * composite is retried without it and the loss is logged rather than
+     * returned. If the retry fails too, the failure was never about the stamp.
+     */
+    const detail = String(error?.message ?? error).split('\n')[0].slice(0, 200);
+    if (layers.length > 1) {
+      log.warn({ err: error, documentId: String(documentId) }, 'the provenance stamp could not be drawn; signing without it');
+      try {
+        return { ok: true, bytes: await compose([layers[0]]) };
+      } catch (second) {
+        log.error({ err: second, documentId: String(documentId) }, 'the signed image could not be written');
+        return { ok: false, reason: 'render_failed', detail: String(second?.message ?? second).split('\n')[0].slice(0, 200) };
+      }
+    }
+
+    log.error({ err: error, documentId: String(documentId) }, 'the signed image could not be written');
+    return { ok: false, reason: 'render_failed', detail };
+  }
+}
+
 // ── sign ─────────────────────────────────────────────────────────────────
 
 /**
@@ -727,6 +1268,13 @@ export async function renderPage({ userId, documentId, page, version }) {
  * claims, and the document's own state has been re-read inside this call — the
  * panel's `describe` answer may be minutes old, and a hold placed or a lock
  * taken in the meantime must win.
+ *
+ * Every step up to the flattening is the same for a PDF and for an image: the
+ * permission, the shape of the document, the freezes, the version the ink was
+ * drawn on, the page list and the twelve-byte header of every overlay. Only
+ * `flattenPdf` and `flattenImage` differ, and everything after them — the one
+ * filing path, the ledger row with both hashes, the result the route turns into
+ * an audit detail and an announcement — is identical again.
  *
  * @param {object} args
  * @param {number} args.version  the version the ink was drawn on; a mismatch is `conflict`
@@ -766,14 +1314,14 @@ export async function sign({ userId, documentId, version, note = null, pages, di
   }
 
   /*
-   * Page numbers and PNG headers before the PDF is even read.
+   * Page numbers and PNG headers before the version's bytes are even read.
    *
    * A duplicate page would otherwise be drawn twice with the second overlay
    * hiding the first, and a declared pixel count is the one thing that must be
    * checked while it is still only twelve bytes. What cannot be checked yet is
    * whether each image is the right SIZE for its page: that needs the page's
-   * CropBox, so it happens straight after the load and still before `embedPng`
-   * hands any of these bytes to a decoder.
+   * CropBox, or the image's own upright size, so it happens inside the
+   * flattener and still before any of these bytes reach a decoder.
    */
   const overlays = [];
   const seen = new Set();
@@ -799,95 +1347,34 @@ export async function sign({ userId, documentId, version, note = null, pages, di
   overlays.sort((a, b) => a.number - b.number);
 
   const bytes = await readVersion(state.storagePath);
-
-  let pdf;
-  let degrees;
-  let rgb;
-  let StandardFonts;
-  try {
-    let PDFDocument;
-    ({ PDFDocument, degrees, rgb, StandardFonts } = await import('pdf-lib'));
-    pdf = await PDFDocument.load(bytes, { ignoreEncryption: false });
-  } catch (error) {
-    log.warn({ err: error, documentId: String(documentId) }, 'the PDF could not be read for signing');
-    return { ok: false, reason: 'unreadable_pdf' };
-  }
-
-  const pdfPages = pdf.getPages();
-  for (const overlay of overlays) {
-    if (overlay.number > pdfPages.length) {
-      return { ok: false, reason: 'invalid_page', detail: `page ${overlay.number} of ${pdfPages.length}` };
-    }
-
-    const geometry = displayedGeometry(pdfPages[overlay.number - 1]);
-    const want = rasterSize(geometry);
-    if (
-      Math.abs(overlay.header.width - want.width) > 2
-      || Math.abs(overlay.header.height - want.height) > 2
-    ) {
-      // The overlay is not a picture of this page. Refused rather than scaled:
-      // stretching it to fit would move every stroke a little, and a signature
-      // that is nearly where somebody drew it is a forgery of the one they did.
-      return {
-        ok: false,
-        reason: 'invalid_image',
-        detail: `page ${overlay.number} is ${overlay.header.width}×${overlay.header.height}, expected ${want.width}×${want.height}`,
-      };
-    }
-    overlay.geometry = geometry;
-  }
-
   const newVersion = state.currentVersion + 1;
   const signedAt = new Date().toISOString();
+  const stamp = config.signing.provenance
+    ? provenanceLine({ userId, version: newVersion, at: signedAt })
+    : null;
 
-  let font = null;
-  if (config.signing.provenance) font = await pdf.embedFont(StandardFonts.Helvetica);
-
-  for (const overlay of overlays) {
-    const page = pdfPages[overlay.number - 1];
-    const { box, angle, width, height } = overlay.geometry;
-
-    const image = await pdf.embedPng(overlay.buffer);
-    const anchor = localToUser(box, angle, 0, 0);
-    page.drawImage(image, {
-      x: anchor.x,
-      y: anchor.y,
-      width,
-      height,
-      rotate: degrees(angle),
-    });
-
-    if (font) {
-      const at = localToUser(box, angle, 6, 6);
-      page.drawText(provenanceLine({ userId, version: newVersion, at: signedAt }), {
-        x: at.x,
-        y: at.y,
-        size: 7,
-        font,
-        color: rgb(0.35, 0.35, 0.35),
-        rotate: degrees(angle),
-      });
-    }
-  }
-
-  let flattened;
-  try {
-    flattened = Buffer.from(await pdf.save());
-  } catch (error) {
-    log.error({ err: error, documentId: String(documentId) }, 'the signed PDF could not be written');
-    return { ok: false, reason: 'unreadable_pdf' };
-  }
+  // One of two flatteners, same arguments, same answer: the signed bytes or a
+  // named refusal. Everything after this line — the filing, the ledger, the
+  // audit detail, the announcement — is identical for both kinds, which is the
+  // point of keeping the difference inside these two functions.
+  const flattened =
+    verdict.format.kind === 'image'
+      ? await flattenImage({ bytes, overlays, format: verdict.format, stamp, documentId })
+      : await flattenPdf({ bytes, overlays, stamp, documentId });
+  if (!flattened.ok) return flattened;
 
   const { addVersion } = await import('../documents/service.js');
   const added = await addVersion({
     userId,
     documentId,
-    stream: Readable.from(flattened),
-    // The extension is forced because `buildRelativePath` derives the stored
-    // extension from it and `extensionRefusal` tests it: whatever the original
-    // was called, what is being stored now is a PDF.
-    filename: `${stripExtension(state.filename || state.title) || 'document'}.pdf`,
-    mimeType: 'application/pdf',
+    stream: Readable.from(flattened.bytes),
+    // The extension is the FORMAT's, because `buildRelativePath` derives the
+    // stored extension from it and `extensionRefusal` tests it. A signed JPEG
+    // is still a JPEG; forcing '.pdf' onto it, as this once did when PDFs were
+    // the only kind, would file bytes the system then describes wrongly to
+    // every viewer, download and preview that reads the name.
+    filename: `${stripExtension(state.filename || state.title) || 'document'}${verdict.format.extension}`,
+    mimeType: verdict.format.mimeType,
     comment: `توقيع: ${displayName || 'مستخدم'}`.slice(0, 1000),
   });
 
@@ -939,6 +1426,7 @@ export async function sign({ userId, documentId, version, note = null, pages, di
     documentId: String(documentId),
     folderId: state.folderId,
     title: state.title,
+    kind: verdict.format.kind,
     version: added.version,
     signatureId,
     ledger,

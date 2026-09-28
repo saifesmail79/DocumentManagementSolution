@@ -13,9 +13,15 @@
  * Thin, as the house pattern requires: parse and whitelist the path
  * parameters, call the service, map its reason onto a status code, and write
  * the audit trail and the event fan-out AFTER a success. Every rule — who may
- * sign, whether the document is a single-file PDF, whether it is frozen, where
- * the ink lands — is in service.js, because the rule must hold for any caller
- * and a route is only one caller.
+ * sign, whether the document is a single-file PDF or a single-page image,
+ * whether it is frozen, where the ink lands — is in service.js, because the
+ * rule must hold for any caller and a route is only one caller.
+ *
+ * The routes themselves do not know which kind of file they are serving. A page
+ * image is a PNG whether it came from Ghostscript or from a scan, the sign body
+ * is the same shape either way, and `describe` says `kind` so the client can
+ * word its screen. That is why adding images changed one name in the map below
+ * and nothing else in this file.
  *
  * `/status` answers while the switch is off; everything else answers 409
  * `signing_disabled`, so an install that has not adopted signing carries the
@@ -53,10 +59,19 @@ const STATUS = {
   forbidden: 403,
   legal_hold: 423,
   locked: 423,
-  not_pdf: 415,
+  // One name for every shape of file this module does not sign: a Word
+  // document, a spreadsheet, a multi-file document's constituent, a multi-page
+  // TIFF. It was `not_pdf` while a PDF was the only thing that could be signed;
+  // an image can be too now, so the name says what the rule is rather than what
+  // one of its cases used to be. The status is unchanged.
+  unsupported_format: 415,
   pdf_not_allowed: 415,
   blocked_extension: 415,
   unreadable_pdf: 422,
+  // The image counterpart of `unreadable_pdf`: the bytes are the format they
+  // claim to be as far as the name and the type say, and no decoder can open
+  // them. Same status, because it is the same fact about the same thing.
+  unreadable_image: 422,
   no_strokes: 400,
   invalid_image: 400,
   invalid_page: 400,

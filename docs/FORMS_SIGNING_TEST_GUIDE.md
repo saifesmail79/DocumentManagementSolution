@@ -86,7 +86,7 @@ of 2026-09-27, so you can look before you build.
    any conversion; a second press during conversion does nothing; two
    letters at the same instant on a busy server ask the second to retry.
 
-## 4. Sign a page (any single-file PDF; the generated letter is ideal)
+## 4. Sign a page (any single-file PDF or image; the generated letter is ideal)
 
 1. Open the document, tab **التوقيع**, press **ابدأ التوقيع**. Page 1 appears
    as an image with a page strip above it.
@@ -97,7 +97,8 @@ of 2026-09-27, so you can look before you build.
    another; the strip marks pages that carry ink.
 3. A page too large to sign at the configured resolution (an A0 plan, for
    example) is marked in the strip and cannot be drawn on; every ordinary
-   letter or A4/A3 scan is fine.
+   letter or A4/A3 scan is fine. A single image (a scanned card, a photo)
+   is signed the same way and saved as a new version in its own format.
 4. Add a note, press **حفظ التوقيع**, confirm. The panel reloads: the
    signature list shows who, when, version 2, page 1, the note, and a link to
    that version. **الإصدارات** shows version 2 with the comment «توقيع: …»;
@@ -105,7 +106,7 @@ of 2026-09-27, so you can look before you build.
 5. Download the document: the ink is on the page, with a small grey
    provenance line at the bottom-left («DMS signature: user …, v2, …»).
 6. Expected refusals, each explained in the tab instead of a pen: a
-   multi-file document; a non-PDF; a document under legal hold; a document
+   multi-file document; an Office file or a multi-page TIFF; a document under legal hold; a document
    checked out by someone else; a reader without upload permission on the
    folder. Add a version from another session while ink is drawn, then save:
    «تغيّرت الوثيقة» — the ink is kept until you refresh.

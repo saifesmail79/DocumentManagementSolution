@@ -32,6 +32,25 @@
  * when it is absent, as tests/renditions.integration.test.js does. The
  * database-only cases — the switch, the refusals, the ledger, the audit trail —
  * run either way.
+ *
+ * ─── The image cases, and why none of them skips ────────────────────────────
+ *
+ * A single-file document whose current version is a JPEG, PNG, WebP or
+ * single-page TIFF is signed exactly like a one-page PDF, and NOTHING on that
+ * path spawns a process: sharp decodes, composites and re-encodes inside this
+ * one. So every image case runs on every host, including the ones where the
+ * PDF half of this file skips — which is also the evidence that an install
+ * without Ghostscript can still sign the scans it holds.
+ *
+ * The image cases assert three things the PDF cases cannot. The first is that
+ * the FORMAT survives: a signed JPEG is still a JPEG of the same pixel size,
+ * because re-encoding every scan as PNG would multiply the file each time
+ * somebody signs it. The second is uprightness: a photograph carries its
+ * rotation in an EXIF tag rather than in its pixels, so a page served one way
+ * up and written the other is a signature in the wrong corner of a page nobody
+ * can read — the orientation-6 case is the only form of the check that catches
+ * it. The third is that a multi-page TIFF is refused: signing it would place
+ * the ink on page one and file the result as the whole bundle.
  */
 
 import { test, before, after, describe } from 'node:test';
@@ -100,6 +119,46 @@ async function makePdf({ rotate = 0, origin = 0, size = [595.28, 841.89], cropIn
   }
 
   return Buffer.from(await pdf.save());
+}
+
+/**
+ * A blank image of a chosen format and shape, optionally lying about which way
+ * up it is.
+ *
+ * `orientation: 6` writes the EXIF tag a phone held sideways writes: the pixels
+ * are stored as the sensor read them and every viewer is expected to turn them
+ * a quarter. Nothing else in this file can produce that situation, and it is
+ * the one the whole image path has to get right.
+ */
+async function makeImage({ format = 'png', width = 900, height = 600, background = '#ffffff', orientation = null } = {}) {
+  const sharp = (await import('sharp')).default;
+  let pipeline = sharp({ create: { width, height, channels: 3, background } });
+  if (orientation) pipeline = pipeline.withMetadata({ orientation });
+
+  switch (format) {
+    case 'jpeg':
+      return pipeline.jpeg({ quality: 95 }).toBuffer();
+    case 'webp':
+      return pipeline.webp({ quality: 95 }).toBuffer();
+    case 'tiff':
+      return pipeline.tiff().toBuffer();
+    default:
+      return pipeline.png().toBuffer();
+  }
+}
+
+/**
+ * A TIFF holding two pages — how a sheet-feed scanner hands over a bundle.
+ *
+ * sharp joins a list of inputs into one multi-page image when `join.animated`
+ * is set, and `tiff()` then writes every page. Built rather than fixtured so
+ * the page count is a fact of this file and not of a binary nobody can read.
+ */
+async function makeMultiPageTiff() {
+  const sharp = (await import('sharp')).default;
+  const one = await sharp({ create: { width: 300, height: 200, channels: 3, background: '#ffffff' } }).png().toBuffer();
+  const two = await sharp({ create: { width: 300, height: 200, channels: 3, background: '#f0f0f0' } }).png().toBuffer();
+  return sharp([one, two], { join: { across: 1, animated: true } }).tiff().toBuffer();
 }
 
 /** A transparent PNG of exactly `width`×`height` with a solid square in one corner. */
@@ -265,6 +324,18 @@ async function addVersionThrough(cookie, documentId, filename, content) {
   return response.json().version;
 }
 
+/**
+ * The stored bytes of one version, through the ordinary content route.
+ *
+ * The signing page route always answers PNG, so it cannot say whether a signed
+ * JPEG was filed as a JPEG. This reads what is actually on disk.
+ */
+async function fetchContent(cookie, documentId, version) {
+  const response = await call('GET', `/api/documents/${documentId}/content?version=${version}`, cookie);
+  assert.equal(response.statusCode, 200, response.body?.slice?.(0, 300) ?? '');
+  return response.rawPayload;
+}
+
 /** The PNG the server rendered for a page, plus its pixel size. */
 async function fetchPage(cookie, documentId, page, version) {
   const query = version ? `?version=${version}` : '';
@@ -350,6 +421,25 @@ describe('ink signing (التوقيع)', { skip: SKIP }, () => {
     // has put any of them in the page cache.
     doc.parallel = await upload(signer, 'signing', 'parallel.pdf', await makePdf({ pages: 4 }));
     doc.multi = await uploadMultiFile(signer, 'signing', ['a.pdf', 'b.pdf'], plain);
+
+    // One document per image format, each a slightly different white so no two
+    // uploads share a hash and the duplicate warning never clouds a failure.
+    doc.png = await upload(signer, 'signing', 'scan.png', await makeImage({ format: 'png' }), 'image/png');
+    doc.jpeg = await upload(signer, 'signing', 'scan.jpg', await makeImage({ format: 'jpeg', background: '#fefefe' }), 'image/jpeg');
+    doc.webp = await upload(signer, 'signing', 'scan.webp', await makeImage({ format: 'webp', background: '#fdfdfd' }), 'image/webp');
+    doc.tiff = await upload(signer, 'signing', 'scan.tif', await makeImage({ format: 'tiff', background: '#fcfcfc' }), 'image/tiff');
+    // A page whose pixels are 900×600 and whose EXIF tag says to show it 600×900.
+    doc.exif = await upload(signer, 'signing', 'photo.jpg', await makeImage({ format: 'jpeg', orientation: 6 }), 'image/jpeg');
+    doc.tiffPages = await upload(signer, 'signing', 'bundle.tif', await makeMultiPageTiff(), 'image/tiff');
+    // Named and typed as a Word file; the bytes do not matter, because nothing
+    // on this path is ever asked to open them.
+    doc.word = await upload(
+      signer,
+      'signing',
+      'قرار.docx',
+      Buffer.from('PK\u0003\u0004 not a real docx'),
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    );
 
     const held = await call('POST', `/api/documents/${doc.held}/legal-hold`, boss, {
       hold: true,
@@ -442,10 +532,24 @@ describe('ink signing (التوقيع)', { skip: SKIP }, () => {
     assert.equal(body.reason, 'multi_file_document');
   });
 
-  test('a document that is not a PDF is refused by name', async () => {
-    const body = (await call('GET', `/api/signing/documents/${doc.text}`, signer)).json();
-    assert.equal(body.canSign, false);
-    assert.equal(body.reason, 'not_pdf');
+  test('a document that is neither a PDF nor an image is refused by name', async () => {
+    const text = (await call('GET', `/api/signing/documents/${doc.text}`, signer)).json();
+    assert.equal(text.canSign, false);
+    assert.equal(text.reason, 'unsupported_format');
+    assert.equal(text.kind, undefined, 'there is no kind to name when nothing was recognised');
+
+    const word = (await call('GET', `/api/signing/documents/${doc.word}`, signer)).json();
+    assert.equal(word.canSign, false);
+    assert.equal(word.reason, 'unsupported_format');
+
+    // And the save end says the same thing with the same status, so a client
+    // working from a stale answer is refused rather than obeyed.
+    const refused = await call('POST', `/api/signing/documents/${doc.word}/sign`, signer, {
+      version: 1,
+      pages: [{ number: 1, image: asDataUrl(await overlay({ width: 40, height: 40 })) }],
+    });
+    assert.equal(refused.statusCode, 415, refused.body);
+    assert.equal(refused.json().error, 'unsupported_format');
   });
 
   test('a document under legal hold cannot be signed', async () => {
@@ -467,6 +571,7 @@ describe('ink signing (التوقيع)', { skip: SKIP }, () => {
     assert.equal(body.enabled, true);
     assert.equal(body.canRead, true);
     assert.equal(body.canSign, true);
+    assert.equal(body.kind, 'pdf');
     assert.equal(body.reason, undefined);
     assert.equal(body.version, 1);
     assert.deepEqual(body.signatures, []);
@@ -502,6 +607,7 @@ describe('ink signing (التوقيع)', { skip: SKIP }, () => {
     assert.equal(response.statusCode, 200, response.body);
 
     const body = response.json();
+    assert.equal(body.kind, 'pdf');
     assert.equal(body.pageCount, 1);
     assert.equal(body.dpi, DPI);
     assert.equal(body.pages[0].number, 1);
@@ -1009,5 +1115,308 @@ describe('ink signing (التوقيع)', { skip: SKIP }, () => {
       await makePdf({ rotate: 90 }),
     );
     await provePlacement(signer, documentId, { corner: 'bottom-right', opposite: 'top-right' });
+  });
+
+  // ── Images: a scan is a page, and none of this needs Ghostscript ────────
+
+  const IMAGE_CASES = [
+    { key: 'png', format: 'png', extension: 'png', mimeType: 'image/png', filename: 'scan.png' },
+    { key: 'jpeg', format: 'jpeg', extension: 'jpg', mimeType: 'image/jpeg', filename: 'scan.jpg' },
+    { key: 'webp', format: 'webp', extension: 'webp', mimeType: 'image/webp', filename: 'scan.webp' },
+    { key: 'tiff', format: 'tiff', extension: 'tif', mimeType: 'image/tiff', filename: 'scan.tif' },
+  ];
+
+  /**
+   * Sign an image document with a mark in one corner and prove four things: the
+   * mark is where it was drawn, the opposite corner is untouched, the stored
+   * bytes are still the format and size they were, and the version row says so.
+   *
+   * The clean-corner assertion allows one percent rather than nothing, because
+   * JPEG and WebP are lossy and a flat white field beside a hard black edge is
+   * exactly where they ring. A signature in the wrong corner would darken that
+   * box completely, so one percent still catches every mistake this is for.
+   */
+  async function proveImageSignature(documentId, image, { width, height, corner = 'top-left', opposite = 'bottom-right' }) {
+    const sharp = (await import('sharp')).default;
+
+    const before = (await call('GET', `/api/signing/documents/${documentId}`, signer)).json();
+    assert.equal(before.canSign, true, JSON.stringify(before));
+    assert.equal(before.kind, 'image');
+
+    const rendered = await fetchPage(signer, documentId, 1, before.version);
+    assert.equal(rendered.width, width, 'the served page must be the upright pixel size');
+    assert.equal(rendered.height, height);
+
+    const clean = await darkCount(rendered.png, corner);
+    assert.equal(clean.dark, 0, 'the fixture must start blank in the corner being tested');
+
+    const mark = await overlay({ width, height, corner });
+    const response = await call('POST', `/api/signing/documents/${documentId}/sign`, signer, {
+      version: before.version,
+      pages: [{ number: 1, image: asDataUrl(mark) }],
+    });
+    assert.equal(response.statusCode, 201, response.body);
+
+    const body = response.json();
+    assert.equal(body.kind, 'image');
+    assert.equal(body.version, before.version + 1);
+    assert.notEqual(body.sha256, body.fromSha256);
+
+    const signed = await fetchContent(signer, documentId, body.version);
+    const meta = await sharp(signed).metadata();
+    assert.equal(meta.format, image.format, `a signed ${image.format} must still be a ${image.format}`);
+    assert.equal(meta.width, width, 'signing must not resize the page');
+    assert.equal(meta.height, height, 'signing must not resize the page');
+
+    // And the row describes what is on disk: a JPEG filed under .pdf would be a
+    // name every viewer, download and preview in the system then reads wrongly.
+    const versions = await sql`
+      SELECT version_number, original_filename, mime_type
+        FROM dbo.document_versions
+       WHERE document_id = ${documentId} ORDER BY version_number
+    `.execute(db);
+    const latest = versions.rows[versions.rows.length - 1];
+    assert.equal(Number(latest.version_number), body.version);
+    assert.equal(latest.mime_type, image.mimeType);
+    assert.match(latest.original_filename, new RegExp(`\\.${image.extension}$`));
+
+    const inked = await darkCount(signed, corner);
+    const untouched = await darkCount(signed, opposite);
+    assert.ok(
+      inked.dark > inked.total * 0.9,
+      `the ${corner} corner should carry the signature (${inked.dark} of ${inked.total})`,
+    );
+    assert.ok(
+      untouched.dark <= untouched.total * 0.01,
+      `the ${opposite} corner should be untouched (${untouched.dark} of ${untouched.total} dark)`,
+    );
+
+    return body;
+  }
+
+  for (const image of IMAGE_CASES) {
+    test(`a ${image.format} document is offered to the pen as one page of pixels`, async () => {
+      const documentId = doc[image.key];
+
+      const described = (await call('GET', `/api/signing/documents/${documentId}`, signer)).json();
+      assert.equal(described.canSign, true, JSON.stringify(described));
+      assert.equal(described.kind, 'image');
+      assert.equal(described.reason, undefined);
+      assert.equal(described.filename, image.filename);
+
+      const response = await call('GET', `/api/signing/documents/${documentId}/pages`, signer);
+      assert.equal(response.statusCode, 200, response.body);
+
+      const geometry = response.json();
+      assert.equal(geometry.kind, 'image');
+      assert.equal(geometry.pageCount, 1);
+      assert.equal(geometry.pages.length, 1);
+      assert.deepEqual(geometry.pages[0], {
+        number: 1,
+        // Pixels, not points: an image has no page box and no dpi to apply.
+        width: 900,
+        height: 600,
+        rotation: 0,
+        pixels: 900 * 600,
+        signable: true,
+      });
+
+      const rendered = await fetchPage(signer, documentId, 1);
+      assert.equal(rendered.width, 900);
+      assert.equal(rendered.height, 600);
+    });
+  }
+
+  for (const image of IMAGE_CASES) {
+    test(`signing a ${image.format} keeps its format and lands where it was drawn`, async () => {
+      const documentId = await upload(
+        signer,
+        'signing',
+        `sign-me.${image.extension}`,
+        await makeImage({ format: image.format, width: 800, height: 520 }),
+        image.mimeType,
+      );
+      await proveImageSignature(documentId, image, { width: 800, height: 520 });
+    });
+  }
+
+  test('ink drawn in the bottom-right of an image lands in the bottom-right', async () => {
+    const jpeg = IMAGE_CASES.find((entry) => entry.format === 'jpeg');
+    const documentId = await upload(
+      signer,
+      'signing',
+      'corner.jpg',
+      await makeImage({ format: 'jpeg', width: 820, height: 540 }),
+      'image/jpeg',
+    );
+    await proveImageSignature(documentId, jpeg, {
+      width: 820,
+      height: 540,
+      corner: 'bottom-right',
+      opposite: 'top-right',
+    });
+  });
+
+  /*
+   * The case the whole image path exists to get right.
+   *
+   * A phone held sideways stores the sensor readout and an EXIF tag saying to
+   * turn it. Every step has to agree about which way up the page is — the
+   * geometry the panel sizes its canvas from, the picture it draws on, the size
+   * check on what comes back, and the pixels written. Get any one of them wrong
+   * and the signature is a quarter turn away from where somebody put it, on a
+   * page that then displays sideways as well. Nothing else in this file can
+   * produce that, and it saves cleanly when it is wrong.
+   */
+  test('a photograph upright only in its EXIF tag is served and signed upright', async () => {
+    const sharp = (await import('sharp')).default;
+
+    const geometry = (await call('GET', `/api/signing/documents/${doc.exif}/pages`, signer)).json();
+    assert.equal(geometry.pages[0].width, 600, 'the tag turns 900×600 into a 600×900 page');
+    assert.equal(geometry.pages[0].height, 900);
+    assert.equal(geometry.pages[0].rotation, 0, 'the turn is applied, so none is left for the client to make');
+
+    const rendered = await fetchPage(signer, doc.exif, 1);
+    assert.equal(rendered.width, 600, 'the page a person draws on must already be upright');
+    assert.equal(rendered.height, 900);
+
+    const mark = await overlay({ width: 600, height: 900, corner: 'top-left' });
+    const response = await call('POST', `/api/signing/documents/${doc.exif}/sign`, signer, {
+      version: 1,
+      pages: [{ number: 1, image: asDataUrl(mark) }],
+    });
+    assert.equal(response.statusCode, 201, response.body);
+
+    const signed = await fetchContent(signer, doc.exif, response.json().version);
+    const meta = await sharp(signed).metadata();
+    assert.equal(meta.format, 'jpeg');
+    assert.equal(meta.width, 600, 'the signed version must be upright in its pixels');
+    assert.equal(meta.height, 900);
+    assert.ok(
+      !meta.orientation || meta.orientation === 1,
+      `an orientation tag left behind would turn the signed page a second time (${meta.orientation})`,
+    );
+
+    const inked = await darkCount(signed, 'top-left');
+    const untouched = await darkCount(signed, 'bottom-right');
+    assert.ok(inked.dark > inked.total * 0.9, `top-left: ${inked.dark} of ${inked.total}`);
+    assert.ok(untouched.dark <= untouched.total * 0.01, `bottom-right: ${untouched.dark} dark`);
+  });
+
+  test('a multi-page TIFF is refused as a format, at every end', async () => {
+    // Cheap by contract, so `describe` does not open the file and cannot know.
+    // The refusal has to arrive from the first call that reads the bytes, which
+    // is the one the panel makes before it shows a pen.
+    const geometry = await call('GET', `/api/signing/documents/${doc.tiffPages}/pages`, signer);
+    assert.equal(geometry.statusCode, 415, geometry.body);
+    assert.equal(geometry.json().error, 'unsupported_format');
+    assert.match(geometry.json().detail, /2 pages/);
+
+    const page = await call('GET', `/api/signing/documents/${doc.tiffPages}/pages/1`, signer);
+    assert.equal(page.statusCode, 415, page.body);
+    assert.equal(page.json().error, 'unsupported_format');
+
+    const signed = await call('POST', `/api/signing/documents/${doc.tiffPages}/sign`, signer, {
+      version: 1,
+      pages: [{ number: 1, image: asDataUrl(await overlay({ width: 300, height: 200 })) }],
+    });
+    assert.equal(signed.statusCode, 415, signed.body);
+    assert.equal(signed.json().error, 'unsupported_format');
+
+    // Nothing was filed: the refusal must not have cost a version.
+    const versions = await sql`
+      SELECT COUNT(*) AS n FROM dbo.document_versions WHERE document_id = ${doc.tiffPages}
+    `.execute(db);
+    assert.equal(Number(versions.rows[0].n), 1);
+  });
+
+  test('an overlay of the wrong pixel size for an image is refused, not stretched', async () => {
+    const wrong = await overlay({ width: 860, height: 600 });
+
+    const response = await call('POST', `/api/signing/documents/${doc.png}/sign`, signer, {
+      version: 1,
+      pages: [{ number: 1, image: asDataUrl(wrong) }],
+    });
+    assert.equal(response.statusCode, 400, response.body);
+
+    const body = response.json();
+    assert.equal(body.error, 'invalid_image');
+    assert.match(body.detail, /expected 900×600/);
+  });
+
+  test('an image has exactly one page, and any other number is refused', async () => {
+    const past = await call('GET', `/api/signing/documents/${doc.png}/pages/2`, signer);
+    assert.equal(past.statusCode, 400, past.body);
+    assert.equal(past.json().error, 'invalid_page');
+
+    const signed = await call('POST', `/api/signing/documents/${doc.png}/sign`, signer, {
+      version: 1,
+      pages: [{ number: 2, image: asDataUrl(await overlay({ width: 900, height: 600 })) }],
+    });
+    assert.equal(signed.statusCode, 400, signed.body);
+    assert.equal(signed.json().error, 'invalid_page');
+  });
+
+  test('an image signature is listed like any other, with both hashes', async () => {
+    const documentId = await upload(
+      signer,
+      'signing',
+      'ledger.png',
+      await makeImage({ format: 'png', width: 640, height: 480 }),
+      'image/png',
+    );
+
+    const mark = await overlay({ width: 640, height: 480 });
+    const response = await call('POST', `/api/signing/documents/${documentId}/sign`, signer, {
+      version: 1,
+      note: 'موافق',
+      pages: [{ number: 1, image: asDataUrl(mark) }],
+    });
+    assert.equal(response.statusCode, 201, response.body);
+
+    const listed = (await call('GET', `/api/signing/documents/${documentId}`, signer)).json();
+    assert.equal(listed.kind, 'image');
+    assert.equal(listed.version, 2);
+    assert.equal(listed.signatures.length, 1);
+    assert.equal(listed.signatures[0].note, 'موافق');
+    assert.deepEqual(listed.signatures[0].pages, [1]);
+    assert.equal(listed.signatures[0].isCurrent, true);
+    assert.match(listed.signatures[0].fromSha256, /^[0-9a-f]{64}$/);
+    assert.match(listed.signatures[0].sha256, /^[0-9a-f]{64}$/);
+
+    const audit = await sql`
+      SELECT action, detail FROM dbo.audit_log
+       WHERE target_id = ${String(documentId)} AND action = 'document.signed'
+    `.execute(db);
+    assert.equal(audit.rows.length, 1);
+    assert.match(audit.rows[0].detail, /^v2 pages \[1\] sha256 [0-9a-f]{64} from [0-9a-f]{64}$/);
+  });
+
+  test('an image under legal hold or checked out by somebody else is refused too', async () => {
+    const documentId = await upload(
+      signer,
+      'signing',
+      'frozen.png',
+      await makeImage({ format: 'png', width: 500, height: 400 }),
+      'image/png',
+    );
+
+    const held = await call('POST', `/api/documents/${documentId}/legal-hold`, boss, {
+      hold: true,
+      reason: 'قضية',
+    });
+    assert.equal(held.statusCode, 200, held.body);
+
+    const described = (await call('GET', `/api/signing/documents/${documentId}`, signer)).json();
+    assert.equal(described.canSign, false);
+    assert.equal(described.reason, 'legal_hold');
+    assert.equal(described.kind, 'image', 'the kind is known even when the answer is no');
+
+    const refused = await call('POST', `/api/signing/documents/${documentId}/sign`, signer, {
+      version: 1,
+      pages: [{ number: 1, image: asDataUrl(await overlay({ width: 500, height: 400 })) }],
+    });
+    assert.equal(refused.statusCode, 423, refused.body);
+    assert.equal(refused.json().error, 'legal_hold');
   });
 });

@@ -6,7 +6,7 @@
  * A page of the document is rendered on the server and shown here as a picture;
  * the person draws over it with a pen, a finger or a mouse; on «حفظ التوقيع»
  * the drawing is sent up as one transparent PNG per drawn page and burnt into a
- * NEW version of the PDF. Nothing is overwritten — the version that was signed
+ * NEW version of the PDF or image. Nothing is overwritten — the version that was signed
  * stays exactly as it was, byte for byte, which is why the panel says so before
  * it saves and why the ledger underneath records which version each signature
  * landed on. The screen also says, once, in plain Arabic, that this produces a
@@ -118,8 +118,9 @@ const NOTE_LIMIT = 500;
 /** Why a document cannot be signed, in the words the reader needs. */
 const CANNOT_SIGN = {
   multi_file_document:
-    'هذه الوثيقة متعددة الملفات، والتوقيع متاح للوثائق ذات الملف الواحد بصيغة PDF فقط.',
-  not_pdf: 'التوقيع متاح لملفات PDF فقط. هذه الوثيقة بصيغة أخرى.',
+    'هذه الوثيقة متعددة الملفات، والتوقيع متاح للوثائق ذات الملف الواحد فقط (PDF أو صورة).',
+  not_pdf: 'التوقيع متاح لملفات PDF والصور (JPEG وPNG وWebP وTIFF بصفحة واحدة). هذه الوثيقة بصيغة أخرى.',
+  unsupported_format: 'التوقيع متاح لملفات PDF والصور (JPEG وPNG وWebP وTIFF بصفحة واحدة). هذه الوثيقة بصيغة أخرى.',
   pdf_not_allowed:
     'صيغة PDF غير مسموح بها في قائمة الامتدادات المسموحة، فلا يمكن حفظ إصدار موقّع. المراجعة من «الإدارة ← الإعدادات».',
   legal_hold: 'الوثيقة تحت حجز قانوني: لا يُضاف إليها إصدار جديد، والتوقيع إصدار جديد.',
@@ -139,7 +140,8 @@ const PAGE_ERROR = {
   forbidden: 'لا تملك صلاحية قراءة هذه الوثيقة.',
   not_found: 'الصفحة غير موجودة.',
   invalid_page: 'رقم الصفحة غير صحيح.',
-  unreadable_pdf: 'تعذر قراءة ملف PDF لهذه الوثيقة.',
+  unreadable_pdf: 'تعذر قراءة ملف هذه الوثيقة.',
+  unreadable_image: 'تعذر فتح ملف الصورة؛ قد يكون الملف تالفاً.',
   signing_disabled: 'أُوقف التوقيع من الإعدادات.',
   too_large:
     'هذه الصفحة أكبر من أن تُوقَّع بدقة العرض الحالية (قياس كبير مثل A0). راجع مسؤول النظام لتقليل '
@@ -160,9 +162,11 @@ const SAVE_ERROR = {
   forbidden: 'يلزم لحفظ التوقيع صلاحية الرفع على مجلد الوثيقة.',
   not_found: 'لم تُعد الوثيقة موجودة.',
   multi_file_document: 'التوقيع متاح للوثائق ذات الملف الواحد فقط.',
-  not_pdf: 'التوقيع متاح لملفات PDF فقط.',
+  not_pdf: 'التوقيع متاح لملفات PDF والصور فقط.',
+  unsupported_format: 'التوقيع متاح لملفات PDF والصور فقط.',
   pdf_not_allowed: 'صيغة PDF غير مسموح بها في الإعدادات، فلا يمكن حفظ إصدار موقّع.',
-  unreadable_pdf: 'تعذر قراءة ملف PDF لهذه الوثيقة، فلم يُحفظ التوقيع.',
+  unreadable_pdf: 'تعذر قراءة ملف هذه الوثيقة، فلم يُحفظ التوقيع.',
+  unreadable_image: 'تعذر فتح ملف الصورة، فلم يُحفظ التوقيع؛ قد يكون الملف تالفاً.',
   no_strokes: 'لا يوجد رسم ليُحفظ.',
   invalid_image: 'صورة التوقيع لا تطابق قياس الصفحة. حدّث الوثيقة وأعد الرسم.',
   invalid_page: 'رقم صفحة غير صحيح في طلب الحفظ.',
