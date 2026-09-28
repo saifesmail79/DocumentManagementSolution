@@ -761,7 +761,10 @@ export default function Browse() {
                                 // Not the eye: «عرض» wears the eye already, and two
                                 // eyes side by side read as the same action twice.
                                 icon: SquareSplitHorizontal,
-                                show: doc.canRead,
+                                // Only while the pane is closed: once it is open, the
+                                // row already shows there as it is hovered or chosen,
+                                // and the action would do what is already done.
+                                show: doc.canRead && !previewPane,
                                 title: 'معاينة جانبية — دون مغادرة القائمة',
                                 onClick: () => {
                                   setPreviewPane(true);
