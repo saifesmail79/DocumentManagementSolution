@@ -4,9 +4,22 @@
  * ─── What this module is ────────────────────────────────────────────────────
  *
  * The institute writes its letters on formats it designed in Word. An
- * administrator uploads such a .docx, the server discovers its {{placeholders}},
+ * administrator uploads such a .docx, the server discovers its #placeholders#,
  * the administrator labels them in Arabic and says who may use the format, and
  * from then on a user fills a short form and gets a filed PDF letter.
+ *
+ * A placeholder is written #الاسم# — a hash, the name, a hash — because # is on
+ * the Arabic keyboard (Shift+3) and does not mirror inside Arabic text. The
+ * older {{الاسم}} form is still accepted, and both may appear in one file;
+ * docx.js carries the whole rule and the reasoning behind it.
+ *
+ * ─── The built-ins, and their Arabic names ──────────────────────────────────
+ *
+ * #date#, #date_iso#, #date_ar# and #author# are the server's to fill, and
+ * #التاريخ# and #المنشئ# are the same two values under the names an Arabic
+ * letterhead writes. All of them are hidden from the fill form, DELETED from
+ * whatever a client submits, and merged here — so no user can issue a letter
+ * dated last year over somebody else's name, in either language.
  *
  * ─── One rule shapes everything here ────────────────────────────────────────
  *

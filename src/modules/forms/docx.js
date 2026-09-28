@@ -7,7 +7,7 @@
  * The institute already designs its letterheads in Word: the logo, the margins,
  * the ministry line, the table of signatures. A visual designer built here
  * would be a worse Word that still had to be taught all of that. So the
- * variable parts are written {{like_this}} in the Word file itself, and this
+ * variable parts are written #like_this# in the Word file itself, and this
  * module's only job is to say honestly whether a given .docx can be used, which
  * placeholders it contains, and what it looks like once they are filled.
  *
@@ -42,6 +42,61 @@
  * relationships, DOCTYPE/ENTITY declarations and the INCLUDETEXT/DDE family of
  * field instructions are refused for the same reason: this file is handed to
  * LibreOffice, which will follow every one of them.
+ *
+ * ─── A placeholder is written #الاسم# ───────────────────────────────────────
+ *
+ * The rule the institute writes to: a hash, the name, a hash. The older
+ * {{الاسم}} form is still accepted — templates already exist in it and one file
+ * may carry both — but # is the form a writer is told to type, for three
+ * reasons that are all about the keyboard in front of them. # is Shift+3 on the
+ * Arabic layout, so nobody has to switch language in the middle of an Arabic
+ * sentence to reach it and switch back. It is not a mirrored character, so what
+ * Word stores is what the writer saw — the braces are not, which is the whole
+ * subject of the next section. And it is symmetric, so there is no way to type
+ * the pair the wrong way round.
+ *
+ * A single # that is never closed in the same paragraph is left exactly as it
+ * is: «رقم #1» is a reference number, not a broken field, and refusing the file
+ * over it would refuse ordinary Arabic prose. Pairing is left to right and
+ * within ONE paragraph, so a # on one line can never reach across to a # on the
+ * next and swallow the line between them.
+ *
+ * The trade, stated: two literal hashes in ONE paragraph — «رقم #1 والعدد #2» —
+ * do pair, and the words between them become a placeholder nobody meant to
+ * write. It is visible, not silent: the administrator sees the invented field in
+ * the list on the upload screen and knows to rewrite the line. The alternative,
+ * refusing any paragraph with an even number of hashes, would refuse ordinary
+ * letters to protect against a line the author can see and fix.
+ *
+ * ─── One internal delimiter, because there can only be one ──────────────────
+ *
+ * docxtemplater takes ONE delimiter pair, and the normalisation below may only
+ * permute characters (the length note at the end of this comment says why), so
+ * neither syntax can be rewritten into the other: # is one character per side
+ * and {{ is two. Both are therefore mapped onto a third pair that no real
+ * document contains — U+27E6 ⟦ and U+27E7 ⟧, the mathematical white square
+ * brackets — and that pair is what the engine is given as its delimiters:
+ *
+ *     #name#    →  ⟦name⟧                 (one character for one)
+ *     {{name}}  →  <ZWSP>⟦name⟧<ZWSP>     (U+200B fills the spare slot, and it
+ *                                          sits OUTSIDE the tag, so the name
+ *                                          the engine reads is still «name»)
+ *
+ * The filler has to be a real character to keep every run's length, and it has
+ * to be invisible because it ends up in the letter. Rejected alternative: put
+ * the filler inside the tag and trim it in a custom `parser`. That works, but
+ * it makes the tag name the engine reports differ from the tag name stored in
+ * the database, and one mismatch there means an administrator labels a field
+ * that is never filled.
+ *
+ * Every U+200B is then removed from the merged result, so the produced letter
+ * carries neither the filler nor anything else this file put there. That matters
+ * beyond tidiness: an invisible character between a heading and the value under
+ * it is invisible to the eye but not to the full-text index, and a letter nobody
+ * can find by searching its own words is a real fault.
+ *
+ * ⟦ and ⟧ never reach a person. Every refusal this file returns is mapped back
+ * to the # form on its way out.
  *
  * ─── Arabic templates: the braces Word stores are not the braces Word shows ──
  *
@@ -93,13 +148,57 @@ function logEnglish(detail) {
 export const MAX_PLACEHOLDER_LENGTH = 100;
 
 /**
+ * The delimiters the engine is given, and the filler that pads the brace form.
+ *
+ * See the header: two accepted syntaxes, one delimiter pair, and a transform
+ * that may only permute characters. U+27E6/U+27E7 are the internal pair; no
+ * institute letterhead has ever contained a mathematical white square bracket,
+ * and if one ever does the upload is refused by the engine rather than filled
+ * with the wrong thing.
+ */
+const TAG_OPEN = '⟦';
+const TAG_CLOSE = '⟧';
+const FILLER = '\u200B';
+export const INTERNAL_DELIMITERS = Object.freeze({ start: TAG_OPEN, end: TAG_CLOSE });
+
+/**
+ * Anything shown to a person speaks the syntax they type.
+ *
+ * The engine's own complaints name the internal delimiters, because those are
+ * the only ones it ever saw. Mapping them back to # here — in the one place
+ * every refusal of this file passes through — is what keeps ⟦, ⟧ and the
+ * zero-width filler out of every Arabic sentence an administrator reads.
+ */
+function toHashForm(detail) {
+  return String(detail ?? '')
+    .replaceAll(TAG_OPEN, '#')
+    .replaceAll(TAG_CLOSE, '#')
+    .replaceAll(FILLER, '');
+}
+
+/**
  * Placeholders the server fills and never asks of anyone.
  *
  * The date and the author of an official letter are facts about the act of
  * writing it, not fields a person types. Leaving them writable would mean any
  * user could issue a letter dated last year over somebody else's name.
+ *
+ * The Arabic names are ALIASES of the same two built-ins, not extra fields: a
+ * writer laying out a letterhead in Arabic writes #التاريخ#, and being told to
+ * write the English word «date» inside an Arabic letter is exactly the kind of
+ * language switch the # rule exists to remove. Both spellings are hidden from
+ * the fill form, stripped from whatever a client submits, and filled by the
+ * server.
  */
-export const BUILT_IN_PLACEHOLDERS = Object.freeze(['date', 'date_iso', 'date_ar', 'author']);
+export const BUILT_IN_ALIASES = Object.freeze({ 'التاريخ': 'date', 'المنشئ': 'author' });
+
+export const BUILT_IN_PLACEHOLDERS = Object.freeze([
+  'date',
+  'date_iso',
+  'date_ar',
+  'author',
+  ...Object.keys(BUILT_IN_ALIASES),
+]);
 
 export function isBuiltIn(placeholder) {
   return BUILT_IN_PLACEHOLDERS.includes(placeholder);
@@ -186,7 +285,12 @@ function namesField(instructions, field) {
   return new RegExp(`(^|[^A-Z])${field}([^A-Z]|$)`).test(instructions);
 }
 
-const refuse = (detail) => ({ ok: false, reason: 'template_invalid', detail });
+/**
+ * Every refusal of this file goes through here, which is why the mapping back to
+ * the # form lives here and not at each call site: one place to be right, and no
+ * way for a later message to leak an internal delimiter into an Arabic sentence.
+ */
+const refuse = (detail) => ({ ok: false, reason: 'template_invalid', detail: toHashForm(detail) });
 
 /** The zip magic. A .docx that does not start with it is something else. */
 export function looksLikeDocx(buffer, filename) {
@@ -320,13 +424,16 @@ export async function inspectTemplate(buffer) {
 
   let structured;
   try {
-    // The braces are straightened on a throwaway copy of the zip before the
-    // lexer sees them; the stored bytes stay exactly as they were uploaded.
+    // Both syntaxes are mapped onto the internal delimiters on a throwaway copy
+    // of the zip before the lexer sees them; the stored bytes stay exactly as
+    // they were uploaded.
     const zip = new PizZip(buffer);
     normaliseTemplateZip(zip);
 
     const doc = new Docxtemplater(zip, {
-      delimiters: { start: '{{', end: '}}' },
+      // A COPY: docxtemplater writes back into the object it is handed (it appends
+      // the escaped forms it needs), so the frozen constant itself cannot be passed.
+      delimiters: { ...INTERNAL_DELIMITERS },
       paragraphLoop: true,
       linebreaks: true,
       nullGetter: () => '',
@@ -356,7 +463,7 @@ export async function inspectTemplate(buffer) {
   for (const tag of structured) {
     if (tag.module) {
       // A loop, an inverted section or raw XML. The field model here is flat.
-      return refuse(`الوسم {{${tag.value}}} في ${tag.file} يستخدم تركيبًا غير مدعوم`);
+      return refuse(`الوسم #${tag.value}# في ${tag.file} يستخدم تركيبًا غير مدعوم`);
     }
     const name = String(tag.value ?? '');
     const problem = placeholderProblem(name);
@@ -366,7 +473,7 @@ export async function inspectTemplate(buffer) {
     tags.push(name);
   }
 
-  if (tags.length === 0) return refuse('لا يحتوي الملف أي حقل بالشكل {{الاسم}}');
+  if (tags.length === 0) return refuse('لا يحتوي الملف أي حقل بالشكل #الاسم#');
 
   return { ok: true, tags };
 }
@@ -389,22 +496,37 @@ function orderParts(files, doc) {
  * English is kept — at debug level, on the server — because it is what a
  * support question is answered from.
  */
+/**
+ * The note that used to be about braces, now about why # is the form to use.
+ *
+ * It still explains the mirrored braces, because the older form is still
+ * accepted and a template already written in it will still be edited.
+ */
 const RTL_BRACE_NOTE =
-  ' وداخل النص العربي تظهر الأقواس معكوسة على الشاشة (}}الاسم{{) وهذا مقبول، فاكتبها كما تراها.';
+  ' وعلامة # موجودة على لوحة المفاتيح العربية (Shift+3) ولا تنعكس داخل النص العربي،' +
+  ' بخلاف الأقواس التي تظهر معكوسة على الشاشة (}}الاسم{{) وهي مقبولة كما تراها.';
 
-const ONE_FIELD_PER_LINE = 'اكتب كل حقل بالشكل {{الاسم}} كاملًا في سطر واحد.';
+const ONE_FIELD_PER_LINE =
+  'اكتب كل حقل بالشكل #الاسم# في سطر واحد (الشكل {{الاسم}} مقبول أيضاً).';
 
 const TEMPLATE_ERROR_MESSAGES = Object.freeze({
   unclosed_tag: (what) =>
-    `الحقل الذي يبدأ بـ «{{${what}» لم يُغلق بـ }} في السطر نفسه. ${ONE_FIELD_PER_LINE}${RTL_BRACE_NOTE}`,
+    `الحقل الذي يبدأ بـ «#${what}» لم يُغلق بـ # في السطر نفسه. ${ONE_FIELD_PER_LINE}${RTL_BRACE_NOTE}`,
   unopened_tag: (what) =>
-    `الحقل الذي ينتهي بـ «${what}}}» لم يُفتح بـ {{ في السطر نفسه. ${ONE_FIELD_PER_LINE}${RTL_BRACE_NOTE}`,
+    `الحقل الذي ينتهي بـ «${what}#» لم يُفتح بـ # في السطر نفسه. ${ONE_FIELD_PER_LINE}${RTL_BRACE_NOTE}`,
   duplicate_open_tag: (what) =>
     `الحقل «${what}» يحمل أقواس فتح زائدة. ${ONE_FIELD_PER_LINE}`,
   duplicate_close_tag: (what) =>
     `الحقل «${what}» يحمل أقواس إغلاق زائدة. ${ONE_FIELD_PER_LINE}`,
   closing_tag_does_not_match_opening_tag: (what) =>
     `الحقل «${what}» أُغلق بوسم يحمل اسمًا آخر. ${ONE_FIELD_PER_LINE}`,
+  // The library's own name for «a @raw tag with anything else beside it». A
+  // template written in the brace form always trips this rather than being
+  // reported as a module tag, because the zero-width filler that pads {{ into
+  // one delimiter counts as text beside the tag. Either way the answer is the
+  // same: this field model is flat and the module prefixes are not supported.
+  raw_xml_tag_should_be_only_text_in_paragraph: (what) =>
+    `الحقل «${what}» يستخدم تركيبًا غير مدعوم. ${ONE_FIELD_PER_LINE}`,
   unbalanced_loop_tags: () =>
     `الملف يستخدم وسوم تكرار غير متوازنة، وهي صيغة غير مدعومة هنا. ${ONE_FIELD_PER_LINE}`,
   malformed_xml: () =>
@@ -423,9 +545,14 @@ function offendingText(entry) {
     entry?.properties?.explanation ??
     entry?.message ??
     '';
-  // The braces are stripped off the ends because the sentence puts them back
-  // itself: the library hands over «{oops» for an unclosed {{oops.
-  const text = String(raw).replace(/\s+/g, ' ').replace(/^[{}]+|[{}]+$/g, '').trim();
+  // The delimiters are stripped off the ends because the sentence puts them back
+  // itself, in the # form: what the library hands over is «⟦oops» — the internal
+  // pair, since that is the only one it ever saw — possibly with the zero-width
+  // filler in front of it when the writer used the brace form.
+  const text = String(raw)
+    .replace(/\s+/g, ' ')
+    .replace(/^[{}⟦⟧\u200B#]+|[{}⟦⟧\u200B#]+$/g, '')
+    .trim();
   return text.length > 60 ? `${text.slice(0, 60)}…` : text;
 }
 
@@ -464,15 +591,15 @@ function explainTemplateError(error) {
 
 /** Why this placeholder cannot be used, or null when it is fine. */
 export function placeholderProblem(name) {
-  if (name === '') return 'يوجد وسم فارغ {{}}';
-  if (name !== name.trim()) return `الوسم {{${name}}} يبدأ أو ينتهي بمسافة`;
+  if (name === '') return 'يوجد وسم فارغ بلا اسم';
+  if (name !== name.trim()) return `الوسم #${name}# يبدأ أو ينتهي بمسافة`;
   if (name.length > MAX_PLACEHOLDER_LENGTH) {
     return `اسم الوسم أطول من ${MAX_PLACEHOLDER_LENGTH} حرفًا: ${name.slice(0, 40)}…`;
   }
   if (MODULE_PREFIXES.includes(name[0])) {
-    return `الوسم {{${name}}} يبدأ بحرف محجوز (${name[0]})`;
+    return `الوسم #${name}# يبدأ بحرف محجوز (${name[0]})`;
   }
-  if (/[\r\n\t]/.test(name)) return `الوسم {{${name}}} يحتوي سطرًا جديدًا`;
+  if (/[\r\n\t]/.test(name)) return `الوسم #${name}# يحتوي سطرًا جديدًا`;
   return null;
 }
 
@@ -496,12 +623,18 @@ export function builtInValues({ displayName, now = new Date() }) {
     long = `${day}/${month}/${year}`;
   }
 
-  return {
+  const values = {
     date: `${day}/${month}/${year}`,
     date_iso: `${year}-${month}-${day}`,
     date_ar: long,
     author: String(displayName ?? ''),
   };
+
+  // The Arabic spellings are the same values under the names an Arabic
+  // letterhead writes, derived from the one table above rather than restated,
+  // so #التاريخ# can never drift from #date#.
+  for (const [alias, target] of Object.entries(BUILT_IN_ALIASES)) values[alias] = values[target];
+  return values;
 }
 
 /**
@@ -524,14 +657,19 @@ export async function mergeDocx(buffer, values) {
     normaliseTemplateZip(zip);
 
     const doc = new Docxtemplater(zip, {
-      delimiters: { start: '{{', end: '}}' },
+      // A COPY: docxtemplater writes back into the object it is handed (it appends
+      // the escaped forms it needs), so the frozen constant itself cannot be passed.
+      delimiters: { ...INTERNAL_DELIMITERS },
       paragraphLoop: true,
       linebreaks: true,
       nullGetter: () => '',
       errorLogging: false,
     });
     doc.render(values ?? {});
-    const merged = doc.getZip().generate({ type: 'nodebuffer', compression: 'DEFLATE' });
+
+    const filled = doc.getZip();
+    removeFiller(filled);
+    const merged = filled.generate({ type: 'nodebuffer', compression: 'DEFLATE' });
     return { ok: true, buffer: Buffer.isBuffer(merged) ? merged : Buffer.from(merged) };
   } catch (error) {
     return refuse(explainTemplateError(error));
@@ -658,9 +796,144 @@ function moveWhitespaceOutside(text) {
   return out;
 }
 
-/** Both repairs, in order. The result always has the length of the input. */
+// ── Both syntaxes onto one internal delimiter pair ───────────────────────
+//
+// See the header. `#name#` is one character per side and maps straight onto
+// ⟦name⟧; `{{name}}` is two per side and maps onto <ZWSP>⟦name⟧<ZWSP>, the
+// zero-width space outside the tag so the name itself is untouched. Both
+// mappings keep the exact length of what they replace, which is what lets the
+// result be sliced back into the same <w:t> runs.
+
+/**
+ * Every `{{` becomes <ZWSP>⟦ and every `}}` becomes ⟧<ZWSP> — paired or not.
+ *
+ * Unconditionally, on purpose: an unclosed `{{` has to reach the engine AS an
+ * unclosed tag. Converting only balanced pairs would leave a lone `{{oops` as
+ * ordinary text under the new delimiters, and a template with a typo in it
+ * would be accepted and then print «{{oops» on a letter instead of being
+ * refused with a sentence naming the mistake.
+ */
+function convertBraceTags(text) {
+  let out = '';
+  let i = 0;
+  while (i < text.length) {
+    const pair = text[i] + (text[i + 1] ?? '');
+    if (pair === '{{') {
+      out += FILLER + TAG_OPEN;
+      i += 2;
+    } else if (pair === '}}') {
+      out += TAG_CLOSE + FILLER;
+      i += 2;
+    } else {
+      out += text[i];
+      i += 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * The positions of the `#` characters that are hashes a person typed.
+ *
+ * The text being scanned is raw XML character data, where `&#10;` and `&#x2019;`
+ * are how Word writes a character it does not want to store literally — and
+ * each of those carries a `#` that belongs to the escape, not to the writer. A
+ * paragraph with two of them would otherwise have its «hashes» paired and the
+ * text between them turned into a placeholder nobody wrote.
+ */
+function hashPositions(text) {
+  const at = [];
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] !== '#') continue;
+    if (text[i - 1] === '&' && /^[xX]?[0-9A-Fa-f]+;/.test(text.slice(i + 1, i + 12))) continue;
+    at.push(i);
+  }
+  return at;
+}
+
+/**
+ * Marks every index that sits inside an already-converted ⟦…⟧ tag.
+ *
+ * A `#` inside a tag's name is part of the name; a `#` between two tags is not.
+ * An UNCLOSED ⟦ marks the rest of the paragraph, which is deliberate: that
+ * paragraph is about to be refused as an unclosed tag anyway, and pairing
+ * hashes inside it would only change which mistake the message names.
+ */
+function insideTagMask(text) {
+  const mask = new Uint8Array(text.length);
+  let depth = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === TAG_OPEN) {
+      depth += 1;
+      mask[i] = 1;
+    } else if (text[i] === TAG_CLOSE) {
+      mask[i] = 1;
+      if (depth > 0) depth -= 1;
+    } else {
+      mask[i] = depth > 0 ? 1 : 0;
+    }
+  }
+  return mask;
+}
+
+/**
+ * Pairs the hashes of one paragraph, left to right, into ⟦…⟧.
+ *
+ * `#name#` → `⟦name⟧`, one character for one. Edge whitespace inside the pair is
+ * moved just outside it, exactly as it is for the brace form: `# name #` becomes
+ * `␣⟦name⟧␣`, so the space stays on the page — it was typed — without becoming
+ * part of a name that is matched byte for byte.
+ *
+ * A pair is refused, and its opening # left as the literal character it is, when
+ * the name would be empty or blank, when it would contain a line break, or when
+ * it would cut across a tag that is already there. So «رقم #1» is a reference
+ * number and stays one, and a writer who puts a single # in a sentence has not
+ * broken their letterhead.
+ */
+function convertHashTags(text) {
+  const marks = hashPositions(text);
+  if (marks.length < 2) return text;
+
+  const mask = insideTagMask(text);
+  let out = text;
+  let i = 0;
+  while (i < marks.length - 1) {
+    const open = marks[i];
+    const close = marks[i + 1];
+    const name = out.slice(open + 1, close);
+    const lead = /^\s*/.exec(name)[0];
+    const trail = /\s*$/.exec(name)[0];
+    const core = name.slice(lead.length, name.length - trail.length);
+
+    if (
+      mask[open] === 1 ||
+      core === '' ||
+      /[\r\n]/.test(name) ||
+      name.includes(TAG_OPEN) ||
+      name.includes(TAG_CLOSE)
+    ) {
+      i += 1;
+      continue;
+    }
+
+    // Same span, same length: # + lead + core + trail + # becomes
+    // lead + ⟦ + core + ⟧ + trail.
+    out = `${out.slice(0, open)}${lead}${TAG_OPEN}${core}${TAG_CLOSE}${trail}${out.slice(close + 1)}`;
+    i += 2;
+  }
+  return out;
+}
+
+/**
+ * Every repair and both mappings, in order. The result always has the length of
+ * the input, which is the invariant the whole rewrite rests on.
+ *
+ * The braces are straightened and their names trimmed FIRST, so the hash pass
+ * sees finished ⟦…⟧ tags and can tell a hash inside a name from a hash of its
+ * own.
+ */
 export function normaliseParagraphText(text) {
-  return moveWhitespaceOutside(repairMirroredBraces(text));
+  return convertHashTags(convertBraceTags(moveWhitespaceOutside(repairMirroredBraces(text))));
 }
 
 /**
@@ -687,7 +960,7 @@ function normalisePartXml(xml) {
     if (runs.length === 0) continue;
 
     const joined = runs.map((run) => run.text).join('');
-    if (!joined.includes('{{') && !joined.includes('}}')) continue;
+    if (!joined.includes('{{') && !joined.includes('}}') && !joined.includes('#')) continue;
 
     const normalised = normaliseParagraphText(joined);
     if (normalised === joined) continue;
@@ -737,4 +1010,34 @@ export function normaliseTemplateZip(zip) {
     changed.push(name);
   }
   return changed;
+}
+
+/**
+ * Takes the zero-width filler back out of a merged document.
+ *
+ * The filler exists only to keep a run's length while `{{` becomes one internal
+ * delimiter, and by this point the delimiters are gone and the values are in. It
+ * is removed rather than left in place because it would otherwise sit between a
+ * heading and the value beneath it in the stored letter, invisible to the eye and
+ * not invisible to the full-text index — a letter that cannot be found by
+ * searching the words printed on it.
+ *
+ * The trade, stated: a zero-width space the letterhead's author typed on purpose
+ * is removed too. U+200B has no visible effect in Arabic typesetting (the
+ * character writers actually use is U+200C, the zero-width NON-joiner, which is
+ * untouched), so this costs nothing anybody can see.
+ */
+function removeFiller(zip) {
+  for (const name of Object.keys(zip.files)) {
+    if (zip.files[name].dir || !TEMPLATED_PART.test(name)) continue;
+    let xml;
+    try {
+      xml = zip.file(name)?.asText();
+    } catch {
+      continue;
+    }
+    if (typeof xml !== 'string' || !xml.includes(FILLER)) continue;
+    zip.remove(name);
+    zip.file(name, xml.replaceAll(FILLER, ''), { createFolders: true });
+  }
 }

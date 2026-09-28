@@ -17,7 +17,8 @@
  *
  * ─── Why the date and the author are not fields ─────────────────────────────
  *
- * `{{date}}` and `{{author}}` are filled by the server and stripped from
+ * `#date#` / `#التاريخ#` and `#author#` / `#المنشئ#` (the Arabic names are
+ * aliases of the same two built-ins) are filled by the server and stripped from
  * whatever this page sends, so an official letter cannot be dated or signed off
  * in someone else's name from the browser. They arrive marked `builtIn` and are
  * not rendered at all — an input the server ignores is worse than no input.

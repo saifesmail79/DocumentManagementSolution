@@ -166,7 +166,7 @@ export default function FormsFieldsTable({ open, template, customFields, onClose
       open={open}
       onClose={onClose}
       title={`حقول النموذج: ${template?.name ?? ''}`}
-      subtitle="الأسماء بين القوسين تأتي من ملف Word ولا تُعدَّل من هنا."
+      subtitle="الأسماء بين علامتَي # تأتي من ملف Word ولا تُعدَّل من هنا."
       icon={ListChecks}
       size="lg"
       footer={
@@ -201,7 +201,7 @@ export default function FormsFieldsTable({ open, template, customFields, onClose
 
         {rows.length === 0 ? (
           <p className="text-sm text-text-muted">
-            لا حقول في هذا النموذج — لا يحتوي ملف Word على أي اسم بين قوسين مزدوجين.
+            لا حقول في هذا النموذج — لا يحتوي ملف Word على أي اسم بين علامتَي #.
           </p>
         ) : (
           <div className="overflow-x-auto">
@@ -219,7 +219,12 @@ export default function FormsFieldsTable({ open, template, customFields, onClose
                 {rows.map((row) => (
                   <tr key={row.placeholder}>
                     <td className="px-2 py-2 text-left align-top">
-                      <code dir="ltr" className="text-[12px] text-text">{`{{${row.placeholder}}}`}</code>
+                      {/*
+                        Printed in the form it is typed in — `#name#`. A template
+                        written with the older braces stores the same bare name,
+                        so one display form is right for both.
+                      */}
+                      <code dir="ltr" className="text-[12px] text-text">{`#${row.placeholder}#`}</code>
                       {row.builtIn ? (
                         <span className="ms-2 rounded border border-border bg-surface-muted px-1.5 py-0.5 text-[11px] text-text-muted">
                           تلقائي

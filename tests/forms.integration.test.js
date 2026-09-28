@@ -296,6 +296,19 @@ function uploadTemplate(cookie, fields, file, { method = 'POST', url = '/api/adm
   });
 }
 
+/**
+ * The visible text of one part of a merged .docx, exactly as it is stored.
+ *
+ * Nothing is cleaned up on the way out on purpose: the normalisation puts a
+ * zero-width filler beside every {{brace}} tag to keep the runs the same length,
+ * and the merge takes it back out again, so a test that stripped invisible
+ * characters before asserting could no longer tell whether it had.
+ */
+function mergedText(buffer, part = 'word/document.xml') {
+  const xml = new PizZip(buffer).file(part).asText();
+  return [...xml.matchAll(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g)].map((match) => match[1]).join('');
+}
+
 /** The text layer of a PDF, for proving what actually reached the page. */
 async function pdfText(bytes) {
   const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs');
@@ -579,7 +592,10 @@ describe('official letter formats', { skip: CONFIGURED ? false : target.reason }
       { filename: 'x.docx', buffer: buildDocx({ body: ['a letter with no fields'] }) },
     );
     assert.equal(empty.statusCode, 400);
-    assert.match(empty.json().detail, /\{\{/);
+    // The refusal names the form the writer is asked to type, which is now the
+    // hash form — an administrator told to look for «{{» would be looking for
+    // the wrong thing.
+    assert.match(empty.json().detail, /#الاسم#/);
 
     // Nothing was stored for any of them.
     const rows = await sql`SELECT COUNT(*) AS n FROM dbo.form_templates`.execute(db);
@@ -686,6 +702,135 @@ describe('official letter formats', { skip: CONFIGURED ? false : target.reason }
     await dropTemplate(response.json().template.templateId);
   });
 
+  // ── The form a writer is asked to type: #الاسم# ─────────────────────────
+
+  test('a field written #like_this#, split across runs, is found in the body and the header', async () => {
+    // The rule the institute writes to. # is Shift+3 on the Arabic keyboard, so
+    // nobody leaves the Arabic layout in the middle of an Arabic sentence to
+    // reach it; it does not mirror, so what Word stores is what the writer saw;
+    // and it is symmetric, so the pair cannot be typed the wrong way round. The
+    // runs are split here the way Word splits them after a typing correction.
+    const response = await uploadTemplate(
+      boss,
+      { name: 'نموذج بعلامة #' },
+      {
+        filename: 'hash.docx',
+        buffer: buildDocx({
+          body: [['العدد : ', '#', 'الع', 'دد', '#'], 'الموضوع : #الموضوع#'],
+          header: [['الإشارة : #', 'الإش', 'ارة#']],
+        }),
+      },
+    );
+    assert.equal(response.statusCode, 201, response.body);
+    assert.deepEqual(
+      response.json().template.fields.map((field) => field.placeholder),
+      ['العدد', 'الموضوع', 'الإشارة'],
+      'the body fields and the header field, none of them written with a brace',
+    );
+
+    await dropTemplate(response.json().template.templateId);
+  });
+
+  test('a hash a person typed in ordinary prose is not a field and refuses nothing', async () => {
+    // «رقم #1» is a reference number and «عدد # بلا إغلاق» is a sentence. A
+    // single # with no closing # in the same paragraph is left exactly as it is:
+    // the alternative refuses ordinary Arabic prose to protect against nothing.
+    const response = await uploadTemplate(
+      boss,
+      { name: 'علامة مفردة' },
+      {
+        filename: 'stray.docx',
+        buffer: buildDocx({ body: ['رقم #1', 'عدد # بلا إغلاق', 'إلى #الجهة#'] }),
+      },
+    );
+    assert.equal(response.statusCode, 201, response.body);
+    assert.deepEqual(
+      response.json().template.fields.map((field) => field.placeholder),
+      ['الجهة'],
+      'one field, and neither stray hash became one',
+    );
+
+    // And the prose reaches the page as it was written, hash and all.
+    const { mergeDocx } = await import('../src/modules/forms/docx.js');
+    const filled = await mergeDocx(
+      buildDocx({ body: ['رقم #1', 'عدد # بلا إغلاق', 'إلى #الجهة#'] }),
+      { الجهة: 'وزارة المالية' },
+    );
+    assert.equal(filled.ok, true, filled.detail);
+    assert.match(mergedText(filled.buffer), /رقم #1/);
+    assert.match(mergedText(filled.buffer), /عدد # بلا إغلاق/);
+    assert.match(mergedText(filled.buffer), /إلى وزارة المالية/);
+
+    await dropTemplate(response.json().template.templateId);
+  });
+
+  test('both forms may stand in one file and both are found', async () => {
+    // Formats already exist in the {{brace}} form; one being edited into the new
+    // form will carry both for a while. Neither reading is allowed to break the
+    // other.
+    const response = await uploadTemplate(
+      boss,
+      { name: 'الشكلان معًا' },
+      { filename: 'both.docx', buffer: buildDocx({ body: ['إلى #a# بشأن {{b}}'] }) },
+    );
+    assert.equal(response.statusCode, 201, response.body);
+    assert.deepEqual(
+      response.json().template.fields.map((field) => field.placeholder),
+      ['a', 'b'],
+    );
+
+    const { mergeDocx } = await import('../src/modules/forms/docx.js');
+    const filled = await mergeDocx(buildDocx({ body: ['إلى #a# بشأن {{b}}'] }), {
+      a: 'المالية',
+      b: 'الرواتب',
+    });
+    assert.equal(filled.ok, true, filled.detail);
+    // Nothing of the machinery survives — no brace, no internal delimiter and no
+    // zero-width filler — which is why this asserts on the text exactly as it is
+    // stored rather than on a cleaned copy of it.
+    const raw = mergedText(filled.buffer);
+    assert.match(raw, /إلى المالية بشأن الرواتب/);
+    assert.doesNotMatch(raw, /[{}⟦⟧\u200B]/);
+
+    await dropTemplate(response.json().template.templateId);
+  });
+
+  test('#التاريخ# and #المنشئ# are the built-ins under the names an Arabic letter writes', async () => {
+    // Being told to type the English word «date» inside an Arabic letterhead is
+    // exactly the language switch the # rule exists to remove, so the Arabic
+    // names are ALIASES of the same two built-ins — hidden from the form and
+    // filled by the server, like their English spellings.
+    const buffer = buildDocx({ body: ['في #التاريخ# بقلم #المنشئ#', 'إلى #الجهة#'] });
+    const response = await uploadTemplate(
+      boss,
+      { name: 'أسماء عربية للحقول التلقائية' },
+      { filename: 'builtins.docx', buffer },
+    );
+    assert.equal(response.statusCode, 201, response.body);
+
+    const fields = response.json().template.fields;
+    assert.deepEqual(
+      fields.filter((field) => field.builtIn).map((field) => field.placeholder),
+      ['التاريخ', 'المنشئ'],
+    );
+    assert.equal(fields.find((field) => field.placeholder === 'الجهة').builtIn, false);
+
+    // Proved at the seam so it is proved on every machine: the values the server
+    // supplies carry the Arabic names as well as the English ones.
+    const { mergeDocx, builtInValues } = await import('../src/modules/forms/docx.js');
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const today = `${pad(now.getDate())}/${pad(now.getMonth() + 1)}/${now.getFullYear()}`;
+    const filled = await mergeDocx(buffer, {
+      ...builtInValues({ displayName: 'kateb', now }),
+      الجهة: 'المالية',
+    });
+    assert.equal(filled.ok, true, filled.detail);
+    assert.match(mergedText(filled.buffer), new RegExp(`في ${today.replace(/\//g, '\\/')} بقلم kateb`));
+
+    await dropTemplate(response.json().template.templateId);
+  });
+
   test('the merged value lands exactly where the mirrored placeholder was', async () => {
     // Proved at the seam rather than through LibreOffice, so it is proved on
     // every machine: the merge is what has to put 9715 after «العدد : », with no
@@ -697,13 +842,14 @@ describe('official letter formats', { skip: CONFIGURED ? false : target.reason }
     );
     assert.equal(filled.ok, true, filled.detail);
 
-    const xml = new PizZip(filled.buffer).file('word/document.xml').asText();
-    const text = [...xml.matchAll(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g)]
-      .map((match) => match[1])
-      .join('');
+    const text = mergedText(filled.buffer);
     assert.match(text, /العدد : 9715/);
     assert.match(text, /Signed kateb/);
     assert.doesNotMatch(text, /[{}]/, 'no brace survived the merge');
+    // Nor the zero-width space that padded {{ into a single internal delimiter:
+    // it is invisible to the eye but not to the full-text index, and a letter
+    // nobody can find by searching the words printed on it is a real fault.
+    assert.doesNotMatch(text, /[\u200B⟦⟧]/);
   });
 
   test('an upload past the size limit is refused and drained', async () => {
@@ -1519,6 +1665,69 @@ describe('official letter formats', { skip: CONFIGURED ? false : target.reason }
 
     // Taken back off the shelf: the lists the rest of the suite asserts over
     // belong to the format the story is about.
+    const off = await call('PATCH', `/api/admin/forms/templates/${templateId}`, boss, {
+      isActive: false,
+    });
+    assert.equal(off.statusCode, 200, off.body);
+  });
+
+  test('a whole letter from a #-format reaches the page, and its date is the server own', async (t) => {
+    if (!libreOffice) return t.skip('LibreOffice is not installed on this machine');
+
+    // The path the institute will actually walk from now on: a letterhead whose
+    // fields are written #الاسم# — typed without leaving the Arabic keyboard —
+    // uploaded, opened to the section, made live, filled in, converted.
+    const buffer = buildDocx({
+      body: ['Number : #العدد#', 'Date : #التاريخ#', 'Signed #المنشئ#'],
+    });
+    const created = await uploadTemplate(
+      boss,
+      { name: 'نموذج بعلامة الشباك' },
+      { filename: 'hash-letter.docx', buffer },
+    );
+    assert.equal(created.statusCode, 201, created.body);
+    const templateId = created.json().template.templateId;
+
+    const access = await call('PUT', `/api/admin/forms/templates/${templateId}/access`, boss, {
+      principalIds: [String(id['قسم الكتب'])],
+    });
+    assert.equal(access.statusCode, 200, access.body);
+
+    const live = await call('PATCH', `/api/admin/forms/templates/${templateId}`, boss, {
+      isActive: true,
+    });
+    assert.equal(live.statusCode, 200, live.body);
+
+    const generated = await call('POST', '/api/forms/generate', kateb, {
+      templateId,
+      folderId: String(id.letters),
+      title: 'كتاب بعلامة الشباك',
+      // «التاريخ» and «المنشئ» are posted on purpose: they are built-ins under
+      // their Arabic names, so the server must throw these away rather than let
+      // a user date an official letter to 1990 over somebody else's name.
+      values: { العدد: '9715', التاريخ: '01/01/1990', المنشئ: 'the minister' },
+    });
+    assert.equal(generated.statusCode, 201, generated.body);
+
+    const content = await call(
+      'GET',
+      `/api/documents/${generated.json().documentId}/content`,
+      kateb,
+    );
+    assert.equal(content.statusCode, 200);
+    const text = await pdfText(content.rawPayload);
+
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const today = `${pad(now.getDate())}/${pad(now.getMonth() + 1)}/${now.getFullYear()}`;
+
+    assert.match(text, /9715/, 'the value is on the page');
+    assert.match(text, new RegExp(today.replace(/\//g, '\\/')), 'and today is the date');
+    assert.doesNotMatch(text, /1990/, 'not the date the client asked for');
+    assert.match(text, /Signed kateb/, 'and the author is who signed in');
+    assert.doesNotMatch(text, /minister/);
+    assert.doesNotMatch(text, /#/, 'and no hash was left behind');
+
     const off = await call('PATCH', `/api/admin/forms/templates/${templateId}`, boss, {
       isActive: false,
     });

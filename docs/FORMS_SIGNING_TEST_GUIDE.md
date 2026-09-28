@@ -20,15 +20,24 @@ of 2026-09-27, so you can look before you build.
 
 1. Open Word. Write the letter as the institute writes it — letterhead, tables,
    footer, anything. Wherever a value changes per letter, type a placeholder
-   between double braces: `{{العدد}}`, `{{الجهة}}`, `{{الموضوع}}`, `{{النص}}`.
-   Arabic or Latin names both work. Inside Arabic text Word shows the braces
-   mirrored on screen (and stores them reversed); the system accepts that, and
-   trims a stray space inside the braces. A placeholder must sit on one line.
-2. Four placeholders are filled by the system and cannot be set by anyone:
-   `{{date}}` (27/09/2026), `{{date_iso}}` (2026-09-27), `{{date_ar}}` (the
-   date written in Arabic) and `{{author}}` (the display name of whoever
-   generates the letter).
-3. Save as `.docx`. Headers and footers may carry placeholders too.
+   between two hash marks: `#العدد#`, `#الجهة#`, `#الموضوع#`, `#النص#`. Arabic or
+   Latin names both work. Press **Shift+3** for `#`: it is on the Arabic keyboard
+   itself, so you never switch language in the middle of an Arabic line, and the
+   same character closes the placeholder as opens it, so nothing can come out
+   reversed. (The braces on the Arabic keyboard are awkward — they sit behind a
+   language switch, they are mirrored characters, and Word draws and stores them
+   the other way round inside Arabic text. That is why the rule is the hash.) A
+   stray space inside the marks is trimmed, and a placeholder must sit on one
+   line.
+2. The older form `{{العدد}}` is still accepted, so templates written before this
+   rule keep working and both forms may appear in the same file. New templates
+   should use `#…#`.
+3. Placeholders filled by the system, which nobody can set: `#date#` — or
+   `#التاريخ#` — (27/09/2026), `#date_iso#` (2026-09-27), `#date_ar#` (the date
+   written in Arabic) and `#author#` — or `#المنشئ#` — (the display name of
+   whoever generates the letter). The Arabic and the Latin name mean the same
+   field.
+4. Save as `.docx`. Headers and footers may carry placeholders too.
 
 ## 2. Upload and publish it (الإدارة ← النماذج)
 
@@ -37,8 +46,10 @@ of 2026-09-27, so you can look before you build.
    its letters may be filed into (none, one or several), then the file.
    Choose the file from this computer: a file on a network drive may be slow
    or never open, in which case the dialog says so within seconds and the
-   «إيقاف الرفع» button ends the attempt; copy it locally and try again. A file with a stray `{{` or a placeholder
-   named like `{{@x}}` is refused with the reason.
+   «إيقاف الرفع» button ends the attempt; copy it locally and try again. A
+   placeholder named like `#@x#` is refused with the reason, and so is an
+   unclosed `{{` left over from the older form. A single `#` in ordinary text —
+   with no closing `#` in the same paragraph — is left exactly as it is.
 2. The template starts **disabled**. The fields table lists every placeholder
    found: give each an Arabic label, tick «متعدد الأسطر» for the body, «إلزامي»
    where needed. If the template has a document type, a field may be mapped

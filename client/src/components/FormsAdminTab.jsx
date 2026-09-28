@@ -3,12 +3,28 @@
  *
  * ─── What an administrator does here, and in what order ─────────────────────
  *
- * Upload a .docx whose variable parts are written `{{name}}`; give every
+ * Upload a .docx whose variable parts are written `#name#`; give every
  * placeholder an Arabic label; say who may use it; check the result by previewing
  * it; then activate it. The order matters and the server enforces it: a template
  * cannot be activated while a field is unlabelled, or while the document type it
  * is tied to has required fields no placeholder fills. Both conditions are shown
  * on the row rather than discovered at the moment activation is refused.
+ *
+ * ─── Why a placeholder is written #name# and not {{name}} ───────────────────
+ *
+ * Every word this screen says about the syntax says `#`. The braces were the
+ * first rule and they were the wrong one for a person typing Arabic in Word:
+ * `{` and `}` sit behind a language switch on the Arabic keyboard, and they are
+ * mirrored characters, so Word draws them the other way round inside Arabic text
+ * and stores them reversed — which the server has to forgive rather than the
+ * writer having to get right. `#` is Shift+3 on the Arabic layout itself, is not
+ * mirrored, and is the same character at both ends, so a placeholder cannot be
+ * typed backwards at all.
+ *
+ * The braces are still accepted, and both forms may appear in one file, because
+ * templates uploaded before this rule must keep working; that is stated once, in
+ * the hint under the file button, and nowhere else. Saying it twice would read
+ * as two rules rather than one rule and one leftover.
  *
  * ─── Why the on/off switch is not here ──────────────────────────────────────
  *
@@ -519,7 +535,7 @@ export default function FormsAdminTab() {
           <EmptyState
             icon={LayoutTemplate}
             title="لا نماذج بعد"
-            hint="صمّم الكتاب في Word واكتب كل حقل متغيّر بالشكل {{اسم_الحقل}}، ثم ارفعه هنا بصيغة .docx."
+            hint="صمّم الكتاب في Word واكتب كل حقل متغيّر بين علامتَي # هكذا #اسم_الحقل#، ثم ارفعه هنا بصيغة .docx."
           />
         ) : (
           <ul className="divide-y divide-border/50">
@@ -958,7 +974,7 @@ function TemplateDialog({ draft, types, approvals, folderPathMap, onClose, onSav
       title={creating ? 'نموذج جديد' : `تعديل النموذج: ${draft?.name ?? ''}`}
       subtitle={
         creating
-          ? 'ملف Word بصيغة .docx، حقوله المتغيّرة مكتوبة بالشكل {{اسم_الحقل}}.'
+          ? 'ملف Word بصيغة .docx، حقوله المتغيّرة مكتوبة بين علامتَي # هكذا #اسم_الحقل#.'
           : 'تغيير النوع قد يُلغي ربط حقول لا تتبعه؛ يُذكَر ذلك بعد الحفظ.'
       }
       icon={LayoutTemplate}
@@ -1097,8 +1113,11 @@ function TemplateDialog({ draft, types, approvals, folderPathMap, onClose, onSav
               }}
             />
             <p className="mt-2 text-xs text-text-muted">
-              تُستخرج الحقول من الملف عند الرفع. الحقلان {'{{date}}'} و{'{{author}}'} يُملآن تلقائياً
-              ولا يُطلبان من المستخدم.
+              اكتب كل حقل متغيّر بين علامتَي # هكذا #اسم_الحقل#. العلامة # هي Shift+3 على لوحة
+              المفاتيح العربية نفسها، فلا حاجة إلى تبديل اللغة، وطرفاها متشابهان فلا تنعكس داخل النص
+              العربي. (والشكل القديم {'{{اسم_الحقل}}'} ما زال مقبولاً، ويجوز اجتماع الشكلين في ملف
+              واحد.) تُستخرج الحقول من الملف عند الرفع، والحقول #date# أو #التاريخ# و#date_iso#
+              و#date_ar# و#author# أو #المنشئ# يملؤها الخادم تلقائياً ولا تُطلب من المستخدم.
             </p>
           </div>
         ) : null}
