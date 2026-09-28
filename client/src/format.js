@@ -98,6 +98,28 @@ export function formatDuration(fromValue, toValue) {
   return rest ? `${days} يوم و${rest} ساعة` : `${days} يوم`;
 }
 
+/**
+ * What kind of file a document is, in the reader's words: «PDF», «Word»,
+ * «صورة». Derived from the filename first (the extension is what the person
+ * saved it as) and the MIME type second. A document made of several files is
+ * «عدة ملفات». Null when nothing is known, which is what a browse-only reader
+ * sees, because the filename is withheld from them on purpose.
+ */
+export function fileFormatLabel({ originalFilename, mimeType, multiFile } = {}) {
+  if (multiFile) return 'عدة ملفات';
+  const ext = String(originalFilename ?? '').toLowerCase().match(/.([a-z0-9]{1,6})$/)?.[1] ?? '';
+  const mime = String(mimeType ?? '').toLowerCase();
+  if (ext === 'pdf' || mime === 'application/pdf') return 'PDF';
+  if (['doc', 'docx', 'dot', 'dotx', 'odt', 'rtf'].includes(ext) || mime.includes('wordprocessingml') || mime === 'application/msword') return 'Word';
+  if (['xls', 'xlsx', 'ods', 'csv'].includes(ext) || mime.includes('spreadsheetml') || mime === 'application/vnd.ms-excel') return 'Excel';
+  if (['ppt', 'pptx', 'odp'].includes(ext) || mime.includes('presentationml')) return 'PowerPoint';
+  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'tif', 'tiff', 'bmp', 'heic'].includes(ext) || mime.startsWith('image/')) return 'صورة';
+  if (['txt', 'md'].includes(ext) || mime.startsWith('text/')) return 'نص';
+  if (['zip', 'rar', '7z'].includes(ext) || mime.includes('zip')) return 'ملف مضغوط';
+  if (ext) return ext.toUpperCase();
+  return null;
+}
+
 export function formatBytes(bytes) {
   const size = Number(bytes);
   if (!Number.isFinite(size) || size <= 0) return '—';

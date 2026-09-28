@@ -21,7 +21,7 @@ import {
 
 import { api, ApiError } from '../api.js';
 import { describeUploadFailure, describeUploadReason } from '../uploadErrors.js';
-import { formatDate, formatDateTime } from '../format.js';
+import { formatDate, formatDateTime, fileFormatLabel } from '../format.js';
 import { Button, Card, Spinner, EmptyState, Alert, ReadOnlyBadge } from '../components/ui.jsx';
 import ExpandableActions from '../components/ExpandableActions.jsx';
 import DocumentPreview from '../components/DocumentPreview.jsx';
@@ -735,7 +735,21 @@ export default function Browse() {
                           {!doc.canRead ? <ReadOnlyBadge /> : null}
                         </div>
                       </td>
-                      <td className="px-4 py-3 text-right text-text-muted">{doc.typeName ?? '—'}</td>
+                      {/* The document type is metadata someone chose; the file
+                          format is a fact about the file. A row with no type
+                          used to show a dash here, which read as "nothing
+                          known", so the format stands in, and sits beside the
+                          type when both exist. */}
+                      <td className="px-4 py-3 text-right text-text-muted">
+                        {doc.typeName ? (
+                          <>
+                            <span className="text-text">{doc.typeName}</span>
+                            {fileFormatLabel(doc) ? <span className="ms-2 text-xs">{fileFormatLabel(doc)}</span> : null}
+                          </>
+                        ) : (
+                          fileFormatLabel(doc) ?? '—'
+                        )}
+                      </td>
                       {/* A multi-file document has no version number — an em
                           dash is honest where "0" would read as a fault. */}
                       <td className="num px-4 py-3 text-left text-text-muted">
