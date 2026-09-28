@@ -171,12 +171,15 @@ export async function resetDatabase(db, sql) {
     `.execute(db);
   }
 
-  // Rows that merely REFERENCE a user rather than belonging to one. Production
-  // never deletes a user — deactivation is the operation — so these foreign keys
-  // are only an obstacle here, and clearing the reference is closer to the
-  // intent than deleting the row, which would take the seeded settings with it.
+  // Settings rows are kept (production never deletes them either) but every value
+  // goes back to NULL, which the settings service reads as "use the built-in
+  // default, or the environment where one is set". That is the baseline the
+  // suites are written against — the OCR suite in particular needs OCR_ENABLED
+  // from .env — and it means a suite that changes a setting and dies before
+  // restoring it cannot decide how the next run behaves. The user reference is
+  // cleared because the users themselves are deleted below.
   if (present.has('app_settings')) {
-    await sql`UPDATE dbo.app_settings SET updated_by = NULL`.execute(db);
+    await sql`UPDATE dbo.app_settings SET value = NULL, updated_by = NULL`.execute(db);
   }
 
   for (const table of ['users', 'groups', 'principals']) {

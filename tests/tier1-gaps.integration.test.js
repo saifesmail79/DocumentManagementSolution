@@ -178,22 +178,26 @@ describe('Tier 1 gaps', { skip: CONFIGURED ? false : target.reason }, () => {
     await settings.setSetting({ key: 'upload.duplicate_policy', value: 'block' });
     settings.resetSettingsCache();
 
-    const content = 'محتوى سيُرفض عند التكرار';
-    assert.equal((await upload(cookie, 'cabinet', 'a.txt', content)).statusCode, 201);
+    try {
+      const content = 'محتوى سيُرفض عند التكرار';
+      assert.equal((await upload(cookie, 'cabinet', 'a.txt', content)).statusCode, 201);
 
-    const blocked = await upload(cookie, 'cabinet', 'b.txt', content);
-    assert.equal(blocked.statusCode, 409);
-    assert.equal(blocked.json().error, 'duplicate');
-    assert.ok(blocked.json().duplicates.length >= 1, 'and says which document it matches');
+      const blocked = await upload(cookie, 'cabinet', 'b.txt', content);
+      assert.equal(blocked.statusCode, 409);
+      assert.equal(blocked.json().error, 'duplicate');
+      assert.ok(blocked.json().duplicates.length >= 1, 'and says which document it matches');
 
-    // The staged copy must be discarded, or a blocked upload leaks disk on every
-    // attempt.
-    const { readdir } = await import('node:fs/promises');
-    const staging = await readdir(path.join(STORAGE_ROOT, '.staging')).catch(() => []);
-    assert.equal(staging.length, 0);
-
-    await settings.setSetting({ key: 'upload.duplicate_policy', value: 'warn' });
-    settings.resetSettingsCache();
+      // The staged copy must be discarded, or a blocked upload leaks disk on every
+      // attempt.
+      const { readdir } = await import('node:fs/promises');
+      const staging = await readdir(path.join(STORAGE_ROOT, '.staging')).catch(() => []);
+      assert.equal(staging.length, 0);
+    } finally {
+      // A failure above must not leave every later upload of a duplicate refused —
+      // in this run or, since settings survive the reset, in the next one.
+      await settings.setSetting({ key: 'upload.duplicate_policy', value: 'warn' });
+      settings.resetSettingsCache();
+    }
   });
 
   test('duplicates can be checked by hash before uploading', async () => {

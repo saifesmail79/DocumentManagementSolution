@@ -407,7 +407,21 @@ export class FilesystemDriver {
 
   async remove(relativePath) {
     const absolute = this.absolute(relativePath);
-    await rm(absolute, { force: true });
+    // On Windows an on-access antivirus scanner opens a freshly written file for a
+    // moment, and unlinking it meanwhile fails with EBUSY or EPERM. Callers treat
+    // removal as best effort, so without a short retry the file simply stays
+    // behind. The retries span about three seconds in total.
+    const delays = [50, 100, 200, 400, 800, 1600];
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await rm(absolute, { force: true });
+        return;
+      } catch (error) {
+        const transient = error.code === 'EBUSY' || error.code === 'EPERM' || error.code === 'EACCES';
+        if (!transient || attempt >= delays.length) throw error;
+        await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+      }
+    }
   }
 
   /** Clears abandoned .part files left by crashed uploads. */
