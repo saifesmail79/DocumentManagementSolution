@@ -1,23 +1,31 @@
 import { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { CheckCircle2, Mailbox, Plus, Send, Trash2, Undo2, XCircle } from 'lucide-react';
 
 import { api, ApiError } from '../api.js';
 import { formatDate, formatDateTime } from '../format.js';
+import { MODULES, visibleTabs } from '../navigation.js';
 import { Button, Card, Alert, Spinner, TextField } from './ui.jsx';
 import { useDialogs } from './DialogProvider.jsx';
 import { StatusChip } from '../pages/Correspondence.jsx';
 
 /**
- * The «المراسلة» tab of a document: its entry in the وارد/صادر register.
+ * The «تسجيل وإحالة» tab of a document: its entry in the وارد/صادر register.
  *
  * Registration happens HERE, on the document, because that is where the mail
  * room is standing when the scan finishes: scan into the folder, open the
- * document, register and forward in one visit. The module page holds the
- * queues and the book; this panel holds the one letter.
+ * document, register and forward in one visit. The area's own page
+ * (/correspondence) holds the queues and the books; this panel holds the one
+ * letter — and says so at the top, because a tab on a document page is the one
+ * place in this area with no heading of its own to tell the reader which kind of
+ * work they have just stepped into.
  *
  * `onEnabled(false)` tells the page the module is off, so the tab disappears —
  * the same contract as the recognition pilot's panel.
  */
+
+/** The registry entry this panel asks about who may open which screen. */
+const CORRESPONDENCE = MODULES.find((module) => module.key === 'correspondence');
 
 const TRANSFER_STATUS = {
   pending: 'بانتظار التسلّم',
@@ -56,7 +64,7 @@ export default function CorrespondencePanel({ documentId, documentTitle, canRead
     } catch (caught) {
       // A missing route means an older server: behave as if the module is off.
       if (caught instanceof ApiError && caught.status === 404) onEnabled?.(false);
-      else setError('تعذر تحميل بيانات المراسلة.');
+      else setError('تعذر تحميل بيانات الوارد والصادر لهذه الوثيقة.');
     }
   }, [documentId, canRead, onEnabled, onCount]);
 
@@ -72,18 +80,24 @@ export default function CorrespondencePanel({ documentId, documentTitle, canRead
   if (!data.registered) {
     if (!status.registrar) {
       return (
-        <Card className="p-4 text-sm text-text-muted">
-          هذه الوثيقة غير مقيّدة في سجل الوارد والصادر. التسجيل من صلاحية قلم الوارد.
-        </Card>
+        <div className="space-y-3">
+          <AreaLine status={status} />
+          <Card className="p-4 text-sm text-text-muted">
+            هذه الوثيقة غير مقيّدة في سجل الوارد والصادر. التسجيل من صلاحية قلم الوارد.
+          </Card>
+        </div>
       );
     }
     return (
-      <RegisterForm
-        documentId={documentId}
-        documentTitle={documentTitle}
-        units={status.units}
-        onDone={load}
-      />
+      <div className="space-y-3">
+        <AreaLine status={status} />
+        <RegisterForm
+          documentId={documentId}
+          documentTitle={documentTitle}
+          units={status.units}
+          onDone={load}
+        />
+      </div>
     );
   }
 
@@ -194,6 +208,8 @@ export default function CorrespondencePanel({ documentId, documentTitle, canRead
 
   return (
     <div className="space-y-3">
+      <AreaLine status={status} />
+
       <Card className="p-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h3 className="flex items-center gap-2 text-sm font-semibold text-text">
@@ -319,6 +335,40 @@ export default function CorrespondencePanel({ documentId, documentTitle, canRead
             <TransferRows units={status.units} busy={busy} onSubmit={addTransfers} submitLabel="إحالة" />
           ) : null}
         </Card>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Which area this tab belongs to, and the way back into it.
+ *
+ * A document page is shared ground — its other tabs are ordinary archive work —
+ * so the one tab that registers letters says, quietly, that it is «الوارد
+ * والصادر». For the mail room it also offers the book, because registering a
+ * letter and then looking it up in السجل is one errand, and the alternative was
+ * the tile menu.
+ *
+ * Who may open السجل is asked of the registry (`visibleTabs`) rather than
+ * re-tested here: a link to a screen the area's own page would bounce the reader
+ * out of is worse than no link.
+ */
+function AreaLine({ status }) {
+  const mayOpenRegister = visibleTabs(CORRESPONDENCE, status ?? {})
+    .some((tab) => tab.key === 'register');
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-xs text-text-muted">
+      <span className="flex items-center gap-1.5">
+        <Mailbox size={13} />
+        الوارد والصادر
+      </span>
+      {mayOpenRegister ? (
+        // A real link: the register in a second tab beside the letter is how the
+        // mail room checks a number without losing this page.
+        <Link to="/correspondence?tab=register" className="text-primary hover:underline">
+          فتح السجل
+        </Link>
       ) : null}
     </div>
   );

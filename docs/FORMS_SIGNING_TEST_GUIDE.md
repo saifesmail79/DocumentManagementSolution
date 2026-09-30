@@ -1,4 +1,4 @@
-# Letter formats (النماذج) and ink signing (التوقيع) — Test Guide
+# Letter formats (إنشاء كتاب / نماذج الكتب) and ink signing (التوقيع) — Test Guide
 
 Phases 3 and 4 of the correspondence plan. Both are switched OFF by default and
 carry no cost while off. Follow this from top to bottom; each step names the
@@ -10,9 +10,9 @@ of 2026-09-27, so you can look before you build.
 
 ## 0. Switch on (your admin account, 1 minute)
 
-1. **الإدارة ← الإعدادات ← النماذج والتوقيع**: switch on «النماذج الرسمية» and
-   «التوقيع بالقلم». The change takes effect within ten seconds.
-2. **الإدارة ← النماذج** shows a readiness line: LibreOffice must be present
+1. **الإدارة ← الإعدادات ← نماذج الكتب والتوقيع**: switch on «النماذج الرسمية»
+   and «التوقيع بالقلم». The change takes effect within ten seconds.
+2. **الإدارة ← نماذج الكتب** shows a readiness line: LibreOffice must be present
    for letters (it is on this machine). The signing tab tells you if
    Ghostscript is missing.
 
@@ -39,7 +39,7 @@ of 2026-09-27, so you can look before you build.
    field.
 4. Save as `.docx`. Headers and footers may carry placeholders too.
 
-## 2. Upload and publish it (الإدارة ← النماذج)
+## 2. Upload and publish it (الإدارة ← نماذج الكتب)
 
 1. Press **نموذج جديد**: name, description, optional document type, optional
    approval template (starts automatically after each letter), the folders
@@ -71,8 +71,10 @@ of 2026-09-27, so you can look before you build.
 
 ## 3. Write a letter (log in as a member of an allowed group)
 
-1. The home menu shows the **النماذج** tile only to someone with a usable
-   template. Open it, pick the template.
+1. The home page shows **إنشاء كتاب** in the **الوارد والصادر** section, and
+   only to someone with a usable template. With correspondence switched off it
+   is the only thing in that section; with no usable template the section is not
+   drawn for that person at all. Open it, pick the template.
 2. Fill the fields, choose the destination folder. When the template is
    assigned to folders, only those you may upload into are offered and a
    single one is chosen for you; otherwise any folder you may upload into is
@@ -80,13 +82,16 @@ of 2026-09-27, so you can look before you build.
    the proposed title, press **إنشاء الكتاب**. The button shows «جارٍ تجهيز
    الكتاب…» for a few seconds.
 3. The new document opens. Check: the PDF text, the document type, the
-   mapped field values under **البيانات**, and that **المراسلة** can register
-   it as a صادر letter like any other document.
+   mapped field values under **البيانات**, and that **تسجيل وإحالة** can
+   register it as a صادر letter like any other document.
 4. Expected refusals: a missing required field is refused at once, before
    any conversion; a second press during conversion does nothing; two
    letters at the same instant on a busy server ask the second to retry.
 
 ## 4. Sign a page (any single-file PDF or image; the generated letter is ideal)
+
+Signing has no screen of its own and no place in the menu: it is a tab on the
+letter's own page, because a signature is always applied to one document.
 
 1. Open the document, tab **التوقيع**, press **ابدأ التوقيع**. Page 1 appears
    as an image with a page strip above it.

@@ -75,7 +75,13 @@ const SECTIONS = [
   { key: 'classification', label: 'التعرّف', icon: ScanSearch, pilot: true },
   // Same contract for the correspondence register: the panel reports whether
   // the module's switch is on, and the tab exists only while it is.
-  { key: 'correspondence', label: 'المراسلة', icon: Mailbox, mail: true },
+  //
+  // Named for what it does, not for the module it belongs to: «المراسلة» beside
+  // «البيانات» and «الوسوم» read as one more property of the file, and left the
+  // reader guessing whether registering a letter happened here or on the
+  // الوارد والصادر screen. The key, the ?tab= value and the help key are
+  // untouched — links and saved help still land here.
+  { key: 'correspondence', label: 'تسجيل وإحالة', icon: Mailbox, mail: true },
   // And for ink signing: the panel reports the switch, the tab follows it.
   { key: 'signing', label: 'التوقيع', icon: PenLine, ink: true, wide: true },
 ];
@@ -319,6 +325,81 @@ export default function DocumentDetail() {
     shares: { count: counts.shares },
   };
 
+  /*
+   * ─── The strip in two runs ────────────────────────────────────────────────
+   *
+   * The tabs every document has, then the ones that belong to «الوارد والصادر».
+   *
+   * End to end with the rest, «تسجيل وإحالة» and «التوقيع» read as two more
+   * properties of the file, which is the same mixing the menu had, at panel
+   * scale: nothing tells the reader that these two answer a different question —
+   * not «what is this document» but «what number does this letter carry and who
+   * was it sent to». So they are set apart by a rule, the area's name and their
+   * own icons. Never by colour: the run is still plain tabs.
+   *
+   * The gating is unchanged and still lives in one filter, so a switched-off
+   * module drops its tab before either run is formed — and when both are gone
+   * the divider and the heading go with them, leaving the ordinary strip exactly
+   * as it was.
+   */
+  const shownSections = SECTIONS.filter(
+    (section) =>
+      (!section.pilot || pilotEnabled)
+      && (!section.mail || mailEnabled)
+      && (!section.ink || inkEnabled),
+  );
+  const ordinarySections = shownSections.filter((section) => !section.mail && !section.ink);
+  const mailSections = shownSections.filter((section) => section.mail || section.ink);
+
+  /**
+   * One tab button.
+   *
+   * A function rather than the two runs each carrying their own copy of it: the
+   * badge, the active styling and the dot are the same in both, and two copies
+   * of them is how the mail tabs would quietly start looking like something else.
+   */
+  function renderTab(section) {
+    const state = sectionState[section.key] ?? {};
+    const active = tab === section.key;
+    const filled = state.count > 0 || state.has;
+
+    return (
+      <button
+        key={section.key}
+        onClick={() => setTab(section.key)}
+        aria-current={active ? 'true' : undefined}
+        className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm transition-colors ${
+          active
+            ? 'border-primary font-medium text-primary'
+            : `border-transparent hover:text-text ${filled ? 'text-text' : 'text-text-muted'}`
+        }`}
+      >
+        <section.icon size={15} />
+        {section.label}
+
+        {/*
+          A number where there is one, a dot where the section is set but
+          has nothing to count — the state tab is either configured or it
+          is not, and "1" would be a lie about what it holds.
+        */}
+        {state.count > 0 ? (
+          <span
+            className={`num rounded-full px-1.5 text-[10px] leading-4 ${
+              active ? 'bg-primary text-on-primary' : 'bg-surface-muted text-text-muted'
+            }`}
+          >
+            {state.count}
+          </span>
+        ) : state.has ? (
+          <span
+            aria-hidden="true"
+            className={`h-1.5 w-1.5 rounded-full ${active ? 'bg-primary' : 'bg-primary/50'}`}
+          />
+        ) : null}
+      </button>
+    );
+  }
+
   return (
     <div className="space-y-4">
       <button
@@ -385,53 +466,25 @@ export default function DocumentDetail() {
         Each tab carries a badge when its section holds something, so the whole
         shape of a document is readable from the strip without opening anything.
       */}
-      <div className="flex flex-row flex-wrap gap-1 border-b border-border">
-        {SECTIONS.filter(
-          (section) =>
-            (!section.pilot || pilotEnabled)
-            && (!section.mail || mailEnabled)
-            && (!section.ink || inkEnabled),
-        ).map((section) => {
-          const state = sectionState[section.key] ?? {};
-          const active = tab === section.key;
-          const filled = state.count > 0 || state.has;
+      <div className="flex flex-row flex-wrap items-stretch gap-1 border-b border-border">
+        {ordinarySections.map(renderTab)}
 
-          return (
-            <button
-              key={section.key}
-              onClick={() => setTab(section.key)}
-              aria-current={active ? 'true' : undefined}
-              className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm transition-colors ${
-                active
-                  ? 'border-primary font-medium text-primary'
-                  : `border-transparent hover:text-text ${filled ? 'text-text' : 'text-text-muted'}`
-              }`}
-            >
-              <section.icon size={15} />
-              {section.label}
-
-              {/*
-                A number where there is one, a dot where the section is set but
-                has nothing to count — the state tab is either configured or it
-                is not, and "1" would be a lie about what it holds.
-              */}
-              {state.count > 0 ? (
-                <span
-                  className={`num rounded-full px-1.5 text-[10px] leading-4 ${
-                    active ? 'bg-primary text-on-primary' : 'bg-surface-muted text-text-muted'
-                  }`}
-                >
-                  {state.count}
-                </span>
-              ) : state.has ? (
-                <span
-                  aria-hidden="true"
-                  className={`h-1.5 w-1.5 rounded-full ${active ? 'bg-primary' : 'bg-primary/50'}`}
-                />
-              ) : null}
-            </button>
-          );
-        })}
+        {/*
+          The mail run, present only while one of its tabs is. Grouped and named
+          so a screen reader hears the boundary the divider draws — the rule
+          itself is aria-hidden, being decoration that says nothing aloud.
+        */}
+        {mailSections.length > 0 ? (
+          <div
+            role="group"
+            aria-label="تبويبات الوارد والصادر"
+            className="flex flex-row flex-wrap items-stretch gap-1"
+          >
+            <span aria-hidden="true" className="mx-1 w-px self-stretch bg-border" />
+            <span className="self-center text-[10px] text-text-muted">الوارد والصادر</span>
+            {mailSections.map(renderTab)}
+          </div>
+        ) : null}
       </div>
 
       {/*

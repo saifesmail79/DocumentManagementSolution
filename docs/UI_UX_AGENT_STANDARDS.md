@@ -139,6 +139,33 @@ All application colors are defined as CSS custom properties. **Hardcoded colors 
 
 The home page displays a grid of module tiles. Clicking a tile expands a panel below it showing sub-items.
 
+### Areas (Home Page Sections)
+
+Every module declares the area it belongs to in `client/src/navigation.js` (`area: 'docs' | 'mail' | 'system'`), and the home page is built from that declaration — not from a list written out on the page.
+
+- The home page is **one bordered section per area**, in a **fixed order** (`docs`, then `mail`, then `system`). The order is not arrangeable: the point of the division is that it always has the same shape, so a person learns where each kind of work lives once. Tiles may still be re-arranged *inside* an area.
+- Each section carries a header: the area's **icon + title + one-line hint**. The hint says what the area is for, in one sentence.
+- A document-style area shows **module tiles** (the tile grid below), which expand to their sub-items as usual.
+- The **mail area shows its screens directly**, as non-draggable tiles — no tile to expand first, because the question there is "which button do I press for this letter?" and it is answered on the menu itself.
+- An **empty area is not rendered at all** — no heading, no empty state. Someone with no work in an area never learns it exists.
+- Areas are told apart by **icon, name and section** — **never by colour**. No area gets a colour of its own; the design tokens carry no area meaning.
+
+```jsx
+{/* One section per area, from homeAreas() */}
+<section className="rounded-lg border border-border bg-surface p-4 sm:p-6">
+  <div className="mb-4 flex items-center gap-3">
+    <div className="rounded-lg bg-primary p-2">
+      <AreaIcon className="h-5 w-5 text-on-primary" />
+    </div>
+    <div>
+      <h2 className="text-base font-semibold text-text">{area.label}</h2>
+      <p className="text-xs text-text-muted">{area.hint}</p>
+    </div>
+  </div>
+  {/* kind === 'tiles' → the tile grid; kind === 'actions' → the screens themselves */}
+</section>
+```
+
 ### Module Tile (ModuleTile)
 
 ```jsx
@@ -310,6 +337,8 @@ Rendered below the tile grid when a tile is active. Animates in from top.
 ```
 
 Example display: `Sales > Customers` or `Purchasing > Purchase Orders`
+
+The breadcrumb reads **brand > area > screen**, built from `breadcrumbFor()` in `client/src/navigation.js` (never assembled on the page), and the header shows the area beside it as a **non-interactive chip** — icon plus area name, no link, no colour of its own.
 
 ---
 

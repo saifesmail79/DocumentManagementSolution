@@ -38,7 +38,7 @@ export default function CorrespondenceAdminTab() {
       setCounters(counterBooks);
       setSettings(settingList.settings);
     } catch {
-      setError('تعذر تحميل إعدادات المراسلات.');
+      setError('تعذر تحميل إعدادات الوارد والصادر.');
     }
   }, []);
 
@@ -57,8 +57,8 @@ export default function CorrespondenceAdminTab() {
 
       {!enabled ? (
         <Alert tone="warning">
-          الوحدة معطّلة حالياً. فعّلها من «الإعدادات ← المراسلات ← وحدة المراسلات»، ثم عد إلى
-          هنا لتعريف الأقسام وقلم الوارد.
+          الوحدة معطّلة حالياً. فعّلها من «الإعدادات ← الوارد والصادر ← وحدة الوارد والصادر»، ثم
+          عد إلى هنا لتعريف الأقسام وقلم الوارد.
         </Alert>
       ) : null}
 
@@ -272,7 +272,7 @@ function UnitsCard({ units, groups, disabled, onChanged }) {
     } catch (caught) {
       setError(
         caught instanceof ApiError && caught.code === 'unit_has_open_transfers'
-          ? `لا يُعطَّل قسم لديه إحالات مفتوحة (${caught.body?.open}). أغلقها أو اسحبها أولاً من «المتابعة».`
+          ? `لا يُعطَّل قسم لديه إحالات مفتوحة (${caught.body?.open}). أغلقها أو اسحبها أولاً من «متابعة الإحالات».`
           : 'تعذر التغيير.',
       );
     } finally {
@@ -282,7 +282,7 @@ function UnitsCard({ units, groups, disabled, onChanged }) {
 
   return (
     <Card className="p-4">
-      <div className="mb-3 flex items-center justify-between gap-2">
+      <div className="mb-1 flex items-center justify-between gap-2">
         <h3 className="text-sm font-semibold text-text">الأقسام</h3>
         <Button
           icon={Plus}
@@ -293,6 +293,10 @@ function UnitsCard({ units, groups, disabled, onChanged }) {
           قسم جديد
         </Button>
       </div>
+
+      <p className="mb-3 text-xs text-text-muted">
+        لا يظهر «الوارد إليّ» إلا لأعضاء مجموعات الأقسام المعرّفة هنا.
+      </p>
 
       {error ? <Alert tone="error">{error}</Alert> : null}
 

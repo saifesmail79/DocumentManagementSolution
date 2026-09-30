@@ -11,32 +11,38 @@ import {
   Send,
 } from 'lucide-react';
 
-import {
-  CORRESPONDENCE_TABS as TABS,
-  MODULES,
-  visibleTabs,
-} from '../navigation.js';
+import { MODULES, visibleTabs } from '../navigation.js';
 import { api } from '../api.js';
 import { formatDate, formatDateTime } from '../format.js';
 import { Card, Spinner, EmptyState, Alert, Button, TextField } from '../components/ui.jsx';
+import MailAreaNav from '../components/MailAreaNav.jsx';
 import ScanPanel from '../components/ScanPanel.jsx';
 import { useDialogs } from '../components/DialogProvider.jsx';
 import { useHelpTopic } from '../help/HelpContext.jsx';
+import { useMail } from '../MailContext.jsx';
 import { useAuth } from '../auth.jsx';
 
-/** The registry entry whose tabs this page draws. */
+/** The registry entry whose tabs this page draws, and whose name it carries. */
 const CORRESPONDENCE = MODULES.find((module) => module.key === 'correspondence');
 
 /**
- * The correspondence module (الوارد والصادر).
+ * The «الوارد والصادر» area: what the mail room and the departments do with an
+ * official letter.
  *
- * Three views behind one tile: the personal queue (transfers addressed to any
- * unit whose group you belong to), the register (mail room only), and المتابعة
- * (mail room only — every open transfer, oldest first).
+ * Four screens behind one heading, each offered only to whoever it belongs to —
+ * the rule is `CORRESPONDENCE_TABS` plus `visibleTabs`, never restated here:
  *
- * Registration itself happens on the document page's «المراسلة» tab, because a
- * letter is registered over a document that was just scanned there. This page
- * is for working what is already in the book.
+ *   • «الوارد إليّ» — for a member of a department letters are routed to.
+ *   • «تسجيل كتاب» — the mail room's front door: a letter arrives, it is scanned
+ *     or uploaded into the intake folder and opens on its registration form.
+ *   • «السجل» — both books, وارد and صادر.
+ *   • «متابعة الإحالات» — every open transfer, oldest first.
+ *
+ * The registration form itself lives on the document page («تسجيل وإحالة»),
+ * because a letter is registered over the document it was scanned into — and
+ * «تسجيل كتاب» here is what produces that document. This page holds the queues
+ * and the books; the outgoing half of the area is «إنشاء كتاب» (/forms), which
+ * the shared tab bar links across to.
  */
 
 const LETTER_STATUS = {
@@ -101,71 +107,90 @@ function OverdueBadge() {
 export default function Correspondence() {
   const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [status, setStatus] = useState(null);
+  // The status is the shell's, asked once: the home page, the header and this
+  // page's own tab bar all read it, and three requests could disagree about the
+  // waiting count for a moment.
+  const { status, refresh } = useMail();
 
   useHelpTopic('correspondence');
 
-  useEffect(() => {
-    api.correspondence
-      .status()
-      .then(setStatus)
-      .catch(() => setStatus({ enabled: false }));
-  }, []);
-
-  const requested = searchParams.get('tab');
-  const known = TABS.some((entry) => entry.key === requested) ? requested : 'queue';
-  /*
-   * Permitted, by the same rule the tile menu applies.
-   *
-   * The register and المتابعة belong to the mail room; anyone else who follows a
-   * stale link or a bookmark lands on their own queue rather than a refusal.
-   * Read from `visibleTabs` rather than re-tested here, so the launcher and this
-   * page cannot disagree about who may open what.
-   */
-  const permitted = status ? visibleTabs(CORRESPONDENCE, status).map((entry) => entry.key) : [];
-  const tab = status && !permitted.includes(known) ? 'queue' : known;
-  // Replaced, not pushed, so the back button leaves the page rather than
-  // retracing every tab that was clicked (see MyDocuments).
-  const setTab = (key) => setSearchParams(key === 'queue' ? {} : { tab: key }, { replace: true });
-
   if (!status) return <Spinner />;
+
+  /*
+   * A network hiccup is not a switched-off module, and saying so is the whole
+   * difference between «ask your administrator» and «press again».
+   */
+  if (status.failed) {
+    return (
+      <div className="space-y-3">
+        <EmptyState
+          icon={Mailbox}
+          title="تعذّر معرفة حالة الوارد والصادر"
+          hint="لم يُجب الخادم عن حالة الوحدة، فلا يمكن معرفة الشاشات المتاحة لك. تحقق من الاتصال بالشبكة ثم أعد المحاولة."
+        />
+        <div className="flex justify-center">
+          <Button onClick={refresh}>إعادة المحاولة</Button>
+        </div>
+      </div>
+    );
+  }
 
   if (!status.enabled) {
     return (
       <EmptyState
         icon={Mailbox}
-        title="وحدة المراسلات غير مفعّلة"
+        title="وحدة الوارد والصادر غير مفعّلة"
         hint={
           user.isSuperAdmin
-            ? 'فعّلها من الإدارة ← الإعدادات (correspondence.enabled)، ثم عرّف الأقسام من الإدارة ← المراسلات.'
+            ? 'فعّلها من الإدارة ← الإعدادات ← الوارد والصادر، ثم عرّف الأقسام من الإدارة ← الأقسام ومجلد الاستلام.'
             : 'راجع مدير النظام إذا كانت مؤسستكم تعتمد سجل الوارد والصادر.'
         }
       />
     );
   }
 
-  const shownTabs = visibleTabs(CORRESPONDENCE, status);
+  /*
+   * The screens this viewer may open, by the same rule the menu applies.
+   *
+   * Read from `visibleTabs` rather than re-tested here, so the launcher and this
+   * page cannot disagree about who may open what. Anyone following a stale link
+   * or a bookmark into a screen that is not theirs lands on the first one that
+   * is — which is also the tab the breadcrumb names, and no longer a hard-coded
+   * «الوارد إليّ»: that screen belongs to department members, so the mail-room
+   * clerk used to open the area on somebody else's empty inbox.
+   */
+  const permitted = visibleTabs(CORRESPONDENCE, status).map((entry) => entry.key);
+  const requested = searchParams.get('tab');
+  const tab = permitted.includes(requested) ? requested : permitted[0] ?? null;
+
+  // Replaced, not pushed, so the back button leaves the page rather than
+  // retracing every tab that was clicked (see MyDocuments). The first screen
+  // keeps the bare URL: /correspondence is «wherever this person starts».
+  const setTab = (key) =>
+    setSearchParams(key === permitted[0] ? {} : { tab: key }, { replace: true });
+
+  if (tab === null) {
+    return (
+      <EmptyState
+        icon={Mailbox}
+        title="لا توجد شاشات وارد وصادر متاحة لك"
+        hint={
+          'الوارد إليّ يظهر لأعضاء الأقسام التي تُحال إليها الكتب، والتسجيل والسجل ومتابعة الإحالات '
+          + 'لقلم الوارد. راجع مدير النظام إن كان يلزمك أحدها.'
+        }
+      />
+    );
+  }
 
   return (
     <div className="space-y-4">
-      <h2 className="text-lg font-semibold text-text">المراسلات</h2>
+      <h2 className="flex items-center gap-2 text-lg font-semibold text-text">
+        <Mailbox size={18} className="text-primary" />
+        {CORRESPONDENCE.label}
+      </h2>
 
-      <div className="flex flex-row flex-wrap gap-1 border-b border-border">
-        {shownTabs.map((item) => (
-          <button
-            key={item.key}
-            onClick={() => setTab(item.key)}
-            className={`flex items-center gap-1.5 border-b-2 px-4 py-2 text-sm transition-colors ${
-              tab === item.key
-                ? 'border-primary font-medium text-primary'
-                : 'border-transparent text-text-muted hover:text-text'
-            }`}
-          >
-            <item.icon size={15} />
-            {item.label}
-          </button>
-        ))}
-      </div>
+      {/* One bar for the whole area, /forms included: see MailAreaNav. */}
+      <MailAreaNav active={tab} onSelect={setTab} />
 
       {tab === 'queue' ? <Queue /> : null}
       {tab === 'intake' ? <Intake intakeFolderId={status.intakeFolderId} /> : null}
@@ -224,7 +249,7 @@ function Intake({ intakeFolderId }) {
       <EmptyState
         icon={FilePlus}
         title="مجلد الاستلام غير محدد"
-        hint="يحدّد مدير النظام مجلد الاستلام من الإدارة ← المراسلات، ثم يُمسح ويُسجَّل كل كتاب من هنا."
+        hint="يحدّد مدير النظام مجلد الاستلام من الإدارة ← الأقسام ومجلد الاستلام، ثم يُمسح ويُسجَّل كل كتاب من هنا."
       />
     );
   }
@@ -292,6 +317,11 @@ function Intake({ intakeFolderId }) {
 function Queue() {
   const navigate = useNavigate();
   const { prompt } = useDialogs();
+  // Receiving or finishing a letter changes the waiting count, which is drawn in
+  // two other places (the tab bar above and the home page). They read it from
+  // the shell, so the shell is told rather than left to go stale until the next
+  // navigation.
+  const { refresh } = useMail();
   const [transfers, setTransfers] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -336,6 +366,7 @@ function Queue() {
       if (action === 'receive') await api.correspondence.receive(transfer.transferId);
       else await api.correspondence.close(transfer.transferId, note || null);
       await load();
+      refresh();
     } catch {
       setError('تعذر تسجيل الإجراء. حدّث الصفحة وحاول مجدداً.');
     } finally {
@@ -580,7 +611,7 @@ function Register() {
         <EmptyState
           icon={Mailbox}
           title="لا قيود في هذا الدفتر"
-          hint="يُسجَّل الكتاب من صفحة وثيقته: افتح الوثيقة الممسوحة ثم تبويب «المراسلة»."
+          hint="يُقيَّد الكتاب من «تسجيل كتاب»: امسحه أو ارفعه فيفتح نموذج التسجيل، أو افتح وثيقةً موجودة ثم تبويب «تسجيل وإحالة»."
         />
       ) : (
         <Card className="overflow-x-auto">
@@ -685,7 +716,7 @@ function Register() {
   );
 }
 
-// ── المتابعة (mail room) ─────────────────────────────────────────────────
+// ── متابعة الإحالات (mail room) ──────────────────────────────────────────
 
 function FollowUp() {
   const navigate = useNavigate();

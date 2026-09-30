@@ -142,6 +142,33 @@ describe('help content', () => {
     );
   });
 
+  /**
+   * The menu's own help, against the division the menu is built on.
+   *
+   * The home page is now two named areas, and the one question it exists to
+   * answer is «which of these two kinds of work am I doing». Help that never
+   * names them describes the old flat menu — and would keep describing it,
+   * correctly and uselessly, with nothing failing.
+   */
+  test('the menu help names both areas', async () => {
+    const source = await readFile(path.join(ROOT, 'client/src/navigation.js'), 'utf8');
+    const block = source.match(/export const AREAS = \[([\s\S]*?)\n\];/);
+    assert.ok(block, 'could not find AREAS in client/src/navigation.js');
+
+    const labels = new Map(
+      [...block[1].matchAll(/key: '([^']+)',\s*label: '([^']+)'/g)].map((match) => [match[1], match[2]]),
+    );
+
+    const text = JSON.stringify(HELP_TOPICS.home);
+    // The two areas everyone has; «إدارة النظام» is an administrator's and is
+    // covered by its own topics.
+    for (const key of ['docs', 'mail']) {
+      const label = labels.get(key);
+      assert.ok(label, `AREAS no longer declares the ${key} area`);
+      assert.ok(text.includes(label), `the menu help never names «${label}»`);
+    }
+  });
+
   test('no topic is a stub', () => {
     for (const [id, topic] of Object.entries(HELP_TOPICS)) {
       assert.ok(topic.title?.trim(), `${id} has no title`);

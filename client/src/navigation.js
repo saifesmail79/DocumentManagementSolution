@@ -12,15 +12,28 @@
  *
  * So the tabs live here and the pages import them. A screen and the tile that
  * opens it cannot disagree about what it is called.
+ *
+ * ─── The two areas ───────────────────────────────────────────────────────────
+ *
+ * The system is two kinds of work that used to share one flat menu: keeping and
+ * finding documents («الوثائق والأرشيف»), and handling official letters that
+ * arrive or leave («الوارد والصادر»). Mixed together, nobody could tell which
+ * screen was for which job — «المراسلات» was a tile, an administration tab and a
+ * folder at once, and «المتابعة» and «المتابَعة» differed by one diacritic while
+ * meaning unrelated things. So every module declares its area here, the home
+ * page, the breadcrumb and the header all draw the area from this file, and
+ * tests/navigation.test.js refuses two labels that read the same.
  */
 
 import {
   Activity,
+  Archive,
   BarChart3,
   Bell,
   BookOpen,
   CheckSquare,
   Clock,
+  FilePenLine,
   FilePlus,
   FolderTree,
   GitBranch,
@@ -59,11 +72,13 @@ export const ADMIN_TABS = [
   { key: 'audit', label: 'سجل التدقيق', icon: ScrollText },
   { key: 'diagnostics', label: 'التشخيص', icon: Activity },
   { key: 'classification', label: 'التعرّف التلقائي (تجريبي)', icon: ScanSearch },
-  { key: 'correspondence', label: 'المراسلات', icon: Mailbox },
-  { key: 'forms', label: 'النماذج', icon: LayoutTemplate },
+  // `group: 'mail'` draws these two apart from the rest, under «الوارد والصادر»:
+  // configuring the mail room is configuring the other area, and the labels
+  // say what is set up there rather than repeating the area's name.
+  { key: 'correspondence', label: 'الأقسام ومجلد الاستلام', icon: Mailbox, group: 'mail' },
+  { key: 'forms', label: 'نماذج الكتب', icon: LayoutTemplate, group: 'mail' },
 ];
 
-/** The correspondence views, in the order they are shown. */
 /**
  * The correspondence screens.
  *
@@ -74,20 +89,88 @@ export const ADMIN_TABS = [
  * of them silently dropped them back on the first — a tile promising a
  * destination it cannot open is worse than no tile, because the reader concludes
  * the screen is broken rather than that it was never theirs.
+ *
+ * «الوارد إليّ» requires `member` — belonging to a department that letters are
+ * routed to. Without it the screen can never hold anything, and offering it
+ * anyway is how the mail-room clerk came to open every day on an empty inbox.
+ *
+ * `description` is what the home page prints under each screen, because in the
+ * mail area the screens themselves are the choices on offer.
  */
 export const CORRESPONDENCE_TABS = [
-  { key: 'queue', label: 'الوارد إليّ', icon: Inbox },
-  { key: 'intake', label: 'تسجيل كتاب', icon: FilePlus, requires: 'registrar' },
-  { key: 'register', label: 'السجل', icon: BookOpen, requires: 'registrar' },
-  { key: 'followup', label: 'المتابعة', icon: Timer, requires: 'registrar' },
+  {
+    key: 'queue',
+    label: 'الوارد إليّ',
+    icon: Inbox,
+    requires: 'member',
+    description: 'الكتب المحالة إلى قسمك: تسلّمها، ثم أنجزها.',
+  },
+  {
+    key: 'intake',
+    label: 'تسجيل كتاب',
+    icon: FilePlus,
+    requires: 'registrar',
+    description: 'وصل كتاب؟ امسحه أو ارفعه، فيُقيَّد برقم في الدفتر ويُحال إلى الأقسام.',
+  },
+  {
+    key: 'register',
+    label: 'السجل',
+    icon: BookOpen,
+    requires: 'registrar',
+    description: 'دفترا الوارد والصادر: ابحث عن أي كتاب واعرف أين وصل.',
+  },
+  {
+    key: 'followup',
+    label: 'متابعة الإحالات',
+    icon: Timer,
+    requires: 'registrar',
+    description: 'الإحالات المفتوحة لدى الأقسام، الأقدم أولاً، مع تأشير المتأخّر.',
+  },
 ];
 
 /** The personal views, in the order they are shown. */
 export const MY_TABS = [
   { key: 'favourites', label: 'المفضلة', icon: Star },
   { key: 'recent', label: 'المفتوحة مؤخراً', icon: Clock },
-  { key: 'watches', label: 'المتابَعة', icon: Bell },
+  // Not «المتابَعة»: that read as the mail room's «متابعة الإحالات» with one
+  // diacritic missing, and the two have nothing to do with each other.
+  { key: 'watches', label: 'ما أتابعه', icon: Bell },
   { key: 'approvals', label: 'بانتظار موافقتي', icon: CheckSquare },
+];
+
+/**
+ * The areas the system is divided into, in the order the home page draws them.
+ *
+ * The order is fixed rather than arrangeable: the point of the division is that
+ * it always has the same shape, so a person learns where each kind of work is
+ * once. Tiles can still be arranged inside «الوثائق والأرشيف».
+ *
+ * Areas are told apart by icon, name and a heading band — never by colour. The
+ * only spare colour token sits next to the amber that already means pending,
+ * overdue and truncated in this client.
+ */
+export const AREAS = [
+  {
+    key: 'docs',
+    label: 'الوثائق والأرشيف',
+    icon: Archive,
+    hint: 'حفظ الوثائق والوصول إليها: المجلدات والبحث ومساحتك والمحذوفات.',
+  },
+  {
+    key: 'mail',
+    label: 'الوارد والصادر',
+    icon: Mailbox,
+    hint:
+      'الكتب الرسمية: ما يصل يُسجَّل برقم ويُحال إلى الأقسام، وما يصدر يُنشأ من نموذج ثم يُسجَّل صادراً. '
+      + 'التوقيع يجري من صفحة الكتاب نفسه.',
+  },
+  {
+    key: 'system',
+    label: 'إدارة النظام',
+    icon: Settings,
+    hint: 'المستخدمون والصلاحيات والإعدادات ومتابعة حالة النظام — لمديري النظام.',
+    superAdmin: true,
+  },
 ];
 
 /**
@@ -103,6 +186,7 @@ export const MY_TABS = [
 export const MODULES = [
   {
     key: 'folders',
+    area: 'docs',
     to: '/folders',
     label: 'المجلدات',
     icon: FolderTree,
@@ -110,32 +194,44 @@ export const MODULES = [
   },
   {
     key: 'my',
+    area: 'docs',
     to: '/my',
     label: 'مساحتي',
     icon: Star,
-    description: 'ما يخصّك: المفضلة، المفتوح مؤخراً، والمتابَع، وما ينتظر موافقتك.',
+    // Built from the tabs rather than typed out: a hand copy kept naming
+    // «المتابَع» after the tab it described had been renamed «ما أتابعه».
+    description: `ما يخصّك: ${MY_TABS.map((tab) => tab.label).join('، ')}.`,
     subgroup: 'ما يخصّني',
     tabs: MY_TABS,
   },
   {
     key: 'correspondence',
+    area: 'mail',
     to: '/correspondence',
-    label: 'المراسلات',
+    // The same words as the area, on purpose: the page IS the area, and the
+    // breadcrumb collapses the two instead of saying them twice. It also frees
+    // «المراسلات» to mean one thing only — the folder in the tree.
+    label: 'الوارد والصادر',
     icon: Mailbox,
-    description: 'الوارد والصادر: تسجيل الكتب، إحالتها إلى الأقسام، ومتابعة إنجازها.',
+    description: 'تسجيل الكتب الواردة والصادرة، وإحالتها إلى الأقسام، ومتابعة إنجازها.',
     tabs: CORRESPONDENCE_TABS,
   },
   {
     key: 'forms',
+    area: 'mail',
     to: '/forms',
-    label: 'النماذج',
-    icon: LayoutTemplate,
-    description: 'إنشاء كتاب رسمي من نموذج معتمد: املأ الحقول فيولّد النظام الكتاب ويودعه في مجلده.',
+    // An action, not the tool's name: «النماذج» was also the administration tab
+    // that manages the templates, and beside «تسجيل كتاب» this says which
+    // letter it is for — one that we write.
+    label: 'إنشاء كتاب',
+    icon: FilePenLine,
+    description: 'ستُصدر كتاباً؟ املأ نموذجاً معتمداً فيولّد النظام الكتاب ويودعه في مجلده، ثم سجّله صادراً.',
     // Only for someone with a usable template: the menu asks the server.
     requires: 'forms',
   },
   {
     key: 'search',
+    area: 'docs',
     to: '/search',
     label: 'البحث',
     icon: Search,
@@ -143,6 +239,7 @@ export const MODULES = [
   },
   {
     key: 'recycle',
+    area: 'docs',
     to: '/recycle-bin',
     label: 'المحذوفات',
     icon: Trash2,
@@ -150,6 +247,7 @@ export const MODULES = [
   },
   {
     key: 'admin',
+    area: 'system',
     to: '/admin',
     label: 'الإدارة',
     icon: Settings,
@@ -260,7 +358,6 @@ export function visibleTabs(module, capabilities = {}) {
   return (module?.tabs ?? []).filter((tab) => !tab.requires || Boolean(capabilities[tab.requires]));
 }
 
-/** The module a path belongs to, for the breadcrumb and the active tile. */
 /**
  * Where signing in lands a person, or null to stay put.
  *
@@ -292,10 +389,12 @@ export function signInLanding({ user, pathname, status }) {
 export const MOST_PERMISSIVE_STATUS = Object.freeze({
   enabled: true,
   registrar: true,
+  member: true,
   queueCount: 1,
   intakeFolderId: '1',
 });
 
+/** The module a path belongs to, for the breadcrumb and the active tile. */
 export function moduleForPath(pathname, user) {
   /*
    * Not `visibleModules`: that answers «what may I be offered», which is gated on
@@ -310,4 +409,122 @@ export function moduleForPath(pathname, user) {
       (module) => pathname.startsWith(module.to) && (!module.superAdmin || user?.isSuperAdmin),
     ) ?? null
   );
+}
+
+/**
+ * The mail area's screens this viewer may open, as the home page and the
+ * area's own tab bar list them.
+ *
+ * Built from the registry rather than written out a second time: the rule about
+ * who sees السجل is `visibleTabs`, and a launcher with its own list is how a
+ * menu comes to offer a screen the page then refuses.
+ *
+ * `status` is the correspondence status reply; `formsUsable` says whether this
+ * person has a letter template they can fill. The two are independent — with
+ * correspondence switched off, a usable template still makes «إنشاء كتاب» the
+ * area's one action, because writing an outgoing letter still works.
+ */
+export function mailActions(status, formsUsable = false) {
+  const actions = [];
+
+  if (status?.enabled === true) {
+    const correspondence = MODULES.find((module) => module.key === 'correspondence');
+    for (const tab of visibleTabs(correspondence, status)) {
+      actions.push({
+        key: tab.key,
+        label: tab.label,
+        icon: tab.icon,
+        description: tab.description,
+        to: `${correspondence.to}?tab=${tab.key}`,
+      });
+    }
+  }
+
+  if (formsUsable === true) {
+    const forms = MODULES.find((module) => module.key === 'forms');
+    actions.push({
+      key: forms.key,
+      label: forms.label,
+      icon: forms.icon,
+      description: forms.description,
+      to: forms.to,
+    });
+  }
+
+  return actions;
+}
+
+/**
+ * The blocks the home page draws: one per area, in the fixed area order, each
+ * holding what this viewer may open there. An area with nothing in it is left
+ * out entirely, so an employee with no mail duties sees no mail heading at all.
+ *
+ * Documents and administration hold module tiles, in the viewer's saved order.
+ * The mail area holds its screens directly (`kind: 'actions'`): «what do I press
+ * for this letter» is answered on the menu itself, with no tile to expand first.
+ *
+ * One exception to "empty is not drawn": when the correspondence status could
+ * not be fetched, the mail area comes back with `failed: true` so the page can
+ * say so and offer to try again. Dropping it silently would tell a department
+ * member on a flaky connection that they have no mail work, which is false.
+ *
+ * @param {object}   args
+ * @param {object}   args.user
+ * @param {object}   [args.mail]         correspondence status reply
+ * @param {boolean}  [args.formsUsable]
+ * @param {string[]} [args.order]        saved tile order ('home.tileOrder')
+ */
+export function homeAreas({ user, mail = null, formsUsable = false, order = [] }) {
+  const tiles = applyOrder(
+    visibleModules(user, { forms: formsUsable }).filter((module) => module.area !== 'mail'),
+    order,
+  );
+
+  return AREAS
+    .filter((area) => !area.superAdmin || user?.isSuperAdmin)
+    .map((area) => (
+      area.key === 'mail'
+        ? { ...area, kind: 'actions', items: mailActions(mail, formsUsable), failed: mail?.failed === true }
+        : { ...area, kind: 'tiles', items: tiles.filter((module) => module.area === area.key) }
+    ))
+    .filter((area) => area.items.length > 0 || area.failed === true);
+}
+
+/**
+ * Where a path is, as the breadcrumb says it: the area, then the screen.
+ *
+ * `segments` never repeats itself. The module is left out when its name is the
+ * area's name (/correspondence is «الوارد والصادر», not that twice) or when it is
+ * the only module in its area (/admin is «إدارة النظام», then the tab). The tab
+ * is the one requested when this viewer may open it, otherwise the first one
+ * they may — which is where each page itself falls back to.
+ *
+ * Deliberately blind to whether a module is switched on: the router has opened
+ * the page, and the reader is owed its name either way.
+ *
+ * @param {object} args
+ * @param {string} args.pathname
+ * @param {string} [args.search]        location.search, for ?tab=
+ * @param {object} [args.user]
+ * @param {object} [args.capabilities]  what visibleTabs needs; omit to name no tab of a gated module
+ * @returns {{ area: object|null, segments: string[] }}
+ */
+export function breadcrumbFor({ pathname, search = '', user = null, capabilities = {} }) {
+  const module = moduleForPath(pathname, user);
+  if (!module) return { area: null, segments: [] };
+
+  const area = AREAS.find((entry) => entry.key === module.area) ?? null;
+  const segments = area ? [area.label] : [];
+
+  const alone = MODULES.filter((entry) => entry.area === module.area).length === 1;
+  if (module.label !== area?.label && !alone) segments.push(module.label);
+
+  const offered = visibleTabs(module, capabilities);
+  if (offered.length > 0) {
+    const requested = new URLSearchParams(search).get('tab');
+    const tab = offered.find((entry) => entry.key === requested) ?? offered[0];
+    segments.push(tab.label);
+  }
+
+  return { area, segments };
 }

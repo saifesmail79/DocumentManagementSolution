@@ -1,5 +1,10 @@
 /**
- * النماذج — making an official letter from an approved Word template.
+ * إنشاء كتاب — making an official letter from an approved Word template.
+ *
+ * This is the outgoing half of «الوارد والصادر»: the letters we write, as
+ * against the ones that arrive and are registered in /correspondence. The two
+ * share one tab bar (`MailAreaNav`) so that issuing a reply is one press away
+ * from the letter being replied to, instead of a trip back to the tile menu.
  *
  * ─── What this screen is, and what it deliberately is not ───────────────────
  *
@@ -13,7 +18,7 @@
  * missing.
  *
  * It is not a template editor. Templates are Word files an administrator
- * uploads (الإدارة ← النماذج); this screen never touches one.
+ * uploads (الإدارة ← نماذج الكتب); this screen never touches one.
  *
  * ─── Why the date and the author are not fields ─────────────────────────────
  *
@@ -25,7 +30,7 @@
  *
  * ─── Why the destination is sometimes chosen for you ────────────────────────
  *
- * A template may be assigned to particular folders (الإدارة ← النماذج), and
+ * A template may be assigned to particular folders (الإدارة ← نماذج الكتب), and
  * then a letter from it may be filed into none but those: `generate` refuses
  * `folder_not_allowed` for anything else. The server sends those folders back
  * already narrowed to the ones this person may upload into, so this screen
@@ -50,14 +55,19 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { ArrowRight, FileText, LayoutTemplate } from 'lucide-react';
+import { ArrowRight, FilePenLine, FileText, LayoutTemplate } from 'lucide-react';
 
 import { api, ApiError } from '../api.js';
 import { formatDate } from '../format.js';
+import { MODULES } from '../navigation.js';
 import { Alert, Button, Card, EmptyState, Spinner, TextField } from '../components/ui.jsx';
 import FormsFolderPicker from '../components/FormsFolderPicker.jsx';
+import MailAreaNav from '../components/MailAreaNav.jsx';
 import { useHelpTopic } from '../help/HelpContext.jsx';
 import { useAuth } from '../auth.jsx';
+
+/** The registry entry whose name this screen carries, so the two cannot drift. */
+const FORMS = MODULES.find((module) => module.key === 'forms');
 
 /*
  * Remembers the last destination, because letters of one kind go one place.
@@ -180,7 +190,7 @@ export default function Forms() {
         title="وحدة النماذج غير مفعّلة"
         hint={
           user.isSuperAdmin
-            ? 'فعّلها من الإدارة ← الإعدادات (forms.enabled)، ثم ارفع نماذج الكتب من الإدارة ← النماذج.'
+            ? 'فعّلها من الإدارة ← الإعدادات (forms.enabled)، ثم ارفع النماذج من الإدارة ← نماذج الكتب.'
             : 'راجع مدير النظام إذا كانت مؤسستكم تعتمد نماذج كتب رسمية.'
         }
       />
@@ -254,10 +264,20 @@ function Composer({ ready }) {
 
   return (
     <div className="space-y-4">
+      {/*
+        The area's own bar, above the screen's name: this page is one action of
+        «الوارد والصادر», not a place of its own. It hides itself for a reader
+        whose only entry here is this one — a lone tab is a label, not a choice.
+      */}
+      <MailAreaNav active="forms" />
+
       <div>
-        <h2 className="text-lg font-semibold text-text">النماذج</h2>
+        <h2 className="flex items-center gap-2 text-lg font-semibold text-text">
+          <FilePenLine size={18} className="text-primary" />
+          {FORMS.label}
+        </h2>
         <p className="mt-0.5 text-sm text-text-muted">
-          اختر النموذج، واملأ حقوله، فيولّد النظام الكتاب بصيغة PDF ويودعه وثيقةً جديدة.
+          من نموذج معتمد: املأ الحقول فيولّد النظام الكتاب ويودعه في مجلده، ثم يُسجَّل صادراً من صفحته.
         </p>
       </div>
 
@@ -274,7 +294,7 @@ function Composer({ ready }) {
         <EmptyState
           icon={LayoutTemplate}
           title="لا نماذج متاحة لك"
-          hint="يرفع مدير النظام نماذج الكتب من الإدارة ← النماذج ويحدد من يحق له استخدام كل نموذج."
+          hint="يرفع مدير النظام النماذج من الإدارة ← نماذج الكتب ويحدد من يحق له استخدام كل نموذج."
         />
       ) : (
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -524,8 +544,13 @@ function FillForm({ template, ready, onBack }) {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-3">
         {/* RTL: ArrowRight reads as "back". */}
+        {/*
+          Names where it goes, not the screen it is on: «النماذج» here read as
+          the administration tab that manages the templates, and «إنشاء كتاب» is
+          what the reader is already doing.
+        */}
         <Button variant="secondary" icon={ArrowRight} onClick={onBack} disabled={busy} className="!px-3 !py-1.5 text-xs">
-          النماذج
+          اختيار نموذج آخر
         </Button>
         <h2 className="text-lg font-semibold text-text">{template.name}</h2>
       </div>

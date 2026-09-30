@@ -65,14 +65,14 @@ export async function isRegistrar({ userId, isSuperAdmin = false }) {
 
 /**
  * What the client needs before showing anything: the switch, the caller's
- * role, the live units for pickers and queue labels, how many letters are
- * waiting on the caller's units (the badge), and where the intake screen
- * scans to.
+ * role, whether the caller belongs to a unit at all, the live units for
+ * pickers and queue labels, how many letters are waiting on the caller's
+ * units (the badge), and where the intake screen scans to.
  */
 export async function mailStatus({ userId, isSuperAdmin = false }) {
   if (!(await isEnabled())) return { enabled: false };
 
-  const [registrar, units, waiting, intakeFolder] = await Promise.all([
+  const [registrar, units, waiting, belongs, intakeFolder] = await Promise.all([
     isRegistrar({ userId, isSuperAdmin }),
     listUnits({ includeInactive: false }),
     sql`
@@ -82,12 +82,32 @@ export async function mailStatus({ userId, isSuperAdmin = false }) {
        WHERE t.status IN ('pending', 'received')
          AND u.group_id IN (SELECT principal_id FROM dbo.fn_expand_principals(${userId}))
     `.execute(db),
+    // Does this person belong to a live unit — the answer that decides whether
+    // «الوارد إليّ» exists for them at all. The client cannot work it out from
+    // anything else we send: `units` is the whole live list, meant for the
+    // routing picker, so it says nothing about who is asking; and `queueCount`
+    // is zero both for a unit member whose inbox happens to be empty (who must
+    // still be given the tab, because tomorrow's letter arrives there) and for
+    // someone in no unit (who must never see it). One number cannot separate
+    // "nothing waiting" from "no inbox", so we answer the membership question
+    // itself. Same expansion as the badge beside it, so nested groups count,
+    // and a deactivated unit counts as no unit. Deliberately no super-admin
+    // override: the queue query has none either, so a super admin who is in no
+    // unit genuinely has an empty inbox, and promising them a tab would only
+    // hand them an empty screen and a badge that never moves.
+    sql`
+      SELECT COUNT(*) AS n
+        FROM dbo.correspondence_units u
+       WHERE u.is_active = 1
+         AND u.group_id IN (SELECT principal_id FROM dbo.fn_expand_principals(${userId}))
+    `.execute(db),
     getSetting('correspondence.intake_folder'),
   ]);
 
   return {
     enabled: true,
     registrar,
+    member: Number(belongs.rows[0].n) > 0,
     units,
     queueCount: Number(waiting.rows[0].n),
     intakeFolderId: Number(intakeFolder) ? String(intakeFolder) : null,

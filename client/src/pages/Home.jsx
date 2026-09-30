@@ -1,38 +1,57 @@
 /**
- * The tile menu, per docs/UI_UX_AGENT_STANDARDS.md section 3.
+ * The menu, one section per area, per docs/UI_UX_AGENT_STANDARDS.md section 3.
  *
- * ─── Why the modules are tiles and no longer a row of links ─────────────────
+ * ─── Why the menu is divided before it is arranged ──────────────────────────
  *
- * The header carried four small text links, which is the densest possible way to
- * present a choice and the least informative: four words, no room to say what
- * any of them holds, and no way to reach a screen inside a module without first
- * entering it and hunting for a tab. The standard calls for tiles because a
- * module deserves a target you can describe, and because the space a tile buys
- * is what lets a module show its own contents.
+ * Every module used to sit in one flat grid, so «المجلدات» stood beside
+ * «الوارد والصادر» as though filing a scan and registering an official letter
+ * were the same kind of errand. They are not, and the person reading the menu
+ * could not tell which tile belonged to which job — the complaint that started
+ * this was literally "I don't know what to use for what action".
+ *
+ * So the grid is now one bordered section per area — «الوثائق والأرشيف»,
+ * «الوارد والصادر», «إدارة النظام» — each with its own icon, name and one-line
+ * hint, drawn from `homeAreas()` in navigation.js. The areas are told apart by
+ * icon, name and heading and never by colour: colour here would be decoration
+ * that some readers cannot see, and the amber and red tokens already mean
+ * pending and waiting elsewhere in this client.
+ *
+ * An area with nothing in it is not drawn at all. An employee in no department
+ * with no letter template sees no mail heading, rather than a heading over an
+ * empty space that invites them to wonder what they are missing.
  *
  * ─── What a tile does when it is pressed ────────────────────────────────────
  *
- * A module that is a single destination — البحث, المحذوفات, المجلدات — opens on
- * the first press. Asking for a second press to reveal a panel containing one
- * link would be ceremony.
+ * In «الوثائق والأرشيف» a module that is a single destination — البحث,
+ * المحذوفات, المجلدات — opens on the first press, and one that holds several
+ * screens expands into a panel linking straight into each of them. Reaching
+ * سجل التدقيق used to mean opening الإدارة and hunting for the eleventh tab,
+ * and there was no way to say beforehand that it existed.
  *
- * A module that contains several screens expands instead, and its panel links
- * straight into each of them. That is the part the header row could not do at
- * all: reaching سجل التدقيق used to mean opening الإدارة and then finding the
- * eleventh tab, and there was no way to say beforehand that it existed.
+ * «الوارد والصادر» skips the tile-then-panel step entirely: its items ARE the
+ * screens («تسجيل كتاب», «الوارد إليّ», «السجل»…), each a single press. The
+ * question being answered there is "which button for this letter", and making
+ * someone open a module first to read the answer is the mixing this change
+ * exists to undo.
  *
  * ─── Rearranging, and where the arrangement lives ───────────────────────────
  *
- * Tiles can be dragged into whatever order suits the person using them, and that
- * order is saved against their account rather than their browser — see the note
- * in migration 0015. Someone who arranges the menu on the workstation in the
- * records room finds the same arrangement on their own machine, which is the
- * only reading of "remember this" that is not a small lie.
+ * Only the documents tiles rearrange. The area order is fixed, because the
+ * whole value of the division is that it keeps the same shape — a person learns
+ * where each kind of work lives once. The mail items are not draggable either:
+ * they are a procedure in its own order (a letter arrives, is registered, is
+ * referred, is followed up), and shuffling the steps would teach nothing.
+ *
+ * The saved order is stored against the account rather than the browser — see
+ * the note in migration 0015 — so someone who arranges the menu on the
+ * workstation in the records room finds the same arrangement on their own
+ * machine, which is the only reading of "remember this" that is not a small
+ * lie. The stored value is still a plain list of module keys.
  *
  * Dragging is not the only way to do it. A tile can also be moved with
- * Ctrl+Arrow while focused, because a drag is unavailable to anyone working from
- * the keyboard and a feature that is mouse-only is a feature some people simply
- * do not have.
+ * Ctrl+Arrow while focused, because a drag is unavailable to anyone working
+ * from the keyboard and a feature that is mouse-only is a feature some people
+ * simply do not have.
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -41,7 +60,8 @@ import { ChevronUp, ExternalLink, GripVertical, RotateCcw, X } from 'lucide-reac
 
 import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
-import { applyOrder, reorder, visibleModules, visibleTabs } from '../navigation.js';
+import { AREAS, homeAreas, reorder, visibleTabs } from '../navigation.js';
+import { useMail } from '../MailContext.jsx';
 import { useHelpTopic } from '../help/HelpContext.jsx';
 import { useBranding } from '../branding.js';
 import { Alert } from '../components/ui.jsx';
@@ -51,6 +71,16 @@ const TILE_ORDER = 'home.tileOrder';
 export default function Home() {
   const { user } = useAuth();
   const navigate = useNavigate();
+
+  /*
+   * Who this person is to the mail area, asked once for the whole shell rather
+   * than here. The menu, the header, the tab bar and the folder tree all need
+   * the same answer, and four requests that can disagree for a moment is how a
+   * count appears on a tile that the tab bar does not show. `status` is null
+   * until the first answer, which `homeAreas` reads as "no mail items yet" —
+   * so nothing flashes a mail heading that then disappears.
+   */
+  const { status, formsUsable, refresh } = useMail();
 
   const [openKey, setOpenKey] = useState(null);
   // null until the saved arrangement is known, so the tiles are not painted in
@@ -85,51 +115,16 @@ export default function Home() {
   }, []);
 
   /*
-   * What this viewer may actually open inside a module.
-   *
-   * Some sub-screens are not everyone's: السجل and المتابعة belong to the mail
-   * room. Without asking, the menu offered all three correspondence tiles to
-   * every clerk and two of them dropped the reader back on the first — a tile
-   * that promises a destination and silently goes elsewhere teaches people the
-   * screen is broken, when the truth is it was never theirs.
-   *
-   * Failing to answer means no extra capabilities, so the menu shows the tabs
-   * everyone has rather than hiding a module behind a request that did not come
-   * back.
+   * The blocks to draw, in the fixed area order, each holding only what this
+   * viewer may actually open. The rules about who sees «السجل» or «إنشاء كتاب»
+   * live in the registry, so the menu cannot offer a screen the page would
+   * refuse — a tile that promises a destination and silently goes elsewhere
+   * teaches people the screen is broken, when the truth is it was never theirs.
    */
-  const [capabilities, setCapabilities] = useState({});
+  const areas = homeAreas({ user, mail: status, formsUsable, order: order ?? [] });
 
-  useEffect(() => {
-    let cancelled = false;
-
-    api
-      .correspondence.status()
-      .then((status) => {
-        if (!cancelled) setCapabilities((current) => ({ ...current, ...status }));
-      })
-      .catch(() => {});
-
-    // The letter-formats tile is for people with a template to use. Failing to
-    // answer means no tile, which is the safe direction: a tile that opens on
-    // an empty screen is the thing being avoided.
-    api.forms
-      .status()
-      .then((status) => {
-        if (!cancelled) {
-          setCapabilities((current) => ({
-            ...current,
-            forms: status?.enabled === true && Number(status.templates) > 0,
-          }));
-        }
-      })
-      .catch(() => {});
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const modules = applyOrder(visibleModules(user, capabilities), order ?? []);
+  // The arrangeable list, and the only one a drag may reorder.
+  const docsItems = areas.find((area) => area.key === 'docs')?.items ?? [];
 
   const persist = useCallback(
     async (keys) => {
@@ -151,15 +146,21 @@ export default function Home() {
 
   const move = useCallback(
     (fromIndex, toIndex) => {
-      if (fromIndex === toIndex || toIndex < 0 || toIndex >= modules.length) return;
+      if (fromIndex === toIndex || toIndex < 0 || toIndex >= docsItems.length) return;
 
-      const label = modules[fromIndex].label;
-      persist(reorder(modules, fromIndex, toIndex));
+      const label = docsItems[fromIndex].label;
+      /*
+       * Keys of the documents tiles only. `applyOrder` skips a name it does not
+       * find and appends whatever the saved list never mentioned, so a list
+       * that says nothing about الإدارة leaves it exactly where the registry
+       * puts it — the stored format is unchanged, still a flat list of keys.
+       */
+      persist(reorder(docsItems, fromIndex, toIndex));
       // Announced, because for anyone moving a tile from the keyboard the only
       // other evidence it worked is a visual one they may not be using.
-      setAnnouncement(`نُقلت ${label} إلى الموضع ${toIndex + 1} من ${modules.length}`);
+      setAnnouncement(`نُقلت ${label} إلى الموضع ${toIndex + 1} من ${docsItems.length}`);
     },
-    [modules, persist],
+    [docsItems, persist],
   );
 
   const arranged = (order ?? []).length > 0;
@@ -170,8 +171,8 @@ export default function Home() {
         <div>
           <h1 className="text-lg font-semibold text-text">{brandName}</h1>
           <p className="mt-0.5 text-sm text-text-muted">
-            اختر ما تريد العمل عليه. الوحدات التي تحتوي أكثر من شاشة تُظهر شاشاتها عند اختيارها.
-            يمكنك سحب البطاقات لترتيبها كما يناسبك، ويُحفظ الترتيب لحسابك.
+            كل قسم أدناه نوعٌ من العمل، ولا يظهر لك منها إلا ما يخصّك. يمكنك سحب بطاقات
+            «الوثائق والأرشيف» لترتيبها، ويُحفظ الترتيب لحسابك.
           </p>
         </div>
 
@@ -200,67 +201,121 @@ export default function Home() {
         {announcement}
       </p>
 
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 sm:gap-6 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
-        {modules.map((module, index) => (
-          <ModuleTile
-            key={module.key}
-            module={module}
-            index={index}
-            total={modules.length}
-            isActive={openKey === module.key}
-            // How many letters wait on this person's departments. On the tile
-            // itself, so the menu says "something is for you" before anything
-            // is opened — the bell says it too, but the bell is small and this
-            // is where the eye starts.
-            badge={module.key === 'correspondence' ? capabilities.queueCount : null}
-            expandable={visibleTabs(module, capabilities).length >= 2}
-            isDragging={dragKey === module.key}
-            isOver={overKey === module.key && dragKey !== module.key}
-            onSelect={() => {
-              /*
-                A module with nothing to expand goes straight there: a panel
-                holding a single link is a click that buys nothing — and for a
-                clerk who may only open الوارد إليّ, correspondence IS a single
-                link, so it opens rather than expanding onto one tile.
-              */
-              if (visibleTabs(module, capabilities).length < 2) {
-                navigate(module.to);
-                return;
-              }
-              setOpenKey((current) => (current === module.key ? null : module.key));
-            }}
-            onDragStart={() => setDragKey(module.key)}
-            onDragEnter={() => setOverKey(module.key)}
-            onDragEnd={() => {
-              setDragKey(null);
-              setOverKey(null);
-            }}
-            onDrop={() => {
-              const fromIndex = modules.findIndex((entry) => entry.key === dragKey);
-              setDragKey(null);
-              setOverKey(null);
-              if (fromIndex !== -1) move(fromIndex, index);
-            }}
-            onMove={(delta) => move(index, index + delta)}
-          />
-        ))}
-      </div>
+      <div className="space-y-6">
+        {areas.map((area) => {
+          const AreaIcon = area.icon;
+          const headingId = `area-${area.key}`;
+          // Only the documents block arranges, so only it carries the drag and
+          // Ctrl+Arrow wiring.
+          const arrangeable = area.kind === 'tiles' && area.key === 'docs';
+          const open = area.items.find((item) => item.key === openKey) ?? null;
 
-      {(() => {
-        const open = modules.find((module) => module.key === openKey);
-        return open ? (
-          <ModulePanel
-            module={open}
-            tabs={visibleTabs(open, capabilities)}
-            badges={
-              open.key === 'correspondence' && capabilities.queueCount
-                ? { queue: capabilities.queueCount }
-                : {}
-            }
-            onClose={() => setOpenKey(null)}
-          />
-        ) : null;
-      })()}
+          return (
+            <section
+              key={area.key}
+              aria-labelledby={headingId}
+              className="rounded-lg border border-border bg-surface p-5"
+            >
+              <div className="flex items-start gap-3">
+                <div className="rounded-lg bg-primary/10 p-2">
+                  <AreaIcon aria-hidden="true" className="h-5 w-5 text-primary" />
+                </div>
+                <div className="min-w-0">
+                  <h2 id={headingId} className="text-base font-semibold text-text">
+                    {area.label}
+                  </h2>
+                  <p className="mt-0.5 text-xs leading-snug text-text-muted">{area.hint}</p>
+                </div>
+              </div>
+
+              <div className="my-4 h-px bg-border" />
+
+              {/* The status request failed: say so instead of letting the
+                  section look complete, or vanish, on a network hiccup. */}
+              {area.failed ? (
+                <div className="mb-4 flex flex-wrap items-center gap-3 rounded border border-border
+                  bg-surface-muted px-3 py-2 text-xs text-text-muted"
+                >
+                  <span>تعذّر تحميل شاشات الوارد والصادر الخاصة بك، فقد لا يظهر هنا كل ما يخصّك.</span>
+                  <button
+                    type="button"
+                    onClick={() => refresh()}
+                    className="font-medium text-primary transition-colors hover:underline"
+                  >
+                    إعادة المحاولة
+                  </button>
+                </div>
+              ) : null}
+
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 sm:gap-6 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+                {area.items.map((item, index) => {
+                  /*
+                   * A mail item is a screen, not a module: it has nowhere to
+                   * expand to and pressing it goes straight there. A documents
+                   * or administration module with two screens or more expands,
+                   * because a panel over a single link is a click that buys
+                   * nothing.
+                   */
+                  const expandable =
+                    area.kind === 'tiles' && visibleTabs(item, status ?? {}).length >= 2;
+
+                  return (
+                    <ModuleTile
+                      key={item.key}
+                      module={item}
+                      index={index}
+                      total={area.items.length}
+                      isActive={openKey === item.key}
+                      // How many letters wait on this person's departments.
+                      // On «الوارد إليّ» itself now, rather than on a module
+                      // tile that no longer exists — the menu says "something
+                      // is for you" on the very button that opens it.
+                      badge={item.key === 'queue' ? status?.queueCount : null}
+                      expandable={expandable}
+                      arrangeable={arrangeable}
+                      isDragging={dragKey === item.key}
+                      isOver={overKey === item.key && dragKey !== item.key}
+                      onSelect={() => {
+                        if (!expandable) {
+                          navigate(item.to);
+                          return;
+                        }
+                        setOpenKey((current) => (current === item.key ? null : item.key));
+                      }}
+                      onDragStart={() => setDragKey(item.key)}
+                      onDragEnter={() => setOverKey(item.key)}
+                      onDragEnd={() => {
+                        setDragKey(null);
+                        setOverKey(null);
+                      }}
+                      onDrop={() => {
+                        const fromIndex = docsItems.findIndex((entry) => entry.key === dragKey);
+                        setDragKey(null);
+                        setOverKey(null);
+                        if (fromIndex !== -1) move(fromIndex, index);
+                      }}
+                      onMove={(delta) => move(index, index + delta)}
+                    />
+                  );
+                })}
+              </div>
+
+              {/* Inside its own section, directly under the tiles it belongs
+                  to: a panel that opened at the foot of the page would leave
+                  the reader guessing which heading it answered to. */}
+              {open ? (
+                <div className="mt-4">
+                  <ModulePanel
+                    module={open}
+                    tabs={visibleTabs(open, status ?? {})}
+                    onClose={() => setOpenKey(null)}
+                  />
+                </div>
+              ) : null}
+            </section>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -272,6 +327,10 @@ function ModuleTile({
   isActive,
   badge,
   expandable,
+  // Documents tiles are arranged by the person using them. Everything else —
+  // the mail steps, الإدارة — is a fixed target: no drag, no grip, no
+  // Ctrl+Arrow, and no aria-label promising a move that will not happen.
+  arrangeable = true,
   isDragging,
   isOver,
   onSelect,
@@ -286,51 +345,75 @@ function ModuleTile({
   return (
     <button
       type="button"
-      draggable
+      draggable={arrangeable}
       onClick={onSelect}
-      onDragStart={(event) => {
-        // Required by Firefox, which starts no drag without data on the transfer.
-        event.dataTransfer.setData('text/plain', module.key);
-        event.dataTransfer.effectAllowed = 'move';
-        onDragStart();
-      }}
-      onDragOver={(event) => {
-        // Without this the drop never fires: preventDefault is what marks an
-        // element as a valid target.
-        event.preventDefault();
-        event.dataTransfer.dropEffect = 'move';
-      }}
-      onDragEnter={onDragEnter}
-      onDragEnd={onDragEnd}
-      onDrop={(event) => {
-        event.preventDefault();
-        onDrop();
-      }}
-      onKeyDown={(event) => {
-        if (!event.ctrlKey) return;
-        /*
-         * RTL: the row runs right to left, so ArrowLeft advances and ArrowRight
-         * goes back — the opposite of the physical key names, and the right
-         * behaviour, because what someone means by "move it left" is where they
-         * see it go, not what the key is called.
-         */
-        const rtl = document.dir !== 'ltr';
-        const delta =
-          event.key === 'ArrowLeft' ? (rtl ? 1 : -1)
-            : event.key === 'ArrowRight' ? (rtl ? -1 : 1)
-              : 0;
-        if (delta === 0) return;
+      onDragStart={
+        arrangeable
+          ? (event) => {
+            // Required by Firefox, which starts no drag without data on the
+            // transfer.
+            event.dataTransfer.setData('text/plain', module.key);
+            event.dataTransfer.effectAllowed = 'move';
+            onDragStart();
+          }
+          : undefined
+      }
+      onDragOver={
+        arrangeable
+          ? (event) => {
+            // Without this the drop never fires: preventDefault is what marks
+            // an element as a valid target.
+            event.preventDefault();
+            event.dataTransfer.dropEffect = 'move';
+          }
+          : undefined
+      }
+      onDragEnter={arrangeable ? onDragEnter : undefined}
+      onDragEnd={arrangeable ? onDragEnd : undefined}
+      onDrop={
+        arrangeable
+          ? (event) => {
+            event.preventDefault();
+            onDrop();
+          }
+          : undefined
+      }
+      onKeyDown={
+        arrangeable
+          ? (event) => {
+            if (!event.ctrlKey) return;
+            /*
+             * RTL: the row runs right to left, so ArrowLeft advances and
+             * ArrowRight goes back — the opposite of the physical key names,
+             * and the right behaviour, because what someone means by "move it
+             * left" is where they see it go, not what the key is called.
+             */
+            const rtl = document.dir !== 'ltr';
+            const delta =
+              event.key === 'ArrowLeft' ? (rtl ? 1 : -1)
+                : event.key === 'ArrowRight' ? (rtl ? -1 : 1)
+                  : 0;
+            if (delta === 0) return;
 
-        event.preventDefault();
-        onMove(delta);
-      }}
+            event.preventDefault();
+            onMove(delta);
+          }
+          : undefined
+      }
       aria-expanded={expandable ? isActive : undefined}
-      aria-label={`${module.label} — الموضع ${index + 1} من ${total}. اضغط Ctrl مع الأسهم لنقلها.`}
-      className={`group relative flex min-h-[120px] cursor-grab flex-col items-center justify-center
+      aria-label={
+        arrangeable
+          ? `${module.label} — الموضع ${index + 1} من ${total}. اضغط Ctrl مع الأسهم لنقلها.`
+          // The description is hidden below the largest tiles, so it is spoken
+          // here instead: for a mail step it is the whole explanation of which
+          // letter the button is for.
+          : module.description ? `${module.label} — ${module.description}` : module.label
+      }
+      className={`group relative flex min-h-[120px] flex-col items-center justify-center
         rounded-lg p-4 transition-all duration-300 hover:scale-105 focus:outline-none focus:ring-2
-        focus:ring-primary focus:ring-offset-2 active:cursor-grabbing sm:min-h-[140px] sm:p-6 ${
-          isDragging ? 'opacity-40' : ''
-        } ${
+        focus:ring-primary focus:ring-offset-2 sm:min-h-[140px] sm:p-6 ${
+          arrangeable ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'
+        } ${isDragging ? 'opacity-40' : ''} ${
           isOver
             ? 'border-2 border-dashed border-primary bg-primary/5'
             : isActive
@@ -346,12 +429,15 @@ function ModuleTile({
 
       {/* The handle is a hint, not a target: the whole tile drags, because a
           small grip is a small thing to hit and there is nothing else here that
-          a drag could plausibly have meant. */}
-      <GripVertical
-        aria-hidden="true"
-        className="absolute top-1.5 end-1.5 h-3.5 w-3.5 text-text-muted opacity-0
-          transition-opacity group-hover:opacity-60"
-      />
+          a drag could plausibly have meant. It is absent where nothing moves,
+          rather than shown and inert. */}
+      {arrangeable ? (
+        <GripVertical
+          aria-hidden="true"
+          className="absolute top-1.5 end-1.5 h-3.5 w-3.5 text-text-muted opacity-0
+            transition-opacity group-hover:opacity-60"
+        />
+      ) : null}
 
       <div
         className={`relative mb-3 rounded-lg bg-primary p-4 shadow-lg transition-all group-hover:shadow-xl ${
@@ -385,6 +471,16 @@ function ModuleTile({
 function ModulePanel({ module, tabs, badges = {}, onClose }) {
   const navigate = useNavigate();
   const Icon = module.icon;
+
+  /*
+   * Some screens inside a module belong to the other area: الإدارة configures
+   * the mail room as well as the archive. Those tabs are banded off under the
+   * area's own name, taken from the registry so the band and the area cannot
+   * come to say different words, rather than sitting in one list where
+   * «نماذج الكتب» reads like another archive setting.
+   */
+  const plain = tabs.filter((tab) => !tab.group);
+  const groups = [...new Set(tabs.map((tab) => tab.group).filter(Boolean))];
 
   return (
     <div className="animate-slide-down rounded-lg border-2 border-primary/20 bg-primary/5 p-6">
@@ -426,9 +522,38 @@ function ModulePanel({ module, tabs, badges = {}, onClose }) {
         </div>
       </div>
 
+      {plain.length > 0 ? (
+        <TabBand
+          title={module.subgroup ?? module.label}
+          tabs={plain}
+          moduleTo={module.to}
+          badges={badges}
+        />
+      ) : null}
+
+      {groups.map((group) => (
+        <TabBand
+          key={group}
+          // The band says «الوارد والصادر» because that is what the area is
+          // called everywhere else in the menu.
+          title={AREAS.find((area) => area.key === group)?.label ?? group}
+          tabs={tabs.filter((tab) => tab.group === group)}
+          moduleTo={module.to}
+          badges={badges}
+          spaced={plain.length > 0}
+        />
+      ))}
+    </div>
+  );
+}
+
+/** One labelled band of sub-screens: the label, its rule, then the tiles. */
+function TabBand({ title, tabs, moduleTo, badges = {}, spaced = false }) {
+  return (
+    <div className={spaced ? 'mt-6' : ''}>
       <div className="mb-4 flex items-center gap-2">
         <span className="text-sm font-semibold uppercase tracking-wide text-text-muted">
-          {module.subgroup ?? module.label}
+          {title}
         </span>
         <div className="h-px flex-1 bg-border" />
       </div>
@@ -441,7 +566,7 @@ function ModulePanel({ module, tabs, badges = {}, onClose }) {
             badge={badges[tab.key] ?? null}
             // The tab is carried in the URL so the tile lands on the screen it
             // names, and so that screen can be linked to and bookmarked at all.
-            to={`${module.to}?tab=${tab.key}`}
+            to={`${moduleTo}?tab=${tab.key}`}
           />
         ))}
       </div>

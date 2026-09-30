@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   Folder,
   FileText,
@@ -17,6 +17,7 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Layers,
+  Mailbox,
 } from 'lucide-react';
 
 import { api, ApiError } from '../api.js';
@@ -27,6 +28,8 @@ import ExpandableActions from '../components/ExpandableActions.jsx';
 import DocumentPreview from '../components/DocumentPreview.jsx';
 import ScanPanel from '../components/ScanPanel.jsx';
 import { useTree } from '../TreeContext.jsx';
+import { useMail } from '../MailContext.jsx';
+import { mailActions } from '../navigation.js';
 import DropZone from '../components/DropZone.jsx';
 import BatchFilePrompt from '../components/BatchFilePrompt.jsx';
 import FilterBar from '../components/FilterBar.jsx';
@@ -57,6 +60,7 @@ export default function Browse() {
   const { folderId } = useParams();
   const navigate = useNavigate();
   const { reload: reloadTree } = useTree();
+  const { status, formsUsable } = useMail();
 
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -419,6 +423,28 @@ export default function Browse() {
   const folderCount = data?.folders?.length ?? 0;
   const documentCount = documents.length;
 
+  /*
+   * Is this the mail room's folder — the intake folder itself, or anything filed
+   * under it?
+   *
+   * Answered from `ancestors`, the chain this page already loads for its own
+   * breadcrumb, so there is no second request. The chain ENDS with the open
+   * folder (the stored path includes the node itself), which is why one `some`
+   * settles both questions. An ancestor the viewer may not browse still arrives
+   * carrying its id, so the notice appears even for someone who cannot open the
+   * folder above this one.
+   */
+  const intakeFolderId = status?.enabled ? String(status.intakeFolderId ?? '') : '';
+  const inMailFolder =
+    intakeFolderId !== ''
+    && (String(folderId ?? '') === intakeFolderId
+      || (data?.ancestors ?? []).some((ancestor) => String(ancestor.folderId) === intakeFolderId));
+
+  // The mail screens this reader may open. The link goes to the first of them —
+  // bare /correspondence would show «no screens for you» to someone whose only
+  // mail screen is «إنشاء كتاب» — and names it when it is the only one.
+  const mailScreens = inMailFolder ? mailActions(status, formsUsable) : [];
+
   return (
     <div className="space-y-4">
       {data?.ancestors?.length ? (
@@ -584,6 +610,33 @@ export default function Browse() {
           onCancel={() => setPendingBatch(null)}
           onConfirm={({ mode, title }) => fileBatch(pendingBatch, { mode, title })}
         />
+      ) : null}
+
+      {/*
+        The one thing this folder needs said, where the letters actually are.
+
+        A letter's file is archived here like any other document, and it opens
+        and reads here like any other — which is exactly why someone concludes
+        this is where a letter is registered. It is not: the number and the
+        referral come from the mail screens, and dropping a scan in here produces
+        a document with neither. So the folder says so, once, and offers the way
+        to the screens that do it — but only to a reader who has one to open.
+      */}
+      {inMailFolder ? (
+        <p className="flex items-center gap-2 rounded border border-border bg-surface-muted px-3 py-2 text-xs text-text-muted">
+          <Mailbox size={14} className="shrink-0" />
+          <span className="min-w-0">
+            هذا مجلد كتب الوارد والصادر: الكتب فيه تُسجَّل وتُحال من شاشات الوارد والصادر، لا من هنا.
+          </span>
+          {mailScreens.length > 0 ? (
+            <Link
+              to={mailScreens[0].to}
+              className="shrink-0 font-medium text-primary transition-colors hover:underline"
+            >
+              {mailScreens.length > 1 ? 'افتح الوارد والصادر' : mailScreens[0].label}
+            </Link>
+          ) : null}
+        </p>
       ) : null}
 
       {folderId ? (

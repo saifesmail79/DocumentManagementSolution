@@ -16,6 +16,16 @@
  *
  * So: every destination must be routed, and every tab a tile offers must be a
  * tab the page can actually show.
+ *
+ * ─── And the names, since the areas landed ──────────────────────────────────
+ *
+ * The complaint that produced the two areas was «i don't know what to use for
+ * what action», and its cause was names rather than routes: «المراسلات» was a
+ * tile, an administration tab and a folder at once, and «المتابعة» and «المتابَعة»
+ * differed by a single diacritic while meaning unrelated things. A name is a
+ * destination too — the reader picks a screen by reading it — so two labels that
+ * read the same are the same failure as a tile pointing at an unrouted path, and
+ * are checked here for the same reason: nothing throws.
  */
 
 import { test, describe } from 'node:test';
@@ -29,8 +39,9 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 // A relative specifier, not a joined absolute path: on Windows the latter
 // reaches the ESM loader as the scheme "c:" and is rejected outright.
 const {
-  MODULES, ADMIN_TABS, MY_TABS, CORRESPONDENCE_TABS, MOST_PERMISSIVE_STATUS,
+  AREAS, MODULES, ADMIN_TABS, MY_TABS, CORRESPONDENCE_TABS, MOST_PERMISSIVE_STATUS,
   visibleModules, moduleForPath, applyOrder, reorder, visibleTabs, signInLanding,
+  mailActions, homeAreas, breadcrumbFor,
 } = await import('../client/src/navigation.js');
 
 const appSource = await readFile(path.join(ROOT, 'client/src/App.jsx'), 'utf8');
@@ -118,7 +129,9 @@ describe('the tile menu', () => {
       );
     }
 
-    assert.equal(moduleForPath('/forms', { isSuperAdmin: false })?.label, 'النماذج');
+    // «النماذج» named both this screen and the administration tab that manages
+    // its templates; the screen now says what it is for, and so does the trail.
+    assert.equal(moduleForPath('/forms', { isSuperAdmin: false })?.label, 'إنشاء كتاب');
   });
 });
 
@@ -291,9 +304,15 @@ describe('starting the application', () => {
 describe('where signing in lands a person', () => {
   const clerk = { isSuperAdmin: false, mustChangePassword: false };
   const admin = { isSuperAdmin: true, mustChangePassword: false };
-  const mailRoom = { enabled: true, registrar: true, queueCount: 0, intakeFolderId: '7' };
-  const lettersWaiting = { enabled: true, registrar: false, queueCount: 2 };
-  const nothingWaiting = { enabled: true, registrar: false, queueCount: 0 };
+  /*
+   * `member` is «belongs to a department letters are routed to», and it is part of
+   * these fixtures because it decides whether الوارد إليّ exists for that person at
+   * all. The mail-room clerk is the case that made it necessary: a registrar in no
+   * department, who was being landed on an inbox that could never hold anything.
+   */
+  const mailRoom = { enabled: true, registrar: true, member: false, queueCount: 0, intakeFolderId: '7' };
+  const lettersWaiting = { enabled: true, registrar: false, member: true, queueCount: 2 };
+  const nothingWaiting = { enabled: true, registrar: false, member: true, queueCount: 0 };
 
   /**
    * The first version sent every employee to the mail queue whenever the
@@ -389,12 +408,12 @@ describe('tabs a viewer may actually open', () => {
    * rule itself: it must actually withhold something, and the right things.
    */
   test('a clerk is offered only the correspondence screen that is theirs', () => {
-    const forClerk = visibleTabs(correspondence, { enabled: true, registrar: false });
+    const forClerk = visibleTabs(correspondence, { enabled: true, registrar: false, member: true });
     assert.deepEqual(forClerk.map((tab) => tab.key), ['queue']);
   });
 
-  test('the mail room is offered all three', () => {
-    const forRegistrar = visibleTabs(correspondence, { enabled: true, registrar: true });
+  test('the mail room is offered all four', () => {
+    const forRegistrar = visibleTabs(correspondence, { enabled: true, registrar: true, member: true });
     assert.deepEqual(
       forRegistrar.map((tab) => tab.key),
       CORRESPONDENCE_TABS.map((tab) => tab.key),
@@ -403,10 +422,18 @@ describe('tabs a viewer may actually open', () => {
 
   test('an unanswered status withholds the restricted screens rather than guessing', () => {
     // The status request can fail; showing everyone the register on a network
-    // hiccup is the one outcome worse than showing too little.
+    // hiccup is the one outcome worse than showing too little. الوارد إليّ is
+    // withheld with the rest now: it belongs to department members, and a screen
+    // that can never hold anything is no safer a default than the register.
     for (const capabilities of [{}, undefined, { enabled: true }]) {
-      assert.deepEqual(visibleTabs(correspondence, capabilities).map((t) => t.key), ['queue']);
+      assert.deepEqual(visibleTabs(correspondence, capabilities).map((t) => t.key), []);
     }
+
+    // And the one capability that opens it: belonging to a department.
+    assert.deepEqual(
+      visibleTabs(correspondence, { enabled: true, member: true }).map((t) => t.key),
+      ['queue'],
+    );
   });
 
   test('a module whose tabs carry no requirement is unaffected', () => {
@@ -435,16 +462,386 @@ describe('tabs a viewer may actually open', () => {
       /status\.registrar/,
       'the page is re-testing the capability itself instead of asking the registry',
     );
+
+    /*
+     * And it must not fall back to a screen it names itself.
+     *
+     * The fallback was `'queue'` — the one screen a mail-room clerk in no
+     * department may never open — so the clerk opened the area every morning on
+     * an empty inbox belonging to somebody else. The first permitted screen is
+     * the only fallback that is right for every viewer.
+     */
+    assert.doesNotMatch(
+      source,
+      /:\s*'queue'\s*;/,
+      'the page is falling back to a named screen instead of the first one this viewer may open',
+    );
+    assert.match(source, /permitted\[0\]/, 'the fallback must be the first screen this viewer may open');
   });
 
   test('the tile menu asks who the viewer is before offering sub-tiles', async () => {
     const source = await readFile(path.join(ROOT, 'client/src/pages/Home.jsx'), 'utf8');
 
-    assert.match(source, /visibleTabs\(/, 'the menu must filter the tabs it offers');
-    assert.match(
-      source,
-      /correspondence\.status\(\)/,
-      'the menu cannot filter by a capability it never asked the server for',
+    assert.ok(
+      /visibleTabs\(/.test(source) || /homeAreas\(/.test(source),
+      'the menu must filter what it offers through the registry, not a list of its own',
     );
+
+    /*
+     * The request itself moved. Five surfaces read this status — the menu, the
+     * header, the breadcrumb, the folder tree and the mail tab bar — and five
+     * separate requests can disagree for a moment, which is how a waiting badge
+     * comes to contradict the tab bar beside it. So the menu reads the shared
+     * answer, and the provider is what asks.
+     */
+    assert.match(source, /useMail\(/, 'the menu cannot filter by a capability it never asked for');
+
+    const provider = await readFile(path.join(ROOT, 'client/src/MailContext.jsx'), 'utf8');
+    assert.match(
+      provider,
+      /correspondence\.status\(\)/,
+      'somebody has to actually ask the server who this person is to the mail room',
+    );
+  });
+});
+
+/**
+ * The names the two areas are told apart by.
+ *
+ * Diacritics are not a distinction. Arabic writing drops them routinely and a
+ * reader scanning a menu reads the skeleton of the word — which is how «المتابعة»
+ * (the mail room's open referrals) and «المتابَعة» (documents I watch) came to be
+ * the same name on one screen. So labels are compared with their marks stripped,
+ * the way the reader compares them.
+ */
+describe('the names the two areas are told apart by', () => {
+  /** The document page's tab labels, read from the page rather than restated. */
+  const sectionLabels = async () => {
+    const source = await readFile(path.join(ROOT, 'client/src/pages/DocumentDetail.jsx'), 'utf8');
+    const block = source.match(/const SECTIONS = \[([\s\S]*?)\n\];/);
+    assert.ok(block, 'could not find SECTIONS in DocumentDetail.jsx');
+
+    const labels = [...block[1].matchAll(/label: '([^']+)'/g)].map((match) => ({ label: match[1] }));
+    assert.ok(labels.length >= 9, `expected the full document tab set, found ${labels.length}`);
+    return labels;
+  };
+
+  // Tashkeel (U+064B–U+0652, U+0670) and tatweel (U+0640): decoration over the
+  // letters, not part of the word.
+  const skeleton = (label) => label.replace(/[\u064B-\u0652\u0670\u0640]/g, '');
+
+  test('no two labels read the same once their diacritics are gone', async () => {
+    const named = [];
+    const collect = (where, entries) => {
+      for (const entry of entries) named.push({ where, label: entry.label });
+    };
+
+    collect('AREAS', AREAS);
+    /*
+     * The correspondence module is left out of the comparison and pinned by the
+     * next test instead: its label IS the mail area's, deliberately, because the
+     * page is the area and the trail should say that name once rather than twice.
+     * Nothing escapes the check — the area label it equals is still compared
+     * against every other name here.
+     */
+    collect('MODULES', MODULES.filter((module) => module.key !== 'correspondence'));
+    collect('ADMIN_TABS', ADMIN_TABS);
+    collect('CORRESPONDENCE_TABS', CORRESPONDENCE_TABS);
+    collect('MY_TABS', MY_TABS);
+    collect('تبويبات الوثيقة', await sectionLabels());
+
+    const firstSeen = new Map();
+    const collisions = [];
+    for (const { where, label } of named) {
+      const word = skeleton(label);
+      if (firstSeen.has(word)) collisions.push(`«${label}» (${where}) = ${firstSeen.get(word)}`);
+      else firstSeen.set(word, `«${label}» (${where})`);
+    }
+
+    assert.deepEqual(
+      collisions,
+      [],
+      `two things the reader must tell apart share a name:\n${collisions.join('\n')}`,
+    );
+  });
+
+  test('the correspondence screen is named after its area on purpose', () => {
+    const mail = AREAS.find((area) => area.key === 'mail');
+    const correspondence = MODULES.find((module) => module.key === 'correspondence');
+
+    assert.equal(correspondence.area, 'mail');
+    assert.equal(correspondence.label, mail.label, 'the page IS the area, so the two names are one name');
+    // Which is what allowing the collision buys: the trail says it once.
+    assert.deepEqual(breadcrumbFor({ pathname: '/correspondence' }).segments, [mail.label]);
+  });
+});
+
+describe('every module belongs to an area', () => {
+  test('a module names an area that exists', () => {
+    // An area nothing declares is never drawn, so the module would vanish from
+    // the menu while every one of its routes kept working.
+    const keys = new Set(AREAS.map((area) => area.key));
+    const orphans = MODULES
+      .filter((module) => !keys.has(module.area))
+      .map((module) => `${module.label} → ${module.area}`);
+
+    assert.deepEqual(orphans, [], `modules in no area: ${orphans.join(', ')}`);
+  });
+
+  test('the areas are distinct, and each says what it is for', () => {
+    assert.equal(new Set(AREAS.map((area) => area.key)).size, AREAS.length, 'two areas share a key');
+    assert.equal(new Set(AREAS.map((area) => area.label)).size, AREAS.length, 'two areas share a name');
+
+    // The hint under the heading is what the area is for; an area with only an
+    // icon and a name is one the reader has to guess at.
+    const bare = AREAS.filter((area) => !area.hint?.trim() || !area.icon).map((area) => area.label);
+    assert.deepEqual(bare, [], `areas with no hint or icon: ${bare.join(', ')}`);
+  });
+
+  test('the mail area holds the letters work and nothing else', () => {
+    assert.deepEqual(
+      MODULES.filter((module) => module.area === 'mail').map((module) => module.key),
+      ['correspondence', 'forms'],
+    );
+  });
+
+  test('no documents module carries a letters screen', () => {
+    // A mail screen reachable from «الوثائق والأرشيف» is exactly the mixing the
+    // areas undid, and it reads as the archive owning the register.
+    const mailTabs = new Set(CORRESPONDENCE_TABS.map((tab) => tab.key));
+    const leaked = MODULES
+      .filter((module) => module.area === 'docs')
+      .flatMap((module) => (module.tabs ?? [])
+        .filter((tab) => mailTabs.has(tab.key))
+        .map((tab) => `${module.label} → ${tab.label}`));
+
+    assert.deepEqual(leaked, [], `letters screens inside the documents area: ${leaked.join(', ')}`);
+  });
+});
+
+describe('where the breadcrumb says the reader is', () => {
+  const employee = { isSuperAdmin: false };
+  const boss = { isSuperAdmin: true };
+  // What the shell hands in: the correspondence status of the person reading.
+  const registrar = { enabled: true, registrar: true, member: false };
+  const memberOnly = { enabled: true, registrar: false, member: true };
+
+  const trail = (args) => breadcrumbFor(args).segments;
+
+  test('a documents screen reads: area, then screen, then tab', () => {
+    assert.deepEqual(trail({ pathname: '/folders/12', user: employee }), ['الوثائق والأرشيف', 'المجلدات']);
+    assert.deepEqual(
+      trail({ pathname: '/my', search: '?tab=recent', user: employee }),
+      ['الوثائق والأرشيف', 'مساحتي', 'المفتوحة مؤخراً'],
+    );
+  });
+
+  test('a mail screen names the area once, then the screen', () => {
+    assert.deepEqual(
+      trail({ pathname: '/correspondence', user: employee, capabilities: memberOnly }),
+      ['الوارد والصادر', 'الوارد إليّ'],
+    );
+    assert.deepEqual(
+      trail({ pathname: '/correspondence', search: '?tab=intake', user: employee, capabilities: registrar }),
+      ['الوارد والصادر', 'تسجيل كتاب'],
+    );
+    assert.deepEqual(trail({ pathname: '/forms', user: employee }), ['الوارد والصادر', 'إنشاء كتاب']);
+  });
+
+  test('a screen this viewer cannot open is named as the one they will land on', () => {
+    // The page falls back to the first permitted screen, so a trail still
+    // reading «السجل» would be naming somebody else's screen to their face.
+    assert.deepEqual(
+      trail({ pathname: '/correspondence', search: '?tab=register', user: employee, capabilities: memberOnly }),
+      ['الوارد والصادر', 'الوارد إليّ'],
+    );
+  });
+
+  test('administration is alone in its area, so its name is not said twice', () => {
+    assert.deepEqual(
+      trail({ pathname: '/admin', search: '?tab=audit', user: boss }),
+      ['إدارة النظام', 'سجل التدقيق'],
+    );
+  });
+
+  test('a page in no module leaves the trail empty rather than guessing an area', () => {
+    for (const args of [
+      // Not an administrator: there is no administration module to name.
+      { pathname: '/admin', user: employee },
+      // A document can belong to both areas at once, so the trail claims neither.
+      { pathname: '/documents/9', user: employee },
+      { pathname: '/', user: boss },
+    ]) {
+      const where = breadcrumbFor(args);
+      assert.equal(where.area, null, args.pathname);
+      assert.deepEqual(where.segments, [], args.pathname);
+    }
+  });
+
+  test('the shell draws its chip and its trail from this one answer', () => {
+    // Three places say where the reader is. Asked separately they disagree, and
+    // a chip reading «الوارد والصادر» over a trail reading «الوثائق والأرشيف» is
+    // worse than neither of them.
+    for (const args of [
+      { pathname: '/folders/12', user: employee },
+      { pathname: '/forms', user: employee },
+      { pathname: '/admin', user: boss },
+    ]) {
+      const where = breadcrumbFor(args);
+      assert.equal(where.segments[0], where.area.label, args.pathname);
+    }
+
+    assert.match(appSource, /breadcrumbFor\(/, 'the shell must read the shared answer, not build its own');
+    assert.match(appSource, /MailProvider/, 'the mail status must be asked once, above every screen that reads it');
+  });
+});
+
+describe('the home page each person is shown', () => {
+  const employee = { isSuperAdmin: false };
+  const boss = { isSuperAdmin: true };
+
+  /** The keys of one area's items, or null when the area is not drawn at all. */
+  const itemsOf = (areas, key) =>
+    areas.find((area) => area.key === key)?.items.map((item) => item.key) ?? null;
+
+  test('the mail room is offered the three screens of the mail room', () => {
+    // A registrar in no department: registering, the register, and the referrals
+    // to chase. Not الوارد إليّ — nothing can ever be routed to them.
+    const areas = homeAreas({ user: employee, mail: { enabled: true, registrar: true, member: false } });
+    assert.deepEqual(itemsOf(areas, 'mail'), ['intake', 'register', 'followup']);
+  });
+
+  test('a department member is offered their inbox and nothing else', () => {
+    const areas = homeAreas({ user: employee, mail: { enabled: true, registrar: false, member: true } });
+    assert.deepEqual(itemsOf(areas, 'mail'), ['queue']);
+  });
+
+  test('somebody with no mail duties sees no mail heading at all', () => {
+    const areas = homeAreas({ user: employee, mail: { enabled: true, registrar: false, member: false } });
+    assert.equal(itemsOf(areas, 'mail'), null, 'an empty area must not be drawn');
+    assert.ok(itemsOf(areas, 'docs').length > 0, 'the documents area belongs to everyone');
+  });
+
+  test('a usable template alone is enough to draw the area', () => {
+    // Correspondence switched off and a letter still to write: «إنشاء كتاب» works
+    // on its own, because writing an outgoing letter does not need the register.
+    const areas = homeAreas({ user: employee, mail: { enabled: false }, formsUsable: true });
+    assert.deepEqual(itemsOf(areas, 'mail'), ['forms']);
+  });
+
+  test('before the status answers, nothing of the area is drawn', () => {
+    // null is «not yet», not «no». Guessing either way flashes a heading on and
+    // off, or worse, offers a screen and then withdraws it.
+    assert.equal(itemsOf(homeAreas({ user: employee, mail: null }), 'mail'), null);
+  });
+
+  test('إدارة النظام is only ever an administrator\'s area', () => {
+    assert.equal(itemsOf(homeAreas({ user: employee, mail: null }), 'system'), null);
+    // Signed out, or before the session resolves, is not an administrator.
+    assert.equal(itemsOf(homeAreas({ user: null, mail: null }), 'system'), null);
+    assert.deepEqual(itemsOf(homeAreas({ user: boss, mail: null }), 'system'), ['admin']);
+  });
+
+  test('the areas keep their fixed order, whatever is in them', () => {
+    // Fixed so that a person learns where each kind of work lives once. The mail
+    // area offers its screens directly; the other two offer tiles.
+    const areas = homeAreas({
+      user: boss,
+      mail: { enabled: true, registrar: true, member: true },
+      formsUsable: true,
+    });
+
+    assert.deepEqual(areas.map((area) => area.key), ['docs', 'mail', 'system']);
+    assert.deepEqual(areas.map((area) => area.kind), ['tiles', 'actions', 'tiles']);
+  });
+
+  /**
+   * The case that decides whether the areas were safe to introduce.
+   *
+   * Everyone who ever dragged a tile has a saved order naming الوارد والصادر and
+   * النماذج as tiles of the one flat menu, beside names of modules that are gone.
+   * If any of those stale names could displace a documents tile, the people who
+   * use the system enough to have arranged it would silently lose part of it.
+   */
+  test('a saved order from before the areas loses nothing', () => {
+    const docsKeys = MODULES
+      .filter((module) => module.area === 'docs')
+      .map((module) => module.key)
+      .sort();
+
+    for (const user of [employee, boss]) {
+      for (const order of [
+        ['correspondence', 'forms', 'admin', 'gone'],
+        ['recycle', 'correspondence', 'folders', 'gone', 'my', 'forms', 'search', 'admin'],
+        ['search', 'admin', 'my'],
+        [],
+      ]) {
+        const areas = homeAreas({
+          user,
+          mail: { enabled: true, registrar: true, member: true },
+          formsUsable: true,
+          order,
+        });
+
+        assert.deepEqual(
+          [...itemsOf(areas, 'docs')].sort(),
+          docsKeys,
+          `saved order ${JSON.stringify(order)} changed what the documents area holds`,
+        );
+      }
+    }
+  });
+
+  test('the menu and the area\'s own tab bar offer the same screens', () => {
+    // Both read `mailActions`, so this pins the join: the home page's mail block
+    // is the area's tab bar, and every entry carries somewhere to go.
+    const status = { enabled: true, registrar: true, member: true };
+    const areas = homeAreas({ user: employee, mail: status, formsUsable: true });
+    const actions = mailActions(status, true);
+
+    assert.deepEqual(itemsOf(areas, 'mail'), actions.map((action) => action.key));
+    for (const action of actions) {
+      assert.ok(action.to?.startsWith('/'), `${action.label} has nowhere to go`);
+      assert.ok(action.label?.trim() && action.description?.trim(), `${action.key} says too little`);
+    }
+  });
+});
+
+describe('findings from the review of the area separation', () => {
+  const clerk = { isSuperAdmin: false };
+
+  test('a status that failed keeps the mail section, marked, instead of dropping it', () => {
+    // Dropping it would tell a department member on a flaky connection that
+    // they have no mail work at all.
+    const areas = homeAreas({ user: clerk, mail: { enabled: false, failed: true } });
+    const mail = areas.find((area) => area.key === 'mail');
+    assert.ok(mail, 'the mail section vanished on a failed request');
+    assert.equal(mail.failed, true);
+    assert.deepEqual(mail.items, []);
+  });
+
+  test('a status that answered «off» still leaves no mail section for someone without a template', () => {
+    const areas = homeAreas({ user: clerk, mail: { enabled: false } });
+    assert.equal(areas.some((area) => area.key === 'mail'), false);
+  });
+
+  test('the «مساحتي» tile describes its tabs by their current names', () => {
+    // A hand-typed description kept saying «المتابَع» after the tab became «ما أتابعه».
+    const my = MODULES.find((module) => module.key === 'my');
+    for (const tab of MY_TABS) {
+      assert.ok(my.description.includes(tab.label), `the description does not name «${tab.label}»`);
+    }
+  });
+
+  test('the shared mail bar always holds the screen it sits on', async () => {
+    const source = await readFile(path.join(ROOT, 'client/src/components/MailAreaNav.jsx'), 'utf8');
+    assert.match(source, /currentScreen\(active\)/, 'the page being read can be missing from its own bar');
+    assert.match(source, /aria-current/, 'the current entry is marked only visually');
+  });
+
+  test('the letters-folder notice links to a screen the reader may open', async () => {
+    const source = await readFile(path.join(ROOT, 'client/src/pages/Browse.jsx'), 'utf8');
+    assert.doesNotMatch(source, /to="\/correspondence"/, 'a hard-coded link lands a forms-only reader on «no screens for you»');
+    assert.match(source, /mailScreens\[0\]\.to/);
   });
 });

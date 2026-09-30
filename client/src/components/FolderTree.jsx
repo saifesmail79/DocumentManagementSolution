@@ -1,6 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { ChevronDown, ChevronLeft, Folder, FolderOpen, Link2Off, RefreshCw } from 'lucide-react';
+import {
+  ChevronDown,
+  ChevronLeft,
+  Folder,
+  FolderOpen,
+  Link2Off,
+  Mailbox,
+  RefreshCw,
+} from 'lucide-react';
 
 import { useTree } from '../TreeContext.jsx';
 import { Spinner } from './ui.jsx';
@@ -18,6 +26,17 @@ import { Spinner } from './ui.jsx';
  * order no reader would call alphabetical.
  */
 const collator = new Intl.Collator('ar', { numeric: true, sensitivity: 'base' });
+
+/**
+ * What the mark on the letters folder says when you rest on it.
+ *
+ * The folder is marked and nothing else: not moved, not hidden, not sorted
+ * apart. Letters really are filed in it and people really do open it to read
+ * one — what they must not conclude is that dropping a scan in here registers
+ * it, so the mark answers that before they try.
+ */
+const MAIL_FOLDER_HINT =
+  'مجلد كتب الوارد والصادر — تسجيل الكتب وإحالتها من شاشات الوارد والصادر';
 
 /**
  * Nests the flat list.
@@ -62,7 +81,13 @@ function ancestorsOf(folders, folderId) {
   return chain;
 }
 
-export default function FolderTree() {
+/**
+ * @param {object} props
+ * @param {string|null} [props.mailFolderId]  the correspondence intake folder, marked
+ *   where it appears. Null when correspondence is off or no folder is configured,
+ *   and then nothing in the tree looks any different.
+ */
+export default function FolderTree({ mailFolderId = null }) {
   const { folderId } = useParams();
   const navigate = useNavigate();
   const { folders, truncated, loading, error, reload } = useTree();
@@ -92,8 +117,15 @@ export default function FolderTree() {
 
   if (loading && folders.length === 0) return <Spinner />;
 
+  /*
+   * The tree takes the space its column has left rather than all of it. On a mail
+   * screen a line of explanation sits above it in the same pane, and `h-full`
+   * there meant the tree still asked for the whole pane and overflowed it by
+   * exactly that line — a second scrollbar inside a 16rem column. `min-h-0` is
+   * what lets the list inside do the scrolling instead.
+   */
   return (
-    <nav aria-label="شجرة المجلدات" className="flex h-full flex-col">
+    <nav aria-label="شجرة المجلدات" className="flex min-h-0 flex-1 flex-col">
       <div className="mb-2 flex items-center justify-between px-1">
         <span className="text-xs font-semibold uppercase tracking-wider text-text-muted">
           المجلدات
@@ -138,6 +170,7 @@ export default function FolderTree() {
               expanded={expanded}
               onToggle={toggle}
               onSelect={(id) => navigate(`/folders/${id}`)}
+              mailFolderId={mailFolderId}
             />
           ))}
         </ul>
@@ -152,10 +185,13 @@ export default function FolderTree() {
   );
 }
 
-function TreeNode({ node, level, activeId, expanded, onToggle, onSelect }) {
+function TreeNode({ node, level, activeId, expanded, onToggle, onSelect, mailFolderId = null }) {
   const isOpen = expanded.has(node.folderId);
   const isActive = activeId === node.folderId;
   const hasChildren = node.children.length > 0;
+  // Compared as strings: the id arrives from the tree as a string and from the
+  // correspondence settings as whatever was stored, and `'7' === 7` is false.
+  const isMail = mailFolderId != null && String(node.folderId) === String(mailFolderId);
 
   return (
     <li>
@@ -182,16 +218,36 @@ function TreeNode({ node, level, activeId, expanded, onToggle, onSelect }) {
 
         <button
           onClick={() => onSelect(node.folderId)}
+          title={isMail ? MAIL_FOLDER_HINT : undefined}
           className={`flex min-w-0 flex-1 items-center gap-2 py-1.5 pe-2 text-right text-sm ${
             isActive ? 'font-medium text-primary' : 'text-text'
           }`}
         >
-          {isOpen && hasChildren ? (
+          {/* The letters folder keeps its mailbox whether it is open or shut: the
+              point of the mark is that this folder is recognised at a glance, and
+              an icon that turns back into an ordinary folder the moment someone
+              expands it is a mark you cannot rely on. */}
+          {isMail ? (
+            <Mailbox size={15} className="shrink-0 text-text-muted" />
+          ) : isOpen && hasChildren ? (
             <FolderOpen size={15} className="shrink-0 text-primary/70" />
           ) : (
             <Folder size={15} className="shrink-0 text-text-muted" />
           )}
           <span className="truncate">{node.name}</span>
+
+          {/* Said in words as well as in the icon — an icon alone is a puzzle.
+              `aria-label` carries the whole sentence, which a screen reader then
+              reads after the folder's own name rather than instead of it. */}
+          {isMail ? (
+            <span
+              title={MAIL_FOLDER_HINT}
+              aria-label={MAIL_FOLDER_HINT}
+              className="shrink-0 rounded border border-border bg-surface-muted px-1 text-[10px] text-text-muted"
+            >
+              وارد وصادر
+            </span>
+          ) : null}
 
           {/* A folder reached through an invisible parent. Marking it explains why
               it sits at the top level instead of under the branch it belongs to. */}
@@ -216,6 +272,7 @@ function TreeNode({ node, level, activeId, expanded, onToggle, onSelect }) {
               expanded={expanded}
               onToggle={onToggle}
               onSelect={onSelect}
+              mailFolderId={mailFolderId}
             />
           ))}
         </ul>

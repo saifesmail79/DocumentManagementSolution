@@ -1,5 +1,5 @@
 /**
- * الإدارة ← النماذج — the Word templates official letters are made from.
+ * الإدارة ← نماذج الكتب — the Word templates official letters are made from.
  *
  * ─── What an administrator does here, and in what order ─────────────────────
  *
@@ -179,7 +179,8 @@ function describeError(caught, fallback) {
   if (!(caught instanceof ApiError)) return fallback;
 
   const MAP = {
-    forms_disabled: 'وحدة النماذج معطّلة. فعّلها من «الإعدادات ← النماذج» ثم أعد المحاولة.',
+    forms_disabled:
+      'وحدة النماذج معطّلة. فعّلها من «الإعدادات ← نماذج الكتب والتوقيع» ثم أعد المحاولة.',
     forbidden: 'هذه العملية لمديري النظام.',
     not_found: 'النموذج غير موجود — ربما حُذف. حدّث الصفحة.',
     no_file: 'اختر ملف النموذج بصيغة .docx.',
@@ -436,7 +437,7 @@ export default function FormsAdminTab() {
       const confirmed = await confirm({
         title: 'تعطيل النموذج',
         message: `تعطيل «${template.name}»`,
-        detail: 'لن يظهر النموذج لأحد في شاشة «النماذج». الكتب التي أُنشئت به لا تتأثر.',
+        detail: 'لن يظهر النموذج لأحد في شاشة «إنشاء كتاب». الكتب التي أُنشئت به لا تتأثر.',
         confirmLabel: 'تعطيل',
         variant: 'warning',
       });
@@ -465,8 +466,8 @@ export default function FormsAdminTab() {
 
       {!enabled ? (
         <Alert tone="warning">
-          الوحدة معطّلة حالياً. فعّلها من «الإعدادات ← النماذج ← وحدة النماذج»، ثم عد إلى هنا
-          لرفع النماذج وتسمية حقولها.
+          الوحدة معطّلة حالياً. فعّلها من «الإعدادات ← نماذج الكتب والتوقيع ← النماذج الرسمية»، ثم
+          عد إلى هنا لرفع النماذج وتسمية حقولها.
         </Alert>
       ) : null}
 
@@ -1007,7 +1008,7 @@ function TemplateDialog({ draft, types, approvals, folderPathMap, onClose, onSav
             rows={2}
             value={form.description}
             onChange={(event) => setForm({ ...form, description: event.target.value })}
-            placeholder="يظهر تحت اسم النموذج في شاشة «النماذج»"
+            placeholder="يظهر تحت اسم النموذج في شاشة «إنشاء كتاب»"
             className="w-full rounded-lg border border-border bg-control px-3 py-2 text-sm text-text
               placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-primary/40"
           />

@@ -191,8 +191,25 @@ export default function NotificationBell() {
                   }`}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-[11px] text-primary">
-                      {KIND_LABELS[notification.kind] ?? notification.kind}
+                    <span className="flex items-center gap-1.5">
+                      <span className="text-[11px] text-primary">
+                        {KIND_LABELS[notification.kind] ?? notification.kind}
+                      </span>
+
+                      {/*
+                        One list, two kinds of work. «إحالة كتاب» beside «تعليق
+                        جديد» reads as one more thing that happened to a
+                        document, and the reader cannot tell that pressing it
+                        lands in الوارد والصادر rather than in the archive. The
+                        chip says which area the item belongs to, in words —
+                        the rest of the row is unchanged, and the area is never
+                        signalled by colour.
+                      */}
+                      {notification.kind?.startsWith('mail.') ? (
+                        <span className="whitespace-nowrap rounded border border-border bg-surface-muted px-1 text-[10px] text-text-muted">
+                          الوارد والصادر
+                        </span>
+                      ) : null}
                     </span>
                     <span className="num text-[11px] text-text-muted">
                       {formatDate(notification.createdAt)}

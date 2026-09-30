@@ -178,6 +178,8 @@ describe('the correspondence register', { skip: CONFIGURED ? false : target.reas
     const status = await call('GET', '/api/correspondence/status', postman);
     assert.equal(status.statusCode, 200);
     assert.equal(status.json().enabled, false);
+    // Off means off: no role, no units, no `member` flag for the menu to read.
+    assert.deepEqual(status.json(), { enabled: false });
 
     const refused = await call('POST', '/api/correspondence/register', boss, {
       documentId: '1',
@@ -299,8 +301,28 @@ describe('the correspondence register', { skip: CONFIGURED ? false : target.reas
     assert.deepEqual(nobody.json().transfers, []);
 
     // The badge: how many letters wait on this person's units.
-    assert.equal((await call('GET', '/api/correspondence/status', fin1)).json().queueCount, 1);
-    assert.equal((await call('GET', '/api/correspondence/status', outsider)).json().queueCount, 0);
+    const finStatus = (await call('GET', '/api/correspondence/status', fin1)).json();
+    const outsiderStatus = (await call('GET', '/api/correspondence/status', outsider)).json();
+    assert.equal(finStatus.queueCount, 1);
+    assert.equal(outsiderStatus.queueCount, 0);
+
+    // And `member` — belonging to a live unit — is a separate answer from the
+    // badge, because it decides whether «الوارد إليّ» exists for this person
+    // rather than what it contains. The menu cannot read it off queueCount: a
+    // zero there means "nothing waiting today" for fin1 and "no inbox at all"
+    // for outsider, and those two must not look the same.
+    assert.equal(finStatus.member, true);
+    assert.equal(outsiderStatus.member, false, 'in no unit, so no inbox at all');
+    assert.equal(
+      (await call('GET', '/api/correspondence/status', postman)).json().member,
+      false,
+      'the mail room keeps the book without belonging to a unit',
+    );
+    assert.equal(
+      (await call('GET', '/api/correspondence/status', boss)).json().member,
+      false,
+      'no super-admin override: a super admin in no unit genuinely has no inbox',
+    );
 
     const stranger = await call(
       'POST',
@@ -547,6 +569,29 @@ describe('the correspondence register', { skip: CONFIGURED ? false : target.reas
     await call('POST', `/api/admin/correspondence/units/${id['unit:الموارد البشرية']}/active`, boss, {
       active: true,
     });
+  });
+
+  test('deactivating a unit ends the membership of its people', async () => {
+    const unit = id['unit:الموارد البشرية'];
+    const memberOf = async (cookie) =>
+      (await call('GET', '/api/correspondence/status', cookie)).json().member;
+
+    // hr1's inbox is empty by now, and that is the point: membership, not the
+    // count, is what keeps «الوارد إليّ» on the menu for the next letter.
+    assert.equal((await call('GET', '/api/correspondence/queue', hr1)).json().transfers.length, 0);
+    assert.equal(await memberOf(hr1), true);
+
+    const off = await call('POST', `/api/admin/correspondence/units/${unit}/active`, boss, {
+      active: false,
+    });
+    assert.equal(off.statusCode, 200, off.body);
+    assert.equal(await memberOf(hr1), false, 'a retired unit is no unit');
+
+    const on = await call('POST', `/api/admin/correspondence/units/${unit}/active`, boss, {
+      active: true,
+    });
+    assert.equal(on.statusCode, 200, on.body);
+    assert.equal(await memberOf(hr1), true);
   });
 
   test('the intake list names what was scanned but never entered the book', async () => {

@@ -57,6 +57,23 @@ import { useDialogs } from '../components/DialogProvider.jsx';
  * gets 403s from the API regardless of what is drawn.
  */
 
+/** One administration tab. Kept on one line: a two-line tab reads as two tabs. */
+function AdminTabButton({ item, active, onSelect }) {
+  return (
+    <button
+      onClick={() => onSelect(item.key)}
+      className={`flex items-center gap-1.5 whitespace-nowrap border-b-2 px-4 py-2 text-sm transition-colors ${
+        active
+          ? 'border-primary font-medium text-primary'
+          : 'border-transparent text-text-muted hover:text-text'
+      }`}
+    >
+      <item.icon size={15} />
+      {item.label}
+    </button>
+  );
+}
+
 export default function Admin() {
   const { user } = useAuth();
   // Read from the URL so a tile can open one screen directly, and so any of the
@@ -88,21 +105,41 @@ export default function Admin() {
     <div className="space-y-4">
       <h2 className="text-lg font-semibold text-text">إدارة النظام</h2>
 
-      <div className="flex flex-row gap-1 border-b border-border">
-        {TABS.map((item) => (
-          <button
-            key={item.key}
-            onClick={() => setTab(item.key)}
-            className={`flex items-center gap-1.5 border-b-2 px-4 py-2 text-sm transition-colors ${
-              tab === item.key
-                ? 'border-primary font-medium text-primary'
-                : 'border-transparent text-text-muted hover:text-text'
-            }`}
-          >
-            <item.icon size={15} />
-            {item.label}
-          </button>
+      {/*
+        The last two tabs configure the other area, not this one: «الأقسام ومجلد
+        الاستلام» and «نماذج الكتب» are where الوارد والصادر is set up. In one
+        undifferentiated row of fifteen they read as two more system screens, and
+        an administrator looking for «where do I add a department» had no reason
+        to look at the end of the row. So the row breaks where the registry says
+        it does — the tabs it marks with group: 'mail' — and the break is named.
+
+        The break is found rather than hard-coded at a position, so adding a
+        fourteenth ordinary tab cannot leave the heading in the wrong place.
+      */}
+      {/*
+        The row wraps. Fifteen tabs never fitted one line: they pushed the whole
+        page sideways, and the two mail tabs at the end were the ones off screen —
+        exactly the ones the heading below is meant to point out. The mail run is
+        one wrapping unit, so its heading can never be stranded at the end of a
+        line with its tabs on the next.
+      */}
+      <div className="flex flex-row flex-wrap gap-1 border-b border-border">
+        {TABS.filter((item) => item.group !== 'mail').map((item) => (
+          <AdminTabButton key={item.key} item={item} active={tab === item.key} onSelect={setTab} />
         ))}
+
+        {TABS.some((item) => item.group === 'mail') ? (
+          <div role="group" aria-label="إعداد الوارد والصادر" className="flex flex-row items-stretch gap-1">
+            {/* Decoration: it says nothing a screen reader needs to hear. */}
+            <span aria-hidden="true" className="mx-1 w-px self-stretch bg-border" />
+            <span aria-hidden="true" className="self-center whitespace-nowrap text-[11px] text-text-muted">
+              الوارد والصادر
+            </span>
+            {TABS.filter((item) => item.group === 'mail').map((item) => (
+              <AdminTabButton key={item.key} item={item} active={tab === item.key} onSelect={setTab} />
+            ))}
+          </div>
+        ) : null}
       </div>
 
       {tab === 'users' ? <UsersTab /> : null}
@@ -1442,7 +1479,7 @@ const SETTING_LABELS = {
   'auth.password_require_uppercase': 'إلزام حرف لاتيني كبير (A-Z)',
   'auth.password_require_digit': 'إلزام رقم',
   'auth.password_require_symbol': 'إلزام رمز (! @ # %)',
-  'correspondence.enabled': 'وحدة المراسلات',
+  'correspondence.enabled': 'وحدة الوارد والصادر',
   'forms.enabled': 'النماذج الرسمية',
   'signing.enabled': 'التوقيع بالقلم',
   'ocr.enabled': 'المسح الضوئي للنصوص (OCR)',
@@ -1497,13 +1534,13 @@ const SETTING_SECTIONS = [
     keys: ['ocr.enabled', 'extraction.enabled', 'classification.enabled'],
   },
   {
-    title: 'المراسلات',
-    hint: 'مفتاح تشغيل سجل الوارد والصادر. الأقسام وقلم الوارد تُعرَّف في «الإدارة ← المراسلات».',
+    title: 'الوارد والصادر',
+    hint: 'مفتاح تشغيل سجل الوارد والصادر. الأقسام وقلم الوارد تُعرَّف في «الإدارة ← الأقسام ومجلد الاستلام».',
     keys: ['correspondence.enabled'],
   },
   {
-    title: 'النماذج والتوقيع',
-    hint: 'مفتاحا الكتب المولّدة من نماذج Word، والتوقيع بخط اليد على الوثائق. النماذج نفسها تُعرَّف في «الإدارة ← النماذج».',
+    title: 'نماذج الكتب والتوقيع',
+    hint: 'مفتاحا الكتب المولّدة من نماذج Word، والتوقيع بخط اليد على الوثائق. النماذج نفسها تُعرَّف في «الإدارة ← نماذج الكتب».',
     keys: ['forms.enabled', 'signing.enabled'],
   },
   {

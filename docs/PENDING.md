@@ -5,7 +5,7 @@ already known. Kept here so nothing depends on anyone's memory. When an
 answer arrives, write it in the last column with its date; when an item is
 built, remove it and say so in the commit message.
 
-Last reviewed: 2026-09-27.
+Last reviewed: 2026-09-30.
 
 ## Questions for the institute
 
@@ -16,7 +16,7 @@ phase each one blocks is started.
 |---|----------|----------------|--------|--------|
 | 1 | On incoming letters, are the header details (number, date, subject, addressee) **typed or handwritten**? | The recognition pilot cannot read handwriting and misreads Arabic-Indic digits in some fonts. | Phase 2 | 2026-09-27: handwritten, and hard even for a person to read. Phase 2 dropped. |
 | 2 | Must the book numbers be **gapless** by regulation? | Already built gapless: an entry is annulled in place and keeps its number, and the starting number can be set so a paper book continues where it stopped. Confirmation only. | Confirmation | |
-| 3 | The **real list of departments**, and which staff group belongs to each. | Entered on الإدارة ← المراسلات. The demo seed has two departments; the real ones are needed at go-live. | Go-live | |
+| 3 | The **real list of departments**, and which staff group belongs to each. | Entered on الإدارة ← الأقسام ومجلد الاستلام. The demo seed has two departments; the real ones are needed at go-live. | Go-live | |
 | 4 | Is a signature **drawn on a tablet** and stamped on the letter acceptable as an official signature, or only as a picture of one? (Iraqi Electronic Signature and Electronic Transactions Law No. 78 of 2012.) | Signing is built as a facsimile with an audit trail (who, when, which bytes), not a cryptographic signature, and the tab says so. Keep `signing.enabled` off in production until this is answered in writing. | Switching signing on in production | |
 | 5 | How **complex are the official letter templates**: logos, tables, multiple columns, footers? | Letter formats are built on Word templates converted through LibreOffice. The administration screen's «معاينة» renders any template with sample values, so each real template can be checked for fidelity as it is uploaded. | Confirmation per template | |
 | 6 | Should printed outgoing letters carry a **QR code** linking back to the archived letter, so a recipient can verify it? | The existing download option already stamps a QR code on any document on the way out (`?stamp=qr`); nothing more is needed unless a permanent, printed-in code is wanted. | Confirmation | |
@@ -29,6 +29,20 @@ phase each one blocks is started.
 | 2 | **Automatic routing assist.** The system reads the header of a scanned incoming letter and proposes the department and type. | **Dropped 2026-09-27.** Letter headers are handwritten; a machine would misread what people already struggle to read. |
 | 3 | **Official letter formats.** Word templates with `#placeholders#` (the older `{{…}}` form still accepted), uploaded and labelled by an administrator, assigned to groups, filled by users, converted to PDF and filed as new documents with metadata and provenance; optional automatic approval. | Built 2026-09-27. Off by default behind `forms.enabled`. Guide: `docs/FORMS_SIGNING_TEST_GUIDE.md`. |
 | 4 | **Signing on a tablet.** A signature and handwritten notes drawn in the browser on a rendered page and flattened into a NEW version of the file — a PDF, or a scanned image (JPEG, PNG, WebP, single-page TIFF) which keeps its format — with a ledger of who signed which bytes and when. | Built 2026-09-27; image signing added 2026-09-28. Off by default behind `signing.enabled`. Gated on question 4 for production use. |
+
+2026-09-30 — **the two areas.** Everyday document work and letter work no longer
+share one flat menu. The system is now «الوثائق والأرشيف» and «الوارد والصادر»,
+plus «إدارة النظام» for super admins, each area declared once in
+`client/src/navigation.js` and drawn as its own home-page section in a fixed
+order. The mail area lists its screens directly instead of hiding them behind a
+tile, and an area with nothing to offer is not drawn at all. «تسجيل كتاب» is the
+letter that ARRIVED and «إنشاء كتاب» the letter WE WRITE; «الوارد إليّ» is offered
+only to a member of a department (a new `member` flag on the correspondence status
+reply, honest for super admins too); «المتابعة» became «متابعة الإحالات» so it can
+no longer be confused with «ما أتابعه»; the two administration tabs became
+«الأقسام ومجلد الاستلام» and «نماذج الكتب». No schema change, no new migration, no
+route or `?tab=` key changed. The letters folder keeps its name and place and is
+marked «وارد وصادر» in the tree.
 
 ## Loose ends already known
 
@@ -45,8 +59,8 @@ Letter formats and signing (found while building, 2026-09-27):
 - Pinch-zoom in «تحريك» mode zooms the browser viewport, not the page element; element zoom is by the toolbar buttons.
 
 Correspondence (found in the review of 2026-09-26):
-- **Test guide** (`docs/CORRESPONDENCE_TEST_GUIDE.md`): steps 4.3 and 5.1 ask for uploads the correspondence screens do not offer; step 6.3 says the المراسلات tile disappears when the module is off, but it stays.
-- **Register and follow-up**: no print or export of السجل or المتابعة; no filters or sorting on المتابعة; a registered letter's subject or counterparty cannot be corrected except by annulling and registering again.
+- **Test guide** (`docs/CORRESPONDENCE_TEST_GUIDE.md`): steps 4.3 and 5.1 ask for uploads the correspondence screens do not offer — they are done from the folder screen.
+- **Register and follow-up**: no print or export of السجل or متابعة الإحالات; no filters or sorting on متابعة الإحالات; a registered letter's subject or counterparty cannot be corrected except by annulling and registering again.
 - **Department archive folder**: stored and shown on the unit, but nothing files a finished letter into it and no screen sets it.
 - **Notifications and audit gaps**: no notification to a department when its copy is withdrawn or the letter is annulled; no audit entry for receipt, done, or dispatched.
 - **Webhooks created before signing** keep sending unsigned deliveries until each secret is rotated from الإدارة ← الويب هوكس and handed to the receiver.
