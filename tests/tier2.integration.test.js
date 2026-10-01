@@ -462,6 +462,41 @@ describe('Tier 2 features', { skip: CONFIGURED ? false : target.reason }, () => 
     assert.equal(response.statusCode, 400);
   });
 
+  test('a relation is removed only by someone who could have made it', async () => {
+    // The link is written from a document alice cannot see. A relation id was
+    // all that stood between her and deleting it — and other modules hang
+    // meaning on this table, so "anybody may delete any row" was a way to
+    // rewrite records that are not theirs.
+    const hidden = await upload(bossCookie, 'private', 'board-minutes.txt', 'محضر مجلس');
+    const visible = await upload(aliceCookie, 'legal', 'annex-to-minutes.txt', 'ملحق المحضر');
+
+    const linked = await call('POST', `/api/documents/${hidden}/relations`, bossCookie, {
+      toDocument: visible,
+      relationType: 'attachment',
+    });
+    assert.equal(linked.statusCode, 200, linked.body);
+
+    const relationId = (await call('GET', `/api/documents/${hidden}/relations`, bossCookie))
+      .json()
+      .relations[0]
+      .relationId;
+
+    const refused = await call('DELETE', `/api/relations/${relationId}`, aliceCookie);
+    assert.equal(refused.statusCode, 404, 'the same refusal relating would have given her');
+    assert.equal(refused.json().error, 'not_found', 'and it does not confirm the relation exists');
+
+    const still = await sql`
+      SELECT COUNT(*) AS n FROM dbo.document_relations WHERE relation_id = ${relationId}
+    `.execute(db);
+    assert.equal(Number(still.rows[0].n), 1, 'the link is still there');
+
+    // The owner of the end it was written from still removes it.
+    assert.equal((await call('DELETE', `/api/relations/${relationId}`, bossCookie)).statusCode, 200);
+
+    const missing = await call('DELETE', `/api/relations/${relationId}`, bossCookie);
+    assert.equal(missing.statusCode, 404, 'and a relation that is gone says so');
+  });
+
   // ── Tags ───────────────────────────────────────────────────────────────
 
   test('tags are created on use, listed with counts, and drive retrieval', async () => {

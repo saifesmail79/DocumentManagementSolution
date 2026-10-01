@@ -420,24 +420,33 @@ export function moduleForPath(pathname, user) {
  * menu comes to offer a screen the page then refuses.
  *
  * `status` is the correspondence status reply; `formsUsable` says whether this
- * person has a letter template they can fill. The two are independent — with
- * correspondence switched off, a usable template still makes «إنشاء كتاب» the
- * area's one action, because writing an outgoing letter still works.
+ * person has a letter template they can fill.
+ *
+ * ─── The area exists only with the master switch on ─────────────────────────
+ *
+ * `correspondence.enabled` is the master switch of the whole area, not just of
+ * the register: with it off the system is the core document management and
+ * nothing else — no mail screens, no «إنشاء كتاب», no «التوقيع» and no paper
+ * trail — because an institute that refuses the letter process refuses all of
+ * it, not the register alone. So nothing is offered here unless the status says
+ * `enabled`, and `formsUsable` can no longer carry the area on its own: the
+ * server now reports a format as usable only while the master switch is on, and
+ * this reads the same rule on its own rather than trusting that it travelled.
  */
 export function mailActions(status, formsUsable = false) {
+  if (status?.enabled !== true) return [];
+
   const actions = [];
 
-  if (status?.enabled === true) {
-    const correspondence = MODULES.find((module) => module.key === 'correspondence');
-    for (const tab of visibleTabs(correspondence, status)) {
-      actions.push({
-        key: tab.key,
-        label: tab.label,
-        icon: tab.icon,
-        description: tab.description,
-        to: `${correspondence.to}?tab=${tab.key}`,
-      });
-    }
+  const correspondence = MODULES.find((module) => module.key === 'correspondence');
+  for (const tab of visibleTabs(correspondence, status)) {
+    actions.push({
+      key: tab.key,
+      label: tab.label,
+      icon: tab.icon,
+      description: tab.description,
+      to: `${correspondence.to}?tab=${tab.key}`,
+    });
   }
 
   if (formsUsable === true) {
@@ -467,6 +476,12 @@ export function mailActions(status, formsUsable = false) {
  * not be fetched, the mail area comes back with `failed: true` so the page can
  * say so and offer to try again. Dropping it silently would tell a department
  * member on a flaky connection that they have no mail work, which is false.
+ *
+ * A usable letter template no longer keeps the mail area alive on its own. It
+ * used to — «إنشاء كتاب» was treated as a feature that worked without the
+ * register — but `correspondence.enabled` is now the master switch of the whole
+ * area, so with it off this page shows the core document management and no mail
+ * heading at all. `mailActions` holds that rule.
  *
  * @param {object}   args
  * @param {object}   args.user

@@ -94,6 +94,13 @@ export const ACTION = Object.freeze({
   MAIL_ANNULLED: 'mail.annulled',
   MAIL_UNIT_CHANGED: 'mail.unit_changed',
   MAIL_COUNTER_SET: 'mail.counter_set',
+  // The paper trail: a rescan of the same letter filed as a new version and
+  // named by what was done on the paper, and the custody log of where the
+  // paper itself went. Both are claims about a physical object that only a
+  // person can witness, which is exactly the kind of claim a trail must carry
+  // an actor and a time for.
+  MAIL_PAPER_VERSION: 'mail.paper_version',
+  MAIL_PAPER_MOVED: 'mail.paper_moved',
   // Letter formats (النماذج): configuring templates, and producing a letter.
   FORM_TEMPLATE_CREATED: 'form_template.created',
   FORM_TEMPLATE_UPDATED: 'form_template.updated',
@@ -174,6 +181,11 @@ export const CATEGORY = Object.freeze({
     ACTION.MAIL_REGISTERED,
     ACTION.MAIL_ROUTED,
     ACTION.MAIL_ANNULLED,
+    // What happened to the paper is part of what happened to the document: the
+    // new version is in the documents view already, and the act that produced
+    // it must not be filed under configuration, away from it.
+    ACTION.MAIL_PAPER_VERSION,
+    ACTION.MAIL_PAPER_MOVED,
     ACTION.FORM_LETTER_CREATED,
     ACTION.DOCUMENT_SIGNED,
   ],

@@ -116,6 +116,12 @@ const TRUNCATION_ORDER = [
   // The correspondence register. Transfers reference letters and units; letters
   // reference documents and units; units reference principals and folders — so
   // all of them go before documents, folders and principals.
+  //
+  // The paper trail goes first of all: version actions reference letters AND
+  // document_versions, movements reference letters, so both must empty before
+  // the letters they describe and before the versions further down the list.
+  'correspondence_version_actions',
+  'correspondence_movements',
   'correspondence_transfers',
   'correspondence',
   'correspondence_counters',

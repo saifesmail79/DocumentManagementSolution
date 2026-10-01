@@ -68,7 +68,16 @@ const DEFAULT_DPI = 300;
 /** Offered when the driver will not say what it supports. Mirrors the bridge's own fallback. */
 const FALLBACK_DPI_OPTIONS = [150, 200, 300, 600];
 
-export default function ScanPanel({ folderId, onUploaded }) {
+/**
+ * @param {object} props
+ * @param {string} [props.folderId] Where a scan is filed. Unused when `onScanned` is given.
+ * @param {Function} [props.onUploaded] Called after a scan was filed into `folderId`.
+ * @param {Function} [props.onScanned] Called with the assembled `File` INSTEAD of filing it.
+ *   The hand-off form: the caller owns the destination — a new version of an
+ *   existing letter, say — so the panel assembles the pages and stops there,
+ *   and the folder and title controls that belong to filing are not drawn.
+ */
+export default function ScanPanel({ folderId, onUploaded, onScanned }) {
   const [status, setStatus] = useState('checking');
   const [scanners, setScanners] = useState([]);
   const [scannerId, setScannerId] = useState('');
@@ -169,13 +178,26 @@ export default function ScanPanel({ folderId, onUploaded }) {
   }
 
   async function uploadScan() {
-    if (!pages.length || !folderId) return;
+    if (!pages.length || (!onScanned && !folderId)) return;
     setUploading(true);
     setError(null);
     try {
       const file = await pagesToPdfFile(pages, { title: title.trim() || undefined });
-      // The same endpoint a picked file goes through — no separate scan path.
-      await api.upload(folderId, file, { title: title.trim() || undefined });
+
+      /*
+       * Handed over rather than filed, when the caller asked for that.
+       *
+       * The PDF is assembled exactly as it is for an ordinary scan — same
+       * module, same page sizing — so the two paths cannot drift. What differs
+       * is only who decides where the bytes go, and the caller may well send
+       * them somewhere this panel knows nothing about.
+       */
+      if (onScanned) {
+        await onScanned(file);
+      } else {
+        // The same endpoint a picked file goes through — no separate scan path.
+        await api.upload(folderId, file, { title: title.trim() || undefined });
+      }
       setPages([]);
       setWarnings([]);
       setCoverage(null);
@@ -303,12 +325,17 @@ export default function ScanPanel({ folderId, onUploaded }) {
         </label>
       </div>
 
-      <TextField
-        label="عنوان الوثيقة"
-        value={title}
-        onChange={(event) => setTitle(event.target.value)}
-        placeholder="اتركه فارغاً لاستخدام اسم تلقائي"
-      />
+      {/* The title names a NEW document. In the hand-off form there is no new
+          document to name — the pages join one that already exists — so asking
+          for a title would be asking for something nothing would ever read. */}
+      {onScanned ? null : (
+        <TextField
+          label="عنوان الوثيقة"
+          value={title}
+          onChange={(event) => setTitle(event.target.value)}
+          placeholder="اتركه فارغاً لاستخدام اسم تلقائي"
+        />
+      )}
 
       {error ? <Alert tone="error">{error}</Alert> : null}
 
@@ -366,7 +393,9 @@ export default function ScanPanel({ folderId, onUploaded }) {
       <div className="flex flex-row items-center gap-2">
         {pages.length > 0 ? (
           <Button icon={Upload} onClick={uploadScan} disabled={uploading}>
-            {uploading ? 'جارٍ الرفع…' : 'حفظ كوثيقة'}
+            {onScanned
+              ? (uploading ? 'جارٍ التحضير…' : 'استخدام الصفحات الممسوحة')
+              : (uploading ? 'جارٍ الرفع…' : 'حفظ كوثيقة')}
           </Button>
         ) : null}
 

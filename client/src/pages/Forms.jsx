@@ -184,13 +184,22 @@ export default function Forms() {
   if (!status) return <Spinner />;
 
   if (!status.enabled) {
+    /*
+     * Two switches can hold this screen shut, and the refusal must name the one
+     * that is actually off: sending an administrator to «نماذج الكتب» when it is
+     * already on, and the master «الوارد والصادر» is what stopped it, is a
+     * screen pointing at the wrong door.
+     */
+    const masterOff = status.masterOff === true;
     return (
       <EmptyState
         icon={LayoutTemplate}
-        title="وحدة النماذج غير مفعّلة"
+        title={masterOff ? 'الوارد والصادر متوقف' : 'نماذج الكتب غير مفعّلة'}
         hint={
           user.isSuperAdmin
-            ? 'فعّلها من الإدارة ← الإعدادات (forms.enabled)، ثم ارفع النماذج من الإدارة ← نماذج الكتب.'
+            ? masterOff
+              ? 'نماذج الكتب جزء من الوارد والصادر، والمفتاح الرئيس متوقف. شغّله من الإدارة ← الإعدادات ← الوارد والصادر.'
+              : 'فعّلها من الإدارة ← الإعدادات ← الوارد والصادر ← نماذج الكتب، ثم ارفع النماذج من الإدارة ← نماذج الكتب.'
             : 'راجع مدير النظام إذا كانت مؤسستكم تعتمد نماذج كتب رسمية.'
         }
       />

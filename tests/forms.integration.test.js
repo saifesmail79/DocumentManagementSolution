@@ -352,8 +352,12 @@ describe('official letter formats', { skip: CONFIGURED ? false : target.reason }
     await storage.init();
 
     // Settings survive resetDatabase on purpose; a previous run's switch must
-    // not decide what "disabled" means in this one.
+    // not decide what "disabled" means in this one. `correspondence.enabled` is
+    // cleared with them because it is now the MASTER switch of this module: the
+    // formats answer only while both it and `forms.enabled` are on, so another
+    // suite's leftover would decide what this one is testing.
     await sql`DELETE FROM dbo.app_settings WHERE setting_key LIKE 'forms.%'`.execute(db);
+    await sql`DELETE FROM dbo.app_settings WHERE setting_key = 'correspondence.enabled'`.execute(db);
     await sql`DELETE FROM dbo.app_settings WHERE setting_key = 'upload.duplicate_policy'`.execute(db);
 
     const { buildApp } = await import('../src/app.js');
@@ -424,6 +428,12 @@ describe('official letter formats', { skip: CONFIGURED ? false : target.reason }
   });
 
   test('the switch turns on through the ordinary settings surface', async () => {
+    // TWO switches: the module's own, and `correspondence.enabled`, the master
+    // switch of «الوارد والصادر». The formats are a step of that area, so they
+    // answer only while both are on — every test below this line depends on it.
+    const master = await call('PUT', '/api/settings/correspondence.enabled', boss, { value: true });
+    assert.equal(master.statusCode, 200, master.body);
+
     const set = await call('PUT', '/api/settings/forms.enabled', boss, { value: true });
     assert.equal(set.statusCode, 200, set.body);
 
@@ -431,10 +441,58 @@ describe('official letter formats', { skip: CONFIGURED ? false : target.reason }
     assert.equal(status.json().enabled, true);
     assert.equal(status.json().templates, 0);
     assert.equal(typeof status.json().ready, 'boolean');
+    assert.equal(status.json().masterOff, undefined, 'nothing to explain while both are on');
 
     const adminStatus = await call('GET', '/api/admin/forms/status', boss);
     libreOffice = adminStatus.json().libreOffice === true;
     assert.equal(adminStatus.json().enabled, true);
+  });
+
+  test('the master switch outranks the module\'s own: formats off, and both say which', async () => {
+    const off = await call('PUT', '/api/settings/correspondence.enabled', boss, { value: false });
+    assert.equal(off.statusCode, 200, off.body);
+
+    try {
+      // `forms.enabled` is still on, so «enabled: false» alone would send an
+      // administrator to a switch that is already on. `masterOff` names the
+      // other one.
+      const status = await call('GET', '/api/forms/status', kateb);
+      assert.equal(status.statusCode, 200);
+      assert.deepEqual(status.json(), { enabled: false, masterOff: true });
+
+      const adminStatus = await call('GET', '/api/admin/forms/status', boss);
+      assert.equal(adminStatus.statusCode, 200);
+      assert.equal(adminStatus.json().enabled, false);
+      assert.equal(adminStatus.json().masterOff, true);
+      assert.equal(typeof adminStatus.json().libreOffice, 'boolean');
+
+      // And the routes refuse exactly as they do with the module's own switch
+      // off: one name, `forms_disabled`, whichever switch it was.
+      const templates = await call('GET', '/api/forms/templates', kateb);
+      assert.equal(templates.statusCode, 409);
+      assert.equal(templates.json().error, 'forms_disabled');
+
+      const generated = await call('POST', '/api/forms/generate', kateb, {
+        templateId: '1',
+        folderId: String(id.letters),
+        title: 'كتاب',
+        values: {},
+      });
+      assert.equal(generated.statusCode, 409);
+      assert.equal(generated.json().error, 'forms_disabled');
+
+      const admin = await call('GET', '/api/admin/forms/templates', boss);
+      assert.equal(admin.statusCode, 409);
+      assert.equal(admin.json().error, 'forms_disabled');
+    } finally {
+      // Restored whatever happened above: every later test in this file works
+      // with the area switched on.
+      await call('PUT', '/api/settings/correspondence.enabled', boss, { value: true });
+    }
+
+    const back = await call('GET', '/api/forms/status', kateb);
+    assert.equal(back.json().enabled, true);
+    assert.equal(back.json().masterOff, undefined);
   });
 
   test('only a super admin configures formats', async () => {

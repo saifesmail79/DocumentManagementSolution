@@ -125,9 +125,36 @@ import { extensionRefusal } from '../uploads/policy.js';
 
 const log = moduleLogger('signing');
 
-/** The stored switch. Off means every route answers "disabled" and no version is written. */
+/**
+ * The two switches that decide whether this module exists, as one answer.
+ *
+ * `correspondence.enabled` is the MASTER switch of «الوارد والصادر», and ink
+ * signing belongs to that area: what gets signed here is an official letter on
+ * its way out, and the whole point of the area's master switch is that an
+ * institute can keep the core document management and refuse the letter process
+ * — «most institutes may prefer handwriting». So the effective state is BOTH
+ * switches, and signing left on under a master that is off writes no version.
+ *
+ * `masterOff` exists only so a screen can say WHICH switch is off, rather than
+ * sending an administrator to a switch that is already on.
+ */
+export async function switchState() {
+  const [own, master] = await Promise.all([
+    getSetting('signing.enabled'),
+    getSetting('correspondence.enabled'),
+  ]);
+  return {
+    enabled: Boolean(own) && Boolean(master),
+    masterOff: Boolean(own) && !master,
+  };
+}
+
+/**
+ * The effective switch. Off means every route answers "disabled" and no version
+ * is written — whether it is this module's own switch or the master above it.
+ */
 export async function isEnabled() {
-  return Boolean(await getSetting('signing.enabled'));
+  return (await switchState()).enabled;
 }
 
 // ── The page-image cache ─────────────────────────────────────────────────
@@ -684,7 +711,13 @@ async function signability(state, { checkRenderer = true } = {}) {
  * is the kind of fact that leaks a whole story.
  */
 export async function describe({ userId, documentId }) {
-  if (!(await isEnabled())) return { ok: true, enabled: false };
+  const switches = await switchState();
+  // The shape is unchanged; `masterOff` rides along only when signing's own
+  // switch is on and the master above it is off, so the document page's panel
+  // can name the switch that is actually holding it shut.
+  if (!switches.enabled) {
+    return { ok: true, enabled: false, ...(switches.masterOff ? { masterOff: true } : {}) };
+  }
 
   const state = await signingState({ userId, documentId });
   if (!state || !state.canBrowse) return { ok: false, reason: 'not_found' };

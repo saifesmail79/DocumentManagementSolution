@@ -6,6 +6,9 @@ import {
   FileText,
   FilePlus,
   CheckCircle2,
+  CopyPlus,
+  MapPin,
+  Reply,
   Upload,
   XCircle,
   Send,
@@ -17,6 +20,7 @@ import { formatDate, formatDateTime } from '../format.js';
 import { Card, Spinner, EmptyState, Alert, Button, TextField } from '../components/ui.jsx';
 import MailAreaNav from '../components/MailAreaNav.jsx';
 import ScanPanel from '../components/ScanPanel.jsx';
+import LetterCopyDialog, { describePartialSave } from '../components/LetterCopyDialog.jsx';
 import { useDialogs } from '../components/DialogProvider.jsx';
 import { useHelpTopic } from '../help/HelpContext.jsx';
 import { useMail } from '../MailContext.jsx';
@@ -193,7 +197,24 @@ export default function Correspondence() {
       <MailAreaNav active={tab} onSelect={setTab} />
 
       {tab === 'queue' ? <Queue /> : null}
-      {tab === 'intake' ? <Intake intakeFolderId={status.intakeFolderId} /> : null}
+      {/* The unit names travel down to the returned-copy dialog, where they are
+          the likeliest things to type into «من قام بالإجراء».
+
+          So does the one capability that dialog needs: whether this reader is
+          the mail room, because only the mail room may be answered for with
+          «الورقة عادت إلى القلم» and the last holder's name. It is read off
+          `permitted` — the registry's own filtered list — rather than re-tested
+          against the status, for the reason the block above gives: الاستلام
+          والتسجيل is a mail-room screen in CORRESPONDENCE_TABS, so being allowed
+          to stand on it IS the answer, and there is no second copy of the rule
+          here to drift out of step with it. */}
+      {tab === 'intake' ? (
+        <Intake
+          intakeFolderId={status.intakeFolderId}
+          units={status.units}
+          registrar={permitted.includes('intake')}
+        />
+      ) : null}
       {tab === 'register' ? <Register units={status.units} /> : null}
       {tab === 'followup' ? <FollowUp /> : null}
     </div>
@@ -209,7 +230,7 @@ export default function Correspondence() {
  * Anything scanned but not yet registered is listed below, so no letter can
  * sit outside the book unnoticed.
  */
-function Intake({ intakeFolderId }) {
+function Intake({ intakeFolderId, units, registrar = false }) {
   const navigate = useNavigate();
   const fileInput = useRef(null);
   const [pending, setPending] = useState(null);
@@ -282,6 +303,19 @@ function Intake({ intakeFolderId }) {
 
       <ScanPanel folderId={intakeFolderId} onUploaded={load} />
 
+      {/*
+        The second door into this screen, and the one that stops a returning sheet
+        being registered twice.
+
+        A clerk holding a paper that has come back from the director's office is
+        standing in exactly the same place as one holding a brand-new letter, and
+        the only thing telling the two apart is whether the letter already has a
+        number. Left to «كتاب جديد» the returning sheet draws a second number and
+        the register grows two entries for one letter, which is the mistake this
+        card exists to make impossible.
+      */}
+      <ReturnedCopyCard units={units} registrar={registrar} />
+
       <Card className="p-4">
         <h3 className="mb-2 text-sm font-semibold text-text">بانتظار التسجيل</h3>
         {pending.documents.length === 0 ? (
@@ -309,6 +343,200 @@ function Intake({ intakeFolderId }) {
         )}
       </Card>
     </div>
+  );
+}
+
+/**
+ * Where the paper is, in one chip — shown wherever a letter is listed.
+ *
+ * Exported-shaped but kept local: the register and this screen are the two places
+ * that list letters, and both are in this file. The document tab draws its own,
+ * larger, version beside the trail it belongs to.
+ */
+function LocationChip({ location }) {
+  if (location?.state !== 'out') return null;
+
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[11px] text-amber-600"
+      title={location.since ? `منذ ${formatDateTime(location.since)}` : undefined}
+    >
+      <MapPin size={11} />
+      مع {location.personName ?? 'جهة غير مسمّاة'}
+    </span>
+  );
+}
+
+/** «مُجاب» — this وارد has a صادر answering it. */
+function AnsweredBadge() {
+  return (
+    <span className="inline-flex items-center gap-1 rounded border border-green-200 bg-green-50 px-1.5 py-0.5 text-[11px] text-green-600">
+      <Reply size={11} />
+      مُجاب
+    </span>
+  );
+}
+
+/**
+ * «نسخة معادة لكتاب مسجّل» — the returning sheet, added to the letter it belongs to.
+ *
+ * The letters whose paper is out are listed rather than searched, because the
+ * clerk handed them out herself and recognises them on sight; the search beside
+ * the list is for the sheet that travelled without being recorded, which is the
+ * case the owner warned about — «the letter could move between departments without
+ * reaching Zainab».
+ */
+function ReturnedCopyCard({ units, registrar = false }) {
+  const [out, setOut] = useState(null);
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState(null);
+  const [picked, setPicked] = useState(null);
+  // What the save landed and what it did not — see describePartialSave.
+  const [warning, setWarning] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      setOut((await api.correspondence.letters({ location: 'out' })).letters ?? []);
+    } catch {
+      setOut([]);
+    }
+  }, []);
+
+  /*
+   * The search, hoisted out of its effect so that filing a copy can re-run it.
+   *
+   * It used to be keyed on the typed text alone, so a copy filed from a SEARCH
+   * result left that row exactly as it was — still «مع الشؤون المالية» for a
+   * sheet now back at the counter — and re-opening the dialog on the stale row
+   * handed the previous holder's name to the next copy. The typed query is kept,
+   * because the clerk is still working through the letters it found.
+   */
+  const search = useCallback(async (text) => {
+    const wanted = text.trim();
+    if (!wanted) {
+      setResults(null);
+      return;
+    }
+    try {
+      const found = await api.correspondence.letters({ q: wanted });
+      setResults(found.letters ?? []);
+    } catch {
+      setResults([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  useEffect(() => {
+    if (!query.trim()) {
+      setResults(null);
+      return undefined;
+    }
+    // One request per thought, as every other search on this page does.
+    const timer = setTimeout(() => search(query), 300);
+    return () => clearTimeout(timer);
+  }, [query, search]);
+
+  const unitNames = (units ?? []).map((unit) => unit.name);
+  // The people the papers are currently with, offered beside the unit names: the
+  // sheet usually comes back from whoever it went to.
+  const holders = (out ?? []).map((letter) => letter.location?.personName);
+
+  /*
+   * Annulled letters are filtered once, for both lists.
+   *
+   * A struck قيد accepts no copies — the server refuses them — so offering
+   * «نسخة معادة» beside one buys the clerk a wasted scan and nowhere to file the
+   * sheet. The predicate used to sit on the search path only, which left the
+   * default list, the papers that are out, offering exactly that.
+   */
+  const list = (results ?? out ?? []).filter((letter) => letter.status !== 'annulled');
+
+  return (
+    <Card className="p-4">
+      <h3 className="mb-1 text-sm font-semibold text-text">نسخة معادة لكتاب مسجّل</h3>
+      <p className="mb-3 text-xs text-text-muted">
+        عادت الورقة مُهمَّشة أو مؤشَّرة؟ اخترها من القائمة — تُحفظ إصداراً جديداً للكتاب نفسه
+        دون سحب رقم جديد.
+      </p>
+
+      {/* The dialog closes on a half-landed save, because the scan itself IS
+          filed; this is where what did not land gets said. */}
+      {warning ? (
+        <div className="mb-3">
+          <Alert tone="warning">{warning}</Alert>
+        </div>
+      ) : null}
+
+      <div className="mb-3">
+        <TextField
+          label="بحث برقم الكتاب أو موضوعه"
+          placeholder="مثال: 42/2026"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          hint="اتركه فارغاً لعرض الكتب التي ورقتها خارج القلم."
+        />
+      </div>
+
+      {!out ? (
+        <Spinner />
+      ) : list.length === 0 ? (
+        <p className="text-sm text-text-muted">
+          {query
+            ? 'لا كتب مطابقة في الدفترين.'
+            : 'لا كتب ورقتها خارج القلم. ابحث برقم الكتاب إن عادت ورقة لم يُسجَّل تسليمها.'}
+        </p>
+      ) : (
+        <ul className="divide-y divide-border/50">
+          {list.slice(0, 25).map((letter) => (
+            <li key={letter.letterId} className="flex flex-wrap items-center gap-2 py-2">
+              <span className="num shrink-0 text-xs font-semibold text-primary">
+                {letter.reference}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-sm text-text">{letter.subject}</span>
+              <LocationChip location={letter.location} />
+              {letter.location?.since ? (
+                <span className="num shrink-0 text-xs text-text-muted">
+                  منذ {formatDateTime(letter.location.since)}
+                </span>
+              ) : null}
+              <Button
+                icon={CopyPlus}
+                onClick={() => {
+                  // A warning belongs to the save that earned it.
+                  setWarning(null);
+                  setPicked(letter);
+                }}
+                className="!px-3 !py-1 text-xs"
+              >
+                نسخة معادة
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {picked ? (
+        <LetterCopyDialog
+          letter={picked}
+          location={picked.location}
+          names={[...holders, ...unitNames]}
+          registrar={registrar}
+          onClose={() => setPicked(null)}
+          onDone={(saved) => {
+            setPicked(null);
+            setWarning(describePartialSave(saved));
+            // The paper may have come back in the same step, which takes the
+            // letter off this very list — and off the search results beside it,
+            // which are what the clerk is looking at once she has typed.
+            load();
+            search(query);
+          }}
+        />
+      ) : null}
+    </Card>
   );
 }
 
@@ -634,6 +862,15 @@ function Register() {
                 <th className="px-3 py-2 font-medium">تاريخ الكتاب</th>
                 <th className="px-3 py-2 font-medium">تاريخ التسجيل</th>
                 <th className="px-3 py-2 font-medium">الحالة</th>
+                {/*
+                  Where the SHEET is, which the status cannot say.
+
+                  «محال» describes the register entry; the paper may meanwhile be
+                  on the director's desk, and the two facts move independently.
+                  Given its own column rather than squeezed beside the status, so
+                  neither is read as qualifying the other.
+                */}
+                <th className="px-3 py-2 font-medium">الورقة</th>
                 {direction === 'in' ? <th className="px-3 py-2 font-medium">عند الأقسام</th> : null}
                 <th className="px-3 py-2 font-medium" />
               </tr>
@@ -668,7 +905,19 @@ function Register() {
                     {formatDate(letter.registeredAt)}
                   </td>
                   <td className="whitespace-nowrap px-3 py-2">
-                    <StatusChip status={letter.status} />
+                    <span className="flex flex-wrap items-center gap-1">
+                      <StatusChip status={letter.status} />
+                      {/* Only on وارد: an outgoing letter carries «رد على …» on
+                          its own page instead, and nothing answers it. */}
+                      {letter.direction === 'in' && letter.answered ? <AnsweredBadge /> : null}
+                    </span>
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-2">
+                    {letter.location?.state === 'out' ? (
+                      <LocationChip location={letter.location} />
+                    ) : (
+                      <span className="text-xs text-text-muted">في القلم</span>
+                    )}
                   </td>
                   {direction === 'in' ? (
                     <td className="px-3 py-2">

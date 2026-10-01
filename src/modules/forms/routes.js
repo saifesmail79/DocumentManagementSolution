@@ -8,9 +8,13 @@
  *   • /api/admin/forms  — super-admin configuration of the formats themselves.
  *
  * Every route except the two `/status` routes answers 409 `forms_disabled`
- * while the stored switch is off, so an install that has not adopted letter
- * formats carries the code inert. The status routes answer regardless, because
- * that is how the client knows whether to render anything at all.
+ * while the switch is off, so an install that has not adopted letter formats
+ * carries the code inert. "The switch" is two settings read as one: this
+ * module's own `forms.enabled` AND `correspondence.enabled`, the master switch
+ * of «الوارد والصادر» — see `switchState` in service.js. The status routes
+ * answer regardless, because that is how the client knows whether to render
+ * anything at all, and they carry `masterOff` so it can name the switch that is
+ * actually off.
  *
  * ─── What lives here and not in the service ─────────────────────────────────
  *

@@ -371,7 +371,11 @@ describe('ink signing (التوقيع)', { skip: SKIP }, () => {
     // must not decide what "disabled" means in this one. The upload policy is
     // cleared too, because one case below sets it and a crash mid-run would
     // otherwise leave every later upload refused.
-    await sql`DELETE FROM dbo.app_settings WHERE setting_key IN ('signing.enabled', 'upload.allowed_extensions')`.execute(db);
+    // `correspondence.enabled` is cleared with them because it is now the MASTER
+    // switch of this module: signing answers only while both it and
+    // `signing.enabled` are on, so another suite's leftover value would decide
+    // what "disabled" means here.
+    await sql`DELETE FROM dbo.app_settings WHERE setting_key IN ('signing.enabled', 'upload.allowed_extensions', 'correspondence.enabled')`.execute(db);
 
     const { buildApp } = await import('../src/app.js');
     app = await buildApp({ logger: false });
@@ -483,11 +487,59 @@ describe('ink signing (التوقيع)', { skip: SKIP }, () => {
   });
 
   test('the switch turns on through the ordinary settings surface', async () => {
+    // TWO switches: signing's own, and `correspondence.enabled`, the master
+    // switch of «الوارد والصادر». Signing is part of that area — what gets
+    // signed is an official letter — so it answers only while both are on, and
+    // every test below this line depends on it.
+    const master = await call('PUT', '/api/settings/correspondence.enabled', boss, { value: true });
+    assert.equal(master.statusCode, 200, master.body);
+
     const set = await call('PUT', '/api/settings/signing.enabled', boss, { value: true });
     assert.equal(set.statusCode, 200, set.body);
 
     const status = await call('GET', '/api/signing/status', signer);
     assert.equal(status.json().enabled, true);
+    assert.equal(status.json().masterOff, undefined, 'nothing to explain while both are on');
+  });
+
+  test('the master switch outranks signing\'s own: off, and the status says which', async () => {
+    const off = await call('PUT', '/api/settings/correspondence.enabled', boss, { value: false });
+    assert.equal(off.statusCode, 200, off.body);
+
+    try {
+      // `signing.enabled` is still on, so «enabled: false» on its own would send
+      // an administrator to a switch that is already on.
+      const status = await call('GET', '/api/signing/status', signer);
+      assert.equal(status.statusCode, 200);
+      assert.equal(status.json().enabled, false);
+      assert.equal(status.json().masterOff, true);
+
+      // And every route refuses by the one name, exactly as it does when
+      // signing's own switch is the one that is off.
+      const described = await call('GET', `/api/signing/documents/${doc.plain}`, signer);
+      assert.equal(described.statusCode, 409);
+      assert.equal(described.json().error, 'signing_disabled');
+
+      const geometry = await call('GET', `/api/signing/documents/${doc.plain}/pages`, signer);
+      assert.equal(geometry.statusCode, 409);
+
+      const page = await call('GET', `/api/signing/documents/${doc.plain}/pages/1`, signer);
+      assert.equal(page.statusCode, 409);
+
+      const signed = await call('POST', `/api/signing/documents/${doc.plain}/sign`, signer, {
+        version: 1,
+        pages: [],
+      });
+      assert.equal(signed.statusCode, 409);
+      assert.equal(signed.json().error, 'signing_disabled');
+    } finally {
+      // Restored whatever happened above: every later test signs something.
+      await call('PUT', '/api/settings/correspondence.enabled', boss, { value: true });
+    }
+
+    const back = await call('GET', '/api/signing/status', signer);
+    assert.equal(back.json().enabled, true);
+    assert.equal(back.json().masterOff, undefined);
   });
 
   // ── describe ───────────────────────────────────────────────────────────

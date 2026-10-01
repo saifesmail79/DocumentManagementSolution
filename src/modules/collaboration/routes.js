@@ -235,7 +235,13 @@ export async function collaborationRoutes(app) {
   );
 
   app.delete('/relations/:relationId', async (request, reply) =>
-    send(reply, await unrelate({ relationId: parseId(request.params.relationId) })),
+    send(
+      reply,
+      await unrelate({
+        userId: request.user.userId,
+        relationId: parseId(request.params.relationId),
+      }),
+    ),
   );
 
   // ── Tags ───────────────────────────────────────────────────────────────

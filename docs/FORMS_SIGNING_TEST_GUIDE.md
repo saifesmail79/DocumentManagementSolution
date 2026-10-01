@@ -4,14 +4,29 @@ Phases 3 and 4 of the correspondence plan. Both are switched OFF by default and
 carry no cost while off. Follow this from top to bottom; each step names the
 screen and the words on it.
 
+**Both now sit under a master switch.** `correspondence.enabled` is the master
+switch of the whole **الوارد والصادر** area, and letter formats and ink signing
+are steps of that area rather than features beside it: a format exists so an
+outgoing letter can be written, and a letter is written to be registered as
+صادر. So each of these two works only while **its own switch AND the master
+switch** are on. Switching the master off leaves the core document management
+and nothing else — no mail screens, no **إنشاء كتاب**, no **التوقيع** tab — which
+is what an institute that prefers handwritten letters asked for.
+`docs/CORRESPONDENCE_TEST_GUIDE.md` section 9 proves it end to end.
+
 The development database already holds a demo template («كتاب صادر — نموذج
 تجريبي») and a generated, signed letter (document 37) from the automated run
 of 2026-09-27, so you can look before you build.
 
 ## 0. Switch on (your admin account, 1 minute)
 
-1. **الإدارة ← الإعدادات ← نماذج الكتب والتوقيع**: switch on «النماذج الرسمية»
-   and «التوقيع بالقلم». The change takes effect within ten seconds.
+1. **الإدارة ← الإعدادات ← الوارد والصادر**: one section, three rows in this
+   order — **الوارد والصادر (المفتاح الرئيس)**, **نماذج الكتب**,
+   **التوقيع بخط اليد**. Switch on the master first, then the two under it. The
+   change takes effect within ten seconds.
+   A sub-switch left on while the master is off reads **لا يعمل ما دام المفتاح
+   الرئيس متوقفاً** under its label, because a control that says «مفعّل» for
+   something that does nothing is the one thing this panel must not do.
 2. **الإدارة ← نماذج الكتب** shows a readiness line: LibreOffice must be present
    for letters (it is on this machine). The signing tab tells you if
    Ghostscript is missing.
@@ -72,9 +87,11 @@ of 2026-09-27, so you can look before you build.
 ## 3. Write a letter (log in as a member of an allowed group)
 
 1. The home page shows **إنشاء كتاب** in the **الوارد والصادر** section, and
-   only to someone with a usable template. With correspondence switched off it
-   is the only thing in that section; with no usable template the section is not
-   drawn for that person at all. Open it, pick the template.
+   only to someone with a usable template **while the master switch is on**. A
+   usable template no longer keeps that section alive on its own: with the master
+   off there is no section and no إنشاء كتاب, however نماذج الكتب reads. With no
+   usable template the section is not drawn for that person at all. Open it, pick
+   the template.
 2. Fill the fields, choose the destination folder. When the template is
    assigned to folders, only those you may upload into are offered and a
    single one is chosen for you; otherwise any folder you may upload into is
@@ -91,7 +108,10 @@ of 2026-09-27, so you can look before you build.
 ## 4. Sign a page (any single-file PDF or image; the generated letter is ideal)
 
 Signing has no screen of its own and no place in the menu: it is a tab on the
-letter's own page, because a signature is always applied to one document.
+letter's own page, because a signature is always applied to one document. The tab
+appears only while **التوقيع بخط اليد** and the master switch
+**الوارد والصادر** are both on — with the master off there is no tab, and no
+version is written even by a direct request to the route.
 
 1. Open the document, tab **التوقيع**, press **ابدأ التوقيع**. Page 1 appears
    as an image with a page strip above it.
@@ -126,6 +146,11 @@ letter's own page, because a signature is always applied to one document.
 
 ## Good to know
 
+- Two switches can hold either feature shut, so the screens say **which** one is
+  off. **الإدارة ← نماذج الكتب** and the **إنشاء كتاب** screen both name the
+  master switch when that is the one that is off, instead of sending you to a
+  switch that is already on. The **التوقيع** tab simply does not appear while
+  signing is off, whichever switch stopped it.
 - A signature is a picture of handwriting with a full audit trail (who, when,
   which bytes), not a certified electronic signature under Law No. 78 of 2012.
   Whether the institute accepts it is open question 4 in `docs/PENDING.md`;

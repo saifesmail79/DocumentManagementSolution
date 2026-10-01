@@ -722,11 +722,27 @@ describe('the home page each person is shown', () => {
     assert.ok(itemsOf(areas, 'docs').length > 0, 'the documents area belongs to everyone');
   });
 
-  test('a usable template alone is enough to draw the area', () => {
-    // Correspondence switched off and a letter still to write: «إنشاء كتاب» works
-    // on its own, because writing an outgoing letter does not need the register.
+  test('a usable template no longer draws the area while the master switch is off', () => {
+    // It used to: «إنشاء كتاب» was treated as a feature that stood on its own.
+    // `correspondence.enabled` is now the master switch of the whole area, so
+    // with it off the home page is the core document management and nothing of
+    // the mail process — which is the isolation the owner asked for.
     const areas = homeAreas({ user: employee, mail: { enabled: false }, formsUsable: true });
-    assert.deepEqual(itemsOf(areas, 'mail'), ['forms']);
+    assert.equal(itemsOf(areas, 'mail'), null, 'the master switch is off; there is no mail area');
+    assert.ok(itemsOf(areas, 'docs').length > 0, 'the documents area is untouched by the switch');
+  });
+
+  test('the master switch off hides «إنشاء كتاب» however usable the template is', () => {
+    // Straight at `mailActions`, because this is the rule itself rather than the
+    // home page's use of it: no status, a status that answered «off», and a
+    // status that failed all come to the same answer — nothing.
+    for (const status of [null, undefined, { enabled: false }, { enabled: false, failed: true }]) {
+      assert.deepEqual(mailActions(status, true), [], `${JSON.stringify(status)} offered a screen`);
+    }
+
+    // And with the master on, the same call does offer it.
+    const on = mailActions({ enabled: true, registrar: false, member: false }, true);
+    assert.deepEqual(on.map((action) => action.key), ['forms']);
   });
 
   test('before the status answers, nothing of the area is drawn', () => {

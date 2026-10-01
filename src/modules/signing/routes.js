@@ -25,7 +25,10 @@
  *
  * `/status` answers while the switch is off; everything else answers 409
  * `signing_disabled`, so an install that has not adopted signing carries the
- * code inert and the client knows not to render the tab.
+ * code inert and the client knows not to render the tab. "The switch" is two
+ * settings read as one: `signing.enabled` AND `correspondence.enabled`, the
+ * master switch of «الوارد والصادر» — see `switchState` in service.js. `/status`
+ * carries `masterOff` so the client can name whichever of the two is off.
  *
  * ─── Two decisions worth naming ─────────────────────────────────────────────
  *
@@ -43,7 +46,7 @@
 import { config } from '../../config/index.js';
 import { record, ACTION } from '../audit/service.js';
 import { announceDocumentEvent } from '../documents/events.js';
-import { isEnabled, describe, pageGeometry, renderPage, sign } from './service.js';
+import { isEnabled, switchState, describe, pageGeometry, renderPage, sign } from './service.js';
 
 /**
  * The module's own reason→status map, as documents/routes.js and
@@ -126,15 +129,22 @@ export async function signingRoutes(app) {
 
   // The one route that answers while disabled: the client asks it whether to
   // show the tab at all.
-  app.get('/status', async () => ({
-    enabled: await isEnabled(),
-    // Published so the panel refuses an over-large save before the person
-    // draws the page that would exceed it, with the server's real numbers
-    // rather than a copy that drifts when the configuration changes.
-    maxPagesPerRequest: config.signing.maxPagesPerRequest,
-    bodyLimitBytes: config.signing.bodyLimitBytes,
-    dpi: config.signing.dpi,
-  }));
+  app.get('/status', async () => {
+    const state = await switchState();
+    return {
+      enabled: state.enabled,
+      // Only when signing's own switch is on and the master switch of
+      // «الوارد والصادر» is off, so a screen can name the switch that is off
+      // instead of pointing at the one that is already on.
+      ...(state.masterOff ? { masterOff: true } : {}),
+      // Published so the panel refuses an over-large save before the person
+      // draws the page that would exceed it, with the server's real numbers
+      // rather than a copy that drifts when the configuration changes.
+      maxPagesPerRequest: config.signing.maxPagesPerRequest,
+      bodyLimitBytes: config.signing.bodyLimitBytes,
+      dpi: config.signing.dpi,
+    };
+  });
 
   // Cheap by contract — the document page calls this for every document it
   // opens, whether or not anybody means to sign anything.

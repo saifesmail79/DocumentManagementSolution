@@ -28,10 +28,14 @@
  *
  * ─── Why the on/off switch is not here ──────────────────────────────────────
  *
- * `forms.enabled` lives with every other switch in الإدارة ← الإعدادات, as
- * `correspondence.enabled` does. Two controls for one setting is one control too
- * many, and the one nobody uses is the one that goes stale. This tab links to it
- * in prose and disables itself while the module is off.
+ * `forms.enabled` lives with every other switch in الإدارة ← الإعدادات, beside
+ * `correspondence.enabled`, which is the MASTER switch of «الوارد والصادر» and
+ * governs this one: the server reads «نماذج الكتب مفعّلة» as both switches on.
+ * Two controls for one setting is one control too many, and the one nobody uses
+ * is the one that goes stale. So this tab links to the الإعدادات section in
+ * prose, disables itself while the module is off, and — because there are now
+ * two ways for it to be off — says WHICH switch is the one to turn on, from the
+ * `masterOff` flag the status route sends for exactly that purpose.
  *
  * ─── Why the readiness line reports LibreOffice separately ──────────────────
  *
@@ -180,7 +184,7 @@ function describeError(caught, fallback) {
 
   const MAP = {
     forms_disabled:
-      'وحدة النماذج معطّلة. فعّلها من «الإعدادات ← نماذج الكتب والتوقيع» ثم أعد المحاولة.',
+      'نماذج الكتب معطّلة. فعّلها من «الإعدادات ← الوارد والصادر» ثم أعد المحاولة.',
     forbidden: 'هذه العملية لمديري النظام.',
     not_found: 'النموذج غير موجود — ربما حُذف. حدّث الصفحة.',
     no_file: 'اختر ملف النموذج بصيغة .docx.',
@@ -459,6 +463,10 @@ export default function FormsAdminTab() {
 
   const enabled = status.enabled === true;
   const converter = status.libreOffice === true;
+  // Two switches can hold this tab shut, and pointing at the wrong one costs an
+  // administrator a round of «فعّلتُه ولم يتغيّر شيء»: `masterOff` means نماذج
+  // الكتب is already on and the master switch above it is the one that is off.
+  const masterOff = status.masterOff === true;
 
   return (
     <div className="space-y-4">
@@ -466,8 +474,11 @@ export default function FormsAdminTab() {
 
       {!enabled ? (
         <Alert tone="warning">
-          الوحدة معطّلة حالياً. فعّلها من «الإعدادات ← نماذج الكتب والتوقيع ← النماذج الرسمية»، ثم
-          عد إلى هنا لرفع النماذج وتسمية حقولها.
+          {masterOff
+            ? 'نماذج الكتب مفعّلة، لكن المفتاح الرئيس «الوارد والصادر» متوقف ولا تعمل بدونه. '
+              + 'فعّله من «الإعدادات ← الوارد والصادر ← الوارد والصادر (المفتاح الرئيس)»، ثم عد إلى هنا.'
+            : 'نماذج الكتب معطّلة حالياً. فعّلها من «الإعدادات ← الوارد والصادر ← نماذج الكتب»، ثم '
+              + 'عد إلى هنا لرفع النماذج وتسمية حقولها.'}
         </Alert>
       ) : null}
 

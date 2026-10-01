@@ -301,7 +301,29 @@ export async function relate({ userId, fromDocument, toDocument, relationType = 
   return { ok: true };
 }
 
-export async function unrelate({ relationId }) {
+/**
+ * Removes a cross-reference.
+ *
+ * Gated on the SAME permission relate() demands of the end it is written from:
+ * BROWSE on the from_document. Without it, a relation id was all anyone needed
+ * to delete any link in the system, in a table other modules hang meaning on —
+ * and the refusal is `not_found`, exactly as relate()'s is, so a probe cannot
+ * learn that the relation exists either.
+ *
+ * Only the from end is checked, because that is the end the relation was
+ * created from and the only one relate() lets anybody write. Checking both
+ * would mean a link whose far document later moved out of reach could never be
+ * tidied up by the person who made it.
+ */
+export async function unrelate({ userId, relationId }) {
+  const found = await sql`
+    SELECT from_document FROM dbo.document_relations WHERE relation_id = ${relationId}
+  `.execute(db);
+  if (!found.rows[0]) return { ok: false, reason: 'not_found' };
+
+  const bits = await documentPermission(userId, String(found.rows[0].from_document));
+  if (bits === null || !has(bits, PERM.BROWSE)) return { ok: false, reason: 'not_found' };
+
   await sql`DELETE FROM dbo.document_relations WHERE relation_id = ${relationId}`.execute(db);
   return { ok: true };
 }

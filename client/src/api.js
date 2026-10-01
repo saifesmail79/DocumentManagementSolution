@@ -488,22 +488,73 @@ export const api = {
     },
     intake: () => request('/api/correspondence/intake'),
     followUp: () => request('/api/correspondence/followup'),
-    letters: ({ direction, year, status, q } = {}) => {
+    /**
+     * The book, narrowed.
+     *
+     * `location: 'out'` keeps only the letters whose PAPER is currently with
+     * somebody — the list the mail room picks from when a sheet comes back, so
+     * the clerk chooses a letter instead of remembering its number.
+     */
+    letters: ({ direction, year, status, q, location } = {}) => {
       const params = new URLSearchParams();
       if (direction) params.set('direction', direction);
       if (year) params.set('year', String(year));
       if (status) params.set('status', status);
       if (q) params.set('q', q);
+      if (location) params.set('location', location);
       const query = params.toString();
       return request(`/api/correspondence/letters${query ? `?${query}` : ''}`);
     },
     letter: (letterId) => request(`/api/correspondence/letters/${letterId}`),
     forDocument: (documentId) => request(`/api/correspondence/documents/${documentId}/letter`),
+    /**
+     * Registers a document in a book.
+     *
+     * Beyond the letter's own fields the body carries two links the paper trail
+     * needs: `transfers[].note` — the director's instruction («التهميش»), written
+     * once and repeated on every department row — and `replyToLetterId`, the
+     * incoming letter an outgoing one answers.
+     */
     register: (body) => request('/api/correspondence/register', { method: 'POST', body }),
+    /** Forwarding after registration. Each row may carry its own `note`, as at registration. */
     addTransfers: (letterId, transfers) =>
       request(`/api/correspondence/letters/${letterId}/transfers`, {
         method: 'POST',
         body: { transfers },
+      }),
+
+    /**
+     * A returned or re-annotated paper, filed as a NEW VERSION of the letter's
+     * existing document — never a second document. `action` names what was done
+     * to the sheet (instruction | endorsement | rescan | other), `personName`
+     * who did it, and `returned` records in the same step that the paper is back
+     * in the mail room.
+     *
+     * Fields before the file, for the reason `upload` states: the server reads
+     * one multipart stream in order and cannot see a field that arrives after
+     * the file part.
+     */
+    addCopy: (letterId, file, { action, personName, note, returned } = {}) => {
+      const form = new FormData();
+      if (action) form.append('action', action);
+      if (personName) form.append('personName', personName);
+      if (note) form.append('note', note);
+      // Sent both ways rather than only when true: the server reads a plain
+      // 'true'/'false', and an absent field would be a third state to guess at.
+      form.append('returned', returned ? 'true' : 'false');
+      form.append('file', file, file.name);
+      return request(`/api/correspondence/letters/${letterId}/versions`, {
+        method: 'POST',
+        body: form,
+        raw: true,
+      });
+    },
+
+    /** Where the paper went ('out') or that it came back ('back'). */
+    move: (letterId, { kind, personName, note } = {}) =>
+      request(`/api/correspondence/letters/${letterId}/movements`, {
+        method: 'POST',
+        body: { kind, personName: personName ?? null, note: note ?? null },
       }),
     annul: (letterId, reason) =>
       request(`/api/correspondence/letters/${letterId}/annul`, { method: 'POST', body: { reason } }),

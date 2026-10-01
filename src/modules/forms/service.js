@@ -115,9 +115,38 @@ const MAPPED_TEXT_LIMIT = 1000;
 /** Custom field types a placeholder may be mapped to. */
 const MAPPABLE_TYPES = Object.freeze(['text', 'number', 'date']);
 
-/** The stored switch. Off means every route answers "disabled" and no row is written. */
+/**
+ * The two switches that decide whether this module exists, as one answer.
+ *
+ * `correspondence.enabled` is the MASTER switch of «الوارد والصادر», and letter
+ * formats are a step of that area rather than a feature beside it: a format
+ * exists so that an outgoing letter can be written, and an outgoing letter is
+ * written to be registered as صادر. An institute that switched the mail process
+ * off wants the core document management and nothing else — no mail screens, no
+ * «إنشاء كتاب», no «التوقيع» — so the effective state here is BOTH switches, and
+ * a format left switched on under a master that is off produces nothing.
+ *
+ * `masterOff` exists only so a screen can say WHICH switch is off. «فعّلها من
+ * الإعدادات» sends an administrator to a switch that is already on, and they
+ * turn it off and on again before thinking to look at the one above it.
+ */
+export async function switchState() {
+  const [own, master] = await Promise.all([
+    getSetting('forms.enabled'),
+    getSetting('correspondence.enabled'),
+  ]);
+  return {
+    enabled: Boolean(own) && Boolean(master),
+    masterOff: Boolean(own) && !master,
+  };
+}
+
+/**
+ * The effective switch. Off means every route answers "disabled" and no row is
+ * written — whether it is this module's own switch or the master above it.
+ */
 export async function isEnabled() {
-  return Boolean(await getSetting('forms.enabled'));
+  return (await switchState()).enabled;
 }
 
 // ── The conversion slot ──────────────────────────────────────────────────
@@ -173,15 +202,24 @@ function releaseSlot() {
  * administrator.
  */
 export async function formsStatus({ userId, isSuperAdmin = false }) {
-  if (!(await isEnabled())) return { enabled: false };
+  const state = await switchState();
+  // The shape is unchanged — `masterOff` rides along ONLY when this module's own
+  // switch is on and the master above it is off, which is the one case a screen
+  // cannot explain from `enabled: false` alone.
+  if (!state.enabled) return { enabled: false, ...(state.masterOff ? { masterOff: true } : {}) };
 
   const [templates, tools] = await Promise.all([usableCount({ userId, isSuperAdmin }), libreOfficePresent()]);
   return { enabled: true, templates, ready: tools };
 }
 
-/** The admin readiness line: the switch and the tool. */
+/** The admin readiness line: the switch (and which one is off) and the tool. */
 export async function toolStatus() {
-  return { enabled: await isEnabled(), libreOffice: await libreOfficePresent() };
+  const state = await switchState();
+  return {
+    enabled: state.enabled,
+    ...(state.masterOff ? { masterOff: true } : {}),
+    libreOffice: await libreOfficePresent(),
+  };
 }
 
 async function libreOfficePresent() {

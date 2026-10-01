@@ -36,11 +36,14 @@ import {
   addTransfers,
   annulLetter,
   setOutgoingStatus,
+  addLetterVersion,
+  recordMovement,
   isRegistrar,
   DIRECTIONS,
   LETTER_STATUSES,
 } from './service.js';
 import { record, ACTION } from '../audit/service.js';
+import { announceDocumentEvent } from '../documents/events.js';
 
 const STATUS = {
   not_found: 404,
@@ -55,6 +58,34 @@ const STATUS = {
   not_open: 409,
   annulled: 409,
   reason_too_short: 400,
+  // The paper trail. not_allowed is the register's own refusal — neither the
+  // mail room nor a department holding the letter — and is deliberately
+  // distinct from the core's `forbidden`, which means no UPLOAD on the folder.
+  not_allowed: 403,
+  invalid_action: 400,
+  invalid_kind: 400,
+  person_required: 400,
+  invalid_reply_to: 400,
+  // The letter exists and could be replied to, but this clerk cannot reach it.
+  // A separate reason from invalid_reply_to because the screen must say «لا
+  // تملك صلاحية الوصول إلى هذا الكتاب» rather than send her back to re-pick a
+  // letter the picker legitimately offered.
+  reply_to_forbidden: 403,
+  // The core addVersion's own reasons, mapped exactly as the ordinary version
+  // route maps them (src/modules/documents/routes.js). A rescan refused for
+  // legal hold must answer 423 here too, or the client has to learn two
+  // vocabularies for one upload.
+  forbidden: 403,
+  legal_hold: 423,
+  locked: 423,
+  blocked_extension: 415,
+  empty_file: 400,
+  no_file: 400,
+  too_large: 413,
+  too_many_files: 413,
+  multi_file_document: 409,
+  conflict: 409,
+  storage_failed: 500,
 };
 
 function parseId(value) {
@@ -65,6 +96,14 @@ function parseId(value) {
 
 function refuse(reply, result) {
   return reply.code(STATUS[result.reason] ?? 400).send({ ...result, error: result.reason });
+}
+
+/** @fastify/multipart exposes a field as {value} or an array when repeated. */
+function firstValue(field) {
+  if (!field) return undefined;
+  const entry = Array.isArray(field) ? field[0] : field;
+  const value = entry?.value;
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
 }
 
 async function requireEnabled(_request, reply) {
@@ -121,12 +160,17 @@ export async function correspondenceRoutes(app) {
     });
     if (!registrar) return reply.code(403).send({ error: 'not_registrar' });
 
-    const { direction, year, status, q } = request.query;
+    const { direction, year, status, q, location } = request.query;
     if (direction && !DIRECTIONS.includes(direction)) {
       return reply.code(400).send({ error: 'invalid_direction' });
     }
     if (status && !LETTER_STATUSES.includes(status)) {
       return reply.code(400).send({ error: 'invalid_status' });
+    }
+    // 'out' is the only filter the paper's whereabouts can usefully be asked
+    // for; a typo must refuse rather than quietly widen to the whole book.
+    if (location && location !== 'out') {
+      return reply.code(400).send({ error: 'invalid_location' });
     }
     return {
       letters: await listLetters({
@@ -134,6 +178,7 @@ export async function correspondenceRoutes(app) {
         year: year || null,
         status: status || null,
         q: q || null,
+        location: location || null,
       }),
     };
   });
@@ -148,7 +193,11 @@ export async function correspondenceRoutes(app) {
     });
     if (!registrar) return reply.code(403).send({ error: 'not_registrar' });
 
-    const result = await getLetter({ letterId });
+    const result = await getLetter({
+      letterId,
+      userId: request.user.userId,
+      isSuperAdmin: request.user.isSuperAdmin,
+    });
     if (!result.ok) return refuse(reply, result);
     return result;
   });
@@ -160,7 +209,11 @@ export async function correspondenceRoutes(app) {
       const documentId = parseId(request.params.documentId);
       if (documentId === null) return reply.code(400).send({ error: 'invalid_document_id' });
 
-      const result = await letterForDocument({ userId: request.user.userId, documentId });
+      const result = await letterForDocument({
+        userId: request.user.userId,
+        isSuperAdmin: request.user.isSuperAdmin,
+        documentId,
+      });
       if (!result.ok) return refuse(reply, result);
       return result;
     },
@@ -170,6 +223,13 @@ export async function correspondenceRoutes(app) {
     const body = request.body ?? {};
     const documentId = parseId(body.documentId);
     if (documentId === null) return reply.code(400).send({ error: 'invalid_document_id' });
+
+    // A malformed reply target is a reply target the clerk meant to set, so it
+    // refuses by name instead of being dropped into an unlinked registration.
+    const replyToLetterId = parseId(body.replyToLetterId);
+    if (body.replyToLetterId && replyToLetterId === null) {
+      return reply.code(400).send({ error: 'invalid_reply_to' });
+    }
 
     const result = await registerLetter({
       userId: request.user.userId,
@@ -182,6 +242,9 @@ export async function correspondenceRoutes(app) {
       externalDate: body.externalDate,
       unitId: parseId(body.unitId),
       transfers: body.transfers,
+      // «رد على الوارد …» — the letter this outgoing one answers, stored as a
+      // core document relation so the link survives the area being switched off.
+      replyToLetterId,
     });
     if (!result.ok) return refuse(reply, result);
 
@@ -217,6 +280,110 @@ export async function correspondenceRoutes(app) {
       request,
     });
     return result;
+  });
+
+  /**
+   * A returned, re-annotated or rescanned paper, filed as a NEW VERSION of the
+   * letter's own document and named by what was done on it.
+   *
+   * Multipart, one file part named "file". The text fields — action, personName,
+   * note, returned — must be sent BEFORE the file part: @fastify/multipart
+   * cannot read a field that arrives after the stream the handler is consuming,
+   * exactly as in the ordinary upload route.
+   */
+  app.post('/letters/:letterId/versions', { preHandler: requireEnabled }, async (request, reply) => {
+    const letterId = parseId(request.params.letterId);
+    if (letterId === null) return reply.code(400).send({ error: 'invalid_letter_id' });
+
+    const part = await request.file();
+    if (!part) return reply.code(400).send({ error: 'no_file' });
+
+    const result = await addLetterVersion({
+      userId: request.user.userId,
+      isSuperAdmin: request.user.isSuperAdmin,
+      letterId,
+      stream: part.file,
+      filename: part.filename,
+      mimeType: part.mimetype,
+      action: firstValue(part.fields?.action),
+      personName: firstValue(part.fields?.personName),
+      note: firstValue(part.fields?.note),
+      // The paper came back in the same gesture that brought its new scan.
+      returned: firstValue(part.fields?.returned) === 'true',
+    });
+    if (!result.ok) return refuse(reply, result);
+
+    /*
+     * Two audit rows and the core event, because two different questions are
+     * asked of this one act — the same split the signing route documents.
+     *
+     * «ما جرى على هذه الوثيقة؟» is answered by the version row, and EVERY other
+     * path that adds a version records DOCUMENT_VERSION_ADDED against the
+     * document and its folder. A paper-trail scan that did not would be a hole
+     * in that history, invisible to the document's own audit view and to the
+     * folder-scoped one. «ما جرى على هذا الكتاب؟» is answered by
+     * MAIL_PAPER_VERSION, which names the act on the paper and stays beside it.
+     */
+    await record({
+      actor: request.user,
+      action: ACTION.DOCUMENT_VERSION_ADDED,
+      targetType: 'document',
+      targetId: result.documentId,
+      folderId: result.folderId,
+      detail: `v${result.version} ${result.action}`,
+      request,
+    });
+
+    await record({
+      actor: request.user,
+      action: ACTION.MAIL_PAPER_VERSION,
+      targetType: 'correspondence',
+      targetId: letterId,
+      detail: `${result.reference} v${result.version} — ${result.action}`
+        + (result.personName ? ` (${result.personName})` : '')
+        + (result.trail ? '' : ' (trail row failed)')
+        + (result.movementFailed ? ' (return not recorded)' : ''),
+      request,
+    });
+
+    // The existing event name, not a new one: somebody watching this letter
+    // asked to hear about the document, and a webhook subscriber registered for
+    // versions is entitled to the one a returned paper creates.
+    await announceDocumentEvent({
+      event: 'document.version_added',
+      actor: request.user,
+      documentId: result.documentId,
+      folderId: result.folderId,
+      title: `إصدار ${result.version}`,
+    });
+
+    return reply.code(201).send(result);
+  });
+
+  /** «سُلّمت الورقة إلى …» / «عادت الورقة من …» — where the paper went. */
+  app.post('/letters/:letterId/movements', { preHandler: requireEnabled }, async (request, reply) => {
+    const letterId = parseId(request.params.letterId);
+    if (letterId === null) return reply.code(400).send({ error: 'invalid_letter_id' });
+
+    const result = await recordMovement({
+      userId: request.user.userId,
+      isSuperAdmin: request.user.isSuperAdmin,
+      letterId,
+      kind: request.body?.kind,
+      personName: request.body?.personName,
+      note: request.body?.note,
+    });
+    if (!result.ok) return refuse(reply, result);
+
+    await record({
+      actor: request.user,
+      action: ACTION.MAIL_PAPER_MOVED,
+      targetType: 'correspondence',
+      targetId: letterId,
+      detail: `${result.reference} ${result.movement.kind} — ${result.movement.personName}`,
+      request,
+    });
+    return reply.code(201).send(result);
   });
 
   app.post('/letters/:letterId/annul', { preHandler: requireEnabled }, async (request, reply) => {

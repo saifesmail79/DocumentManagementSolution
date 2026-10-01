@@ -1479,9 +1479,9 @@ const SETTING_LABELS = {
   'auth.password_require_uppercase': 'إلزام حرف لاتيني كبير (A-Z)',
   'auth.password_require_digit': 'إلزام رقم',
   'auth.password_require_symbol': 'إلزام رمز (! @ # %)',
-  'correspondence.enabled': 'وحدة الوارد والصادر',
-  'forms.enabled': 'النماذج الرسمية',
-  'signing.enabled': 'التوقيع بالقلم',
+  'correspondence.enabled': 'الوارد والصادر (المفتاح الرئيس)',
+  'forms.enabled': 'نماذج الكتب',
+  'signing.enabled': 'التوقيع بخط اليد',
   'ocr.enabled': 'المسح الضوئي للنصوص (OCR)',
   'extraction.enabled': 'استخراج نص الوثائق',
   'classification.enabled': 'التعرّف التلقائي على الوثائق (تجريبي)',
@@ -1533,15 +1533,24 @@ const SETTING_SECTIONS = [
     hint: 'الاستخراج والتعرّف الضوئي اللذان يجعلان محتوى الوثائق قابلاً للبحث.',
     keys: ['ocr.enabled', 'extraction.enabled', 'classification.enabled'],
   },
+  /*
+   * One section, because it is one decision.
+   *
+   * The three switches used to sit in two sections, as if adopting the register
+   * and adopting letter formats were separate choices. They are not:
+   * `correspondence.enabled` is the master switch of the whole area, and the
+   * server reads the other two as «their own switch AND the master». Two
+   * sections taught the opposite — that نماذج الكتب could be turned on by
+   * itself — and an administrator who did that got a switch that said «مفعّل»
+   * and a feature that did nothing.
+   */
   {
     title: 'الوارد والصادر',
-    hint: 'مفتاح تشغيل سجل الوارد والصادر. الأقسام وقلم الوارد تُعرَّف في «الإدارة ← الأقسام ومجلد الاستلام».',
-    keys: ['correspondence.enabled'],
-  },
-  {
-    title: 'نماذج الكتب والتوقيع',
-    hint: 'مفتاحا الكتب المولّدة من نماذج Word، والتوقيع بخط اليد على الوثائق. النماذج نفسها تُعرَّف في «الإدارة ← نماذج الكتب».',
-    keys: ['forms.enabled', 'signing.enabled'],
+    hint:
+      'المفتاح الأول هو المفتاح الرئيس: إيقافه يوقف معه نماذج الكتب والتوقيع ويُبقي النظام إدارةَ وثائق فقط، '
+      + 'دون أي شاشة أو خطوة من الوارد والصادر. الأقسام وقلم الوارد تُعرَّف في «الإدارة ← الأقسام ومجلد الاستلام»، '
+      + 'والنماذج في «الإدارة ← نماذج الكتب».',
+    keys: ['correspondence.enabled', 'forms.enabled', 'signing.enabled'],
   },
   {
     title: 'عام',
@@ -1549,6 +1558,18 @@ const SETTING_SECTIONS = [
     keys: ['organisation.name'],
   },
 ];
+
+/**
+ * The master switch of «الوارد والصادر» and the two switches under it.
+ *
+ * Named here so the row can say «لا يعمل ما دام المفتاح الرئيس متوقفاً» instead
+ * of showing «مفعّل» for a feature the server refuses: the effective state of
+ * each sub-switch is its own value AND the master's, and a control that reads
+ * «مفعّل» while nothing works is the one thing this panel must not do.
+ */
+const MAIL_MASTER_KEY = 'correspondence.enabled';
+const MAIL_SUB_SWITCHES = new Set(['forms.enabled', 'signing.enabled']);
+const MAIL_SUB_SWITCH_NOTE = 'لا يعمل ما دام المفتاح الرئيس متوقفاً';
 
 /** Option values are stored in English; these are what an operator reads. */
 const OPTION_LABELS = {
@@ -1620,6 +1641,12 @@ function SettingsTab() {
 
   if (!settings) return <Spinner />;
 
+  // Read from the list itself rather than fetched separately: the master switch
+  // is a row on this very screen, so its value is already here and cannot
+  // disagree with what the reader is looking at.
+  const masterOff =
+    String(settings.find((setting) => setting.key === MAIL_MASTER_KEY)?.value) !== 'true';
+
   return (
     <div className="space-y-3">
       <TabIntro topic="admin.settings" />
@@ -1673,6 +1700,9 @@ function SettingsTab() {
                     key={setting.key}
                     setting={setting}
                     busy={busy}
+                    note={
+                      masterOff && MAIL_SUB_SWITCHES.has(setting.key) ? MAIL_SUB_SWITCH_NOTE : null
+                    }
                     onSave={save}
                     onRevert={revert}
                   />
@@ -1741,7 +1771,7 @@ const UNITS = {
   },
 };
 
-function SettingRow({ setting, busy, onSave, onRevert }) {
+function SettingRow({ setting, busy, note = null, onSave, onRevert }) {
   const unit = UNITS[setting.key];
 
   /** The stored value as it would appear in a text box, in the unit shown. */
@@ -1780,6 +1810,9 @@ function SettingRow({ setting, busy, onSave, onRevert }) {
               read and close before typing is not where that belongs. */}
           <HelpTip text={SETTING_HELP[setting.key]} label={`شرح: ${SETTING_LABELS[setting.key] ?? setting.key}`} />
         </span>
+        {/* Why this row is inert, next to the row — not in a banner above the
+            table, which is read once and then scrolled past. */}
+        {note ? <span className="mt-0.5 block text-[11px] text-text-muted">{note}</span> : null}
       </td>
       <td className="px-4 py-3 text-right">
         {setting.type === 'bool' ? (
