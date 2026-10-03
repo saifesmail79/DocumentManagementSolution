@@ -38,10 +38,15 @@ Prepared and rehearsed on the development system on 2026-10-03.
 The system refuses the same file twice in the same folder, so each paper can be used once. For a second
 run, ask for fresh copies.
 
+**For a live demonstration**, print `كتاب الوزارة للطباعة - استيضاح بشأن مخصصات التدريب الخارجي.pdf` from the
+same folder, sign it by hand above «المدير العام», and scan it in step 1 instead of choosing paper 1. The Word
+version beside it can be edited before printing. A scan is always a new file, so it can be used any number of times.
+
 ## Step 1 — Mail room: receive, register, forward to HR (as `diwan`)
 
 1. Sign in as `diwan`. On the home page, in «الوارد والصادر», press «تسجيل كتاب».
 2. In the card «كتاب جديد», press «اختيار ملف» and choose paper 1. The letter's page opens on the tab «تسجيل وإحالة».
+   For the printed letter, scan it with the scanner panel on the same screen, or scan it to a PDF and choose that file.
 3. Fill the form:
    - Book «الدفتر»: «وارد».
    - Subject «الموضوع»: «استيضاح بشأن مخصصات التدريب الخارجي للموظفين».
