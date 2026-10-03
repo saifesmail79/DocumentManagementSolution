@@ -66,7 +66,7 @@ const REGISTER_ERROR = {
 
 const BLANK_ROW = { unitId: '', purpose: 'action', dueDate: '' };
 
-export default function CorrespondencePanel({ documentId, documentTitle, canRead, onCount, onEnabled }) {
+export default function CorrespondencePanel({ documentId, version = null, documentTitle, canRead, onCount, onEnabled }) {
   const { prompt, confirm } = useDialogs();
   const [status, setStatus] = useState(null);
   const [data, setData] = useState(null);
@@ -96,7 +96,7 @@ export default function CorrespondencePanel({ documentId, documentTitle, canRead
       if (caught instanceof ApiError && caught.status === 404) onEnabled?.(false);
       else setError('تعذر تحميل بيانات الوارد والصادر لهذه الوثيقة.');
     }
-  }, [documentId, canRead, onEnabled, onCount]);
+  }, [documentId, canRead, onEnabled, onCount, version]);
 
   useEffect(() => {
     load();
@@ -407,7 +407,16 @@ export default function CorrespondencePanel({ documentId, documentTitle, canRead
           )}
 
           {status.registrar && letter.status !== 'annulled' ? (
-            <TransferRows units={status.units} busy={busy} onSubmit={addTransfers} submitLabel="إحالة" />
+            <TransferRows
+              // Remounted when a newer instruction arrives, so the field starts
+              // from it instead of from what the clerk saw before.
+              key={latestInstruction(data.trail) ?? ''}
+              units={status.units}
+              busy={busy}
+              onSubmit={addTransfers}
+              submitLabel="إحالة"
+              suggestion={latestInstruction(data.trail)}
+            />
           ) : null}
         </Card>
       ) : null}
@@ -745,10 +754,23 @@ function TransferRowsEditor({ units, rows, onChange }) {
   );
 }
 
+/**
+ * The words of the newest «تهميش» in the paper trail, if it has any.
+ *
+ * The head has already written them — on paper and filed, or on the screen —
+ * so the clerk forwarding the letter starts from them instead of retyping.
+ */
+function latestInstruction(trail) {
+  const found = [...(trail ?? [])]
+    .reverse()
+    .find((entry) => entry.action === 'instruction' && entry.note?.trim());
+  return found ? found.note.trim() : null;
+}
+
 /** The standalone forward control shown under an already-registered letter. */
-function TransferRows({ units, busy, onSubmit, submitLabel }) {
+function TransferRows({ units, busy, onSubmit, submitLabel, suggestion = null }) {
   const [rows, setRows] = useState([]);
-  const [instruction, setInstruction] = useState('');
+  const [instruction, setInstruction] = useState(suggestion ?? '');
 
   const ready = rows.filter((row) => row.unitId);
 
@@ -759,6 +781,9 @@ function TransferRows({ units, busy, onSubmit, submitLabel }) {
           that comes back with a changed «تهميش» is forwarded again with the new
           words, written once. */}
       <InstructionField value={instruction} onChange={setInstruction} />
+      {suggestion && instruction === suggestion ? (
+        <p className="-mt-1 mb-2 text-xs text-text-muted">مأخوذ من آخر تهميش في مسار الورقة — عدّله إن لزم.</p>
+      ) : null}
       <TransferRowsEditor units={units} rows={rows} onChange={setRows} />
       {ready.length > 0 ? (
         <Button
@@ -774,7 +799,7 @@ function TransferRows({ units, busy, onSubmit, submitLabel }) {
               })),
             );
             setRows([]);
-            setInstruction('');
+            setInstruction(suggestion ?? '');
           }}
           className="mt-2 !px-3 !py-1 text-xs"
         >

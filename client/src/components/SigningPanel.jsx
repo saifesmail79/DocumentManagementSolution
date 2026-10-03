@@ -312,6 +312,17 @@ export default function SigningPanel({ documentId, canRead, onChanged, onCount, 
   const [zoom, setZoom] = useState(1);
   const [note, setNote] = useState('');
 
+  /*
+   * On a registered letter, writing on the page is a step in its paper trail,
+   * and the trail must say which step: a head's instruction («تهميش») or a
+   * signature or initials. An incoming letter is usually written on to give an
+   * instruction; anything else, to sign. The signer can change it. On a
+   * document that is not a letter the question is not asked.
+   */
+  const [letter, setLetter] = useState(null);
+  const [letterAction, setLetterAction] = useState('endorsement');
+  const instructing = letter !== null && letterAction === 'instruction';
+
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
   const [saved, setSaved] = useState(null);
@@ -354,6 +365,24 @@ export default function SigningPanel({ documentId, canRead, onChanged, onCount, 
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    if (!canRead || status?.enabled !== true) return undefined;
+    let cancelled = false;
+    api.correspondence
+      .forDocument(documentId)
+      .then((found) => {
+        if (cancelled) return;
+        const registered = found?.registered && found.letter?.status !== 'annulled' ? found.letter : null;
+        setLetter(registered);
+        setLetterAction(registered?.direction === 'in' ? 'instruction' : 'endorsement');
+      })
+      // Not a letter, or the register cannot be asked: sign as on any document.
+      .catch(() => !cancelled && setLetter(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [documentId, canRead, status?.enabled]);
 
   /** Drops every rendered page. Called whenever the bytes under the ink change. */
   const forgetPages = useCallback(() => {
@@ -602,6 +631,7 @@ export default function SigningPanel({ documentId, canRead, onChanged, onCount, 
         version: info.version,
         note: note.trim() || null,
         pages: payload,
+        ...(letter ? { letterAction } : {}),
       });
 
       // The bytes under the ink have changed, so every rendered page and every
@@ -612,9 +642,19 @@ export default function SigningPanel({ documentId, canRead, onChanged, onCount, 
       setGeometry(null);
       setStarted(false);
       setPageState({ status: 'idle' });
+      // One sentence, whatever happened: the version, then the trail, then any
+      // part that did not land.
+      const trail = result?.letterTrail;
       setSaved(
         `حُفظ التوقيع${result?.version ? ` في الإصدار ${result.version}` : ''}`
-          + `${result?.ledger === false ? ' — تعذر تسجيل التوقيع في السجل، راجع مسؤول النظام.' : '.'}`,
+          + (trail?.recorded
+            ? ` وسُجّل في مسار الورقة «${trail.action === 'instruction' ? 'تهميش' : 'توقيع أو تأشير'}»${
+              trail.action === 'instruction' && letter?.direction === 'in' ? ' وأُبلغ قلم الوارد' : ''
+            }`
+            : '')
+          + (result?.ledger === false ? ' — تعذر تسجيل التوقيع في سجل التوقيعات، راجع مسؤول النظام' : '')
+          + (letter && trail?.failed ? ' — تعذر تسجيله في مسار الورقة، فأبلغ قلم الوارد بما كتبت' : '')
+          + '.',
       );
       await load();
       onChanged?.();
@@ -803,15 +843,52 @@ export default function SigningPanel({ documentId, canRead, onChanged, onCount, 
           </div>
 
           <div className="mt-3 space-y-2 border-t border-border/60 pt-3">
+            {letter ? (
+              <fieldset className="space-y-1.5">
+                <legend className="mb-1 text-sm font-medium text-text">
+                  ما الذي تكتبه على الكتاب {letter.reference}؟
+                </legend>
+                <div className="flex flex-row flex-wrap gap-2">
+                  {[
+                    ['instruction', 'تهميش (توجيه)'],
+                    ['endorsement', 'توقيع أو تأشير'],
+                  ].map(([value, label]) => (
+                    <label
+                      key={value}
+                      className={`flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-1.5 text-sm ${
+                        letterAction === value
+                          ? 'border-primary bg-primary/10 text-primary'
+                          : 'border-border text-text-muted hover:text-text'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="letter-action"
+                        value={value}
+                        checked={letterAction === value}
+                        onChange={() => setLetterAction(value)}
+                        className="accent-primary"
+                      />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+                <p className="text-xs text-text-muted">
+                  يُسجَّل في «مسار الورقة» باسمك{instructing ? '، ويُبلَّغ قلم الوارد ليُحيل الكتاب بحسبه' : ''}.
+                </p>
+              </fieldset>
+            ) : null}
             <label className="block">
-              <span className="mb-1.5 block text-sm font-medium text-text">ملاحظة مع التوقيع (اختياري)</span>
+              <span className="mb-1.5 block text-sm font-medium text-text">
+                {instructing ? 'نص التهميش (يظهر لقلم الوارد وفي مسار الورقة)' : 'ملاحظة مع التوقيع (اختياري)'}
+              </span>
               <textarea
                 dir="rtl"
                 rows={2}
                 value={note}
                 maxLength={NOTE_LIMIT}
                 onChange={(event) => setNote(event.target.value)}
-                placeholder="مثال: موافق على الصرف"
+                placeholder={instructing ? 'مثال: الشؤون المالية والشؤون القانونية لإبداء الرأي خلال أسبوع' : 'مثال: موافق على الصرف'}
                 className="w-full rounded-lg border border-border bg-control px-3 py-2 text-sm text-text
                   placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-primary/40"
               />

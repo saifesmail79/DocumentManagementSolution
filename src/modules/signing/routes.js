@@ -265,7 +265,29 @@ export async function signingRoutes(app) {
         title: result.title,
       });
 
-      return reply.code(201).send(result);
+      /*
+       * Signing a registered letter is a step in its paper trail. The panel
+       * asks the signer what the writing is — an instruction or a signature —
+       * and the letter's trail records it against the version just made. On
+       * any other document nothing is recorded.
+       */
+      let letterTrail = { recorded: false };
+      try {
+        const { recordSignedVersion } = await import('../correspondence/service.js');
+        letterTrail = await recordSignedVersion({
+          userId: request.user.userId,
+          documentId,
+          version: result.version,
+          action: body.letterAction ?? null,
+          note: body.note ?? null,
+          signerName: request.user.displayName || request.user.username || null,
+        });
+      } catch (error) {
+        request.log.error({ err: error }, 'the signed version could not be named in the letter trail');
+        letterTrail = { recorded: false, failed: true };
+      }
+
+      return reply.code(201).send({ ...result, letterTrail });
     },
   );
 }

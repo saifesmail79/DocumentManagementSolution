@@ -1045,7 +1045,7 @@ async function holdsLetter({ userId, letterId }) {
 async function letterForRecording({ userId, isSuperAdmin, letterId }) {
   const found = await sql`
     SELECT c.correspondence_id, c.document_id, c.status, c.book_number, c.book_year,
-           d.folder_id, d.title
+           c.direction, c.subject, d.folder_id, d.title
       FROM dbo.correspondence c
       JOIN dbo.documents d ON d.document_id = c.document_id
      WHERE c.correspondence_id = ${letterId}
@@ -1060,6 +1060,103 @@ async function letterForRecording({ userId, isSuperAdmin, letterId }) {
     return { ok: false, reason: 'not_allowed' };
   }
   return { ok: true, letter, registrar };
+}
+
+/**
+ * Tells every member of the mail-room group that an instruction was recorded
+ * on an incoming letter, except whoever recorded it.
+ *
+ * Never throws: like every notice, it must not fail the act that caused it.
+ */
+async function notifyMailroomOfInstruction({ letter, actorId, note }) {
+  try {
+    const groupId = Number(await getSetting('correspondence.mailroom_group'));
+    if (!groupId) return;
+    const members = await sql`
+      SELECT principal_id AS user_id FROM dbo.fn_expand_group_members(${groupId})
+    `.execute(db);
+    const userIds = members.rows.map((row) => String(row.user_id)).filter((id) => id !== String(actorId));
+    if (userIds.length === 0) return;
+
+    await notifyMany({
+      userIds,
+      kind: KIND.MAIL_INSTRUCTION,
+      title: `تهميش جديد على الكتاب الوارد ${letter.book_number}/${letter.book_year}`,
+      body: note || letter.subject || null,
+      documentId: String(letter.document_id),
+      folderId: letter.folder_id === null || letter.folder_id === undefined ? null : String(letter.folder_id),
+    });
+  } catch (error) {
+    log.error({ err: error, letterId: String(letter.correspondence_id) }, 'the instruction notice could not be sent');
+  }
+}
+
+/** The two acts someone can perform by writing on a letter on screen. */
+export const SIGNED_VERSION_ACTIONS = Object.freeze(['instruction', 'endorsement']);
+
+/**
+ * Names, in the letter's paper trail, a version the signing module just made.
+ *
+ * ─── Why the trail has to be told ──────────────────────────────────────────
+ *
+ * A head who writes his instruction and signs on the screen produces a new
+ * version exactly as a returned paper does, but through the signing module,
+ * which knows nothing of letters. Left alone, «مسار الورقة» would jump from
+ * version 1 to version 3 with nothing to say what version 2 was — the one step
+ * the trail exists to record. So the signing route reports the version here,
+ * and the trail gets the same row a scanned copy gets: the act, who did it (the
+ * signer, a real account, so no name needs typing) and his words.
+ *
+ * Only for a registered, non-annulled letter, and only while the area is on;
+ * any other document is simply not a letter and nothing is recorded. Failure is
+ * logged and reported, never thrown: the signed version is already committed.
+ *
+ * Anyone who could sign may be named here. The signing module has already
+ * checked READ and UPLOAD on the folder; a director who belongs to no
+ * department still writes instructions on the letters he is shown.
+ */
+export async function recordSignedVersion({ userId, documentId, version, action = null, note = null, signerName = null }) {
+  if (!(await isEnabled())) return { recorded: false };
+
+  const act = SIGNED_VERSION_ACTIONS.includes(action) ? action : 'endorsement';
+  const found = await sql`
+    SELECT c.correspondence_id, c.document_id, c.status, c.direction, c.book_number, c.book_year,
+           c.subject, d.folder_id
+      FROM dbo.correspondence c
+      JOIN dbo.documents d ON d.document_id = c.document_id
+     WHERE c.document_id = ${documentId}
+  `.execute(db);
+  const letter = found.rows[0];
+  if (!letter || letter.status === 'annulled') return { recorded: false };
+
+  const noteText = textOrNull(note, 1000);
+  let inserted = 0;
+  try {
+    const result = await sql`
+      INSERT INTO dbo.correspondence_version_actions
+        (correspondence_id, document_id, version_number, action, person_name, note, recorded_by)
+      SELECT ${letter.correspondence_id}, ${documentId}, ${version}, ${act},
+             ${textOrNull(signerName, 200)}, ${noteText}, ${userId}
+       WHERE NOT EXISTS (
+         SELECT 1 FROM dbo.correspondence_version_actions
+          WHERE document_id = ${documentId} AND version_number = ${version})
+    `.execute(db);
+    inserted = Number(result.numAffectedRows ?? 0);
+  } catch (error) {
+    log.error(
+      { err: error, documentId: String(documentId), version },
+      'a signed version could not be named in the paper trail',
+    );
+    return { recorded: false, failed: true };
+  }
+  // The version already carried a step (it cannot, for a version signing just
+  // made — but saying "recorded" for a row that was not written would be a lie).
+  if (inserted === 0) return { recorded: false };
+
+  if (act === 'instruction' && letter.direction === 'in') {
+    await notifyMailroomOfInstruction({ letter, actorId: userId, note: noteText });
+  }
+  return { recorded: true, action: act, letterId: String(letter.correspondence_id) };
 }
 
 /**
@@ -1191,6 +1288,12 @@ export async function addLetterVersion({
         'the «back» movement could not be written, but the version was committed',
       );
     }
+  }
+
+  // A department filing its head's instruction: the mail room is the one that
+  // forwards on it, so it is told. The clerk filing one herself needs no notice.
+  if (trail && act === 'instruction' && !registrar && letter.direction === 'in') {
+    await notifyMailroomOfInstruction({ letter, actorId: userId, note: noteText });
   }
 
   log.info(

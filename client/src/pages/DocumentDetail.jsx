@@ -718,6 +718,9 @@ export default function DocumentDetail() {
         <CorrespondencePanel
           key={documentId}
           documentId={documentId}
+          // A signature made on the next tab adds a version and a trail step;
+          // the letter tab reloads on it instead of showing the trail as it was.
+          version={document.currentVersion}
           documentTitle={document.title}
           canRead={document.canRead}
           onCount={counter('correspondence')}

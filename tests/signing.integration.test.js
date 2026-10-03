@@ -1471,4 +1471,80 @@ describe('ink signing (التوقيع)', { skip: SKIP }, () => {
     assert.equal(refused.statusCode, 423, refused.body);
     assert.equal(refused.json().error, 'legal_hold');
   });
+
+  // ── Signing a registered letter is a step in its paper trail ────────────
+
+  /*
+   * A head who writes his instruction and signs on the screen makes a new
+   * version through this module, which knows nothing of letters. Without being
+   * told, «مسار الورقة» would skip that version — the very step it exists to
+   * record — and the mail room, which forwards on the instruction, would learn
+   * of it only when someone walked over to say so.
+   */
+  test('a signature on a registered letter names its step and tells the mail room', async () => {
+    await call('PUT', '/api/settings/correspondence.enabled', boss, { value: true });
+    await call('PUT', '/api/settings/signing.enabled', boss, { value: true });
+
+    // A mail room with one member, so the notice has somewhere to go.
+    const group = await call('POST', '/api/admin/groups', boss, { name: 'قلم الوارد — توقيع' });
+    assert.equal(group.statusCode, 201, group.body);
+    const groupId = group.json().groupId ?? group.json().group?.groupId;
+    const joined = await call('POST', `/api/admin/groups/${groupId}/members`, boss, { principalId: String(id.other) });
+    assert.ok(joined.statusCode < 300, joined.body);
+    const mailroom = await call('PUT', '/api/settings/correspondence.mailroom_group', boss, { value: Number(groupId) });
+    assert.ok(mailroom.statusCode < 300, mailroom.body);
+    const { resetSettingsCache } = await import('../src/modules/settings/service.js');
+    resetSettingsCache();
+
+    const documentId = await upload(signer, 'signing', 'letter.png', await makeImage({ format: 'png', width: 600, height: 400 }), 'image/png');
+    const registered = await call('POST', '/api/correspondence/register', boss, {
+      documentId, direction: 'in', subject: 'كتاب للتوقيع', externalParty: 'وزارة', transfers: [],
+    });
+    assert.equal(registered.statusCode, 200, registered.body);
+    const letterId = registered.json().letterId;
+
+    const signed = await call('POST', `/api/signing/documents/${documentId}/sign`, signer, {
+      version: 1,
+      note: 'الشؤون المالية للإجراء',
+      letterAction: 'instruction',
+      pages: [{ number: 1, image: asDataUrl(await overlay({ width: 600, height: 400 })) }],
+    });
+    assert.equal(signed.statusCode, 201, signed.body);
+    assert.deepEqual(
+      { recorded: signed.json().letterTrail.recorded, action: signed.json().letterTrail.action },
+      { recorded: true, action: 'instruction' },
+    );
+
+    const letter = (await call('GET', `/api/correspondence/letters/${letterId}`, boss)).json();
+    const step = letter.trail.find((entry) => entry.versionNumber === 2);
+    assert.ok(step, 'the signed version is missing from the paper trail');
+    assert.equal(step.action, 'instruction');
+    assert.equal(step.personName, 'signer', 'the signer is named without anyone typing it');
+    assert.equal(step.note, 'الشؤون المالية للإجراء');
+
+    const notices = (await call('GET', '/api/notifications', other)).json().notifications;
+    assert.ok(
+      notices.some((n) => n.kind === 'mail.instruction' && String(n.documentId) === String(documentId)),
+      'the mail room was not told of the instruction',
+    );
+
+    // A second signature with no stated act is still a step: a signature.
+    const again = await call('POST', `/api/signing/documents/${documentId}/sign`, signer, {
+      version: 2,
+      pages: [{ number: 1, image: asDataUrl(await overlay({ width: 600, height: 400, corner: 'bottom-right' })) }],
+    });
+    assert.equal(again.statusCode, 201, again.body);
+    assert.equal(again.json().letterTrail.action, 'endorsement');
+  });
+
+  test('a signature on a document that is not a letter records no step', async () => {
+    const documentId = await upload(signer, 'signing', 'plain.png', await makeImage({ format: 'png', width: 500, height: 300 }), 'image/png');
+    const signed = await call('POST', `/api/signing/documents/${documentId}/sign`, signer, {
+      version: 1,
+      letterAction: 'instruction',
+      pages: [{ number: 1, image: asDataUrl(await overlay({ width: 500, height: 300 })) }],
+    });
+    assert.equal(signed.statusCode, 201, signed.body);
+    assert.equal(signed.json().letterTrail.recorded, false);
+  });
 });

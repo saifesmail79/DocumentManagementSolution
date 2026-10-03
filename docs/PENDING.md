@@ -5,7 +5,7 @@ already known. Kept here so nothing depends on anyone's memory. When an
 answer arrives, write it in the last column with its date; when an item is
 built, remove it and say so in the commit message.
 
-Last reviewed: 2026-10-01.
+Last reviewed: 2026-10-03.
 
 ## Questions for the institute
 
@@ -45,6 +45,16 @@ no longer be confused with «ما أتابعه»; the two administration tabs be
 «الأقسام ومجلد الاستلام» and «نماذج الكتب». No schema change, no new migration, no
 route or `?tab=` key changed. The letters folder keeps its name and place and is
 marked «وارد وصادر» in the tree.
+
+2026-10-03 — **the head writes on the screen.** A head or director can now write
+his instruction and sign on a registered letter from the **التوقيع** tab, without
+paper. On a registered letter the tab asks whether the writing is «تهميش (توجيه)»
+or «توقيع أو تأشير»; the new version is named that way in «مسار الورقة» under the
+signer's own name, with the words typed in the note. An instruction on an incoming
+letter — written on screen, or filed as a returned copy by a department — sends the
+mail room a «تهميش على كتاب» notice, and the forwarding form starts from those words.
+Walk-through: `docs/LETTER_JOURNEY_TEST.md` (the test users `hrhead` and `legal1`
+were added to the development system for it).
 
 2026-10-01 — **the paper trail, and one master switch.** A registered letter's
 sheet of paper is now followed, and the whole الوارد والصادر area hangs on one

@@ -96,6 +96,7 @@ docs/
   CLASSIFICATION_PILOT.md     the document-recognition pilot and what it measured
   CORRESPONDENCE_TEST_GUIDE.md  walking the mail room end to end with the demo seed
   FORMS_SIGNING_TEST_GUIDE.md   letter templates and tablet signing, step by step
+  LETTER_JOURNEY_TEST.md        one letter from arrival to reply, played as five people
   WEBHOOKS.md                 subscribing to events and verifying the signature
 tests/
 ```

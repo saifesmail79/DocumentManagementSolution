@@ -28,6 +28,7 @@ const KIND_LABELS = {
   'document.expiring': 'اقتراب انتهاء',
   'document.shared': 'مشاركة وثيقة',
   'mail.assigned': 'إحالة كتاب',
+  'mail.instruction': 'تهميش على كتاب',
 };
 
 /** 20rem, matching the w-80 the panel used to carry as a class. */

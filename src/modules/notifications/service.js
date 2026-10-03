@@ -35,6 +35,10 @@ export const KIND = Object.freeze({
   // A letter forwarded to a unit lands in every member's inbox: the transfer
   // IS the notification, so nobody has to remember to watch a folder.
   MAIL_ASSIGNED: 'mail.assigned',
+  // A head's or director's instruction recorded on a letter by someone outside
+  // the mail room. The mail room forwards on that instruction, and without a
+  // notice it learns of it only when somebody walks over to say so.
+  MAIL_INSTRUCTION: 'mail.instruction',
 });
 
 /**
